@@ -1,6 +1,6 @@
 // chachacrypt.go
 
-package main
+package chachacrypt
 
 import (
     "fmt"
