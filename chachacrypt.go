@@ -131,7 +131,7 @@ func getRandNum(max int64) int64 {
 }
 
 
-func encryption(plaintext_filename string, ciphertext_filename string) {
+func encryption(plaintext_filename string, ciphertextFilename string) {
     fmt.Println("Encrypting.\nEnter a long and random password : ")
     bytepw, err := term.ReadPassword(int(os.Stdin.Fd()))
     if err != nil {
@@ -157,7 +157,7 @@ func encryption(plaintext_filename string, ciphertext_filename string) {
         panic(err)
     }
 
-    outfile, err := os.OpenFile(ciphertext_filename, os.O_RDWR|os.O_CREATE, 0666)
+    outfile, err := os.OpenFile(ciphertextFilename, os.O_RDWR|os.O_CREATE, 0666)
     if err != nil {
         log.Println("Error when opening/creating output file.")
         panic(err)
@@ -215,7 +215,7 @@ func encryption(plaintext_filename string, ciphertext_filename string) {
 }
 
 
-func decryption(ciphertext_filename string, decryptedplaintext string) {
+func decryption(ciphertextFilename string, decryptedplaintext string) {
     fmt.Println("Decrypting.\nEnter the password : ")
     bytepw, err := term.ReadPassword(int(os.Stdin.Fd()))
     if err != nil {
@@ -223,7 +223,7 @@ func decryption(ciphertext_filename string, decryptedplaintext string) {
         panic(err)
     }
 
-    infile, err := os.Open(ciphertext_filename)
+    infile, err := os.Open(ciphertextFilename)
     if err != nil {
         log.Println("Error when opening input file.")
         panic(err)
