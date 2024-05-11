@@ -200,7 +200,7 @@ func encryption(plaintextFilename string, ciphertextFilename string) {
             // Encrypt the message and append the ciphertext to the nonce.
             encryptedMsg := aead.Seal(nonce, nonce, msg, []byte(string(adCounter))) 
             outfile.Write(encryptedMsg)
-            adCounter += 1
+            adCounter++
         }
 
         if err == io.EOF {
@@ -288,6 +288,6 @@ func decryption(ciphertextFilename string, decryptedplaintext string) {
             panic(err)
         }
 
-        adCounter += 1
+        adCounter++
     }
 }
