@@ -289,4 +289,5 @@ func decryption(ciphertext_filename string, decryptedplaintext string) {
         }
 
         ad_counter += 1
- 
+    }
+}
