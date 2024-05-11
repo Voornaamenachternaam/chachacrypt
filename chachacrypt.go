@@ -182,7 +182,7 @@ func encryption(plaintextFilename string, ciphertextFilename string) {
     defer infile.Close()
 
     buf := make([]byte, chunkSize)
-    ad_counter := 0 // associated data is a counter
+    adCounter := 0 // associated data is a counter
 
     for {
         n, err := infile.Read(buf)
@@ -198,9 +198,9 @@ func encryption(plaintextFilename string, ciphertextFilename string) {
 
             msg := buf[:n]
             // Encrypt the message and append the ciphertext to the nonce.
-            encryptedMsg := aead.Seal(nonce, nonce, msg, []byte(string(ad_counter))) 
+            encryptedMsg := aead.Seal(nonce, nonce, msg, []byte(string(adCounter))) 
             outfile.Write(encryptedMsg)
-            ad_counter += 1
+            adCounter += 1
         }
 
         if err == io.EOF {
@@ -258,7 +258,7 @@ func decryption(ciphertextFilename string, decryptedplaintext string) {
     defer outfile.Close()
 
     buf := make([]byte, decbufsize)
-    ad_counter := 0 // associated data is a counter
+    adCounter := 0 // associated data is a counter
 
     for {
         n, err := infile.Read(buf)
@@ -272,7 +272,7 @@ func decryption(ciphertextFilename string, decryptedplaintext string) {
             // Split nonce and ciphertext.
             nonce, ciphertext := encryptedMsg[:aead.NonceSize()], encryptedMsg[aead.NonceSize():]
             // Decrypt the message and check it wasn't tampered with.
-            plaintext, err := aead.Open(nil, nonce, ciphertext, []byte(string(ad_counter)))
+            plaintext, err := aead.Open(nil, nonce, ciphertext, []byte(string(adCounter)))
             if err != nil {
                 log.Println("Error when decrypting ciphertext. May be wrong password or file is damaged.")
                 panic(err)
@@ -288,6 +288,6 @@ func decryption(ciphertextFilename string, decryptedplaintext string) {
             panic(err)
         }
 
-        ad_counter += 1
+        adCounter += 1
     }
 }
