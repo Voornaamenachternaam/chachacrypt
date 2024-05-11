@@ -131,7 +131,7 @@ func getRandNum(max int64) int64 {
 }
 
 
-func encryption(plaintext_filename string, ciphertextFilename string) {
+func encryption(plaintextFilename string, ciphertextFilename string) {
     fmt.Println("Encrypting.\nEnter a long and random password : ")
     bytepw, err := term.ReadPassword(int(os.Stdin.Fd()))
     if err != nil {
@@ -174,7 +174,7 @@ func encryption(plaintext_filename string, ciphertextFilename string) {
         panic(err)
     }
 
-    infile, err := os.Open(plaintext_filename)
+    infile, err := os.Open(plaintextFilename)
     if err != nil {
         log.Println("Error when opening input file.")
         panic(err)
