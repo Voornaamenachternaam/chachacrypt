@@ -1,293 +1,239 @@
 // chachacrypt.go
 
-package chachacrypt
+package main
 
 import (
-    "fmt"
-    "io"
-    "log"
-    "os"
-    "bytes"
-    "flag"
-    "math/big"
-    cryptorand "crypto/rand"
-    "golang.org/x/crypto/argon2"
-    "golang.org/x/crypto/chacha20poly1305"
-    "golang.org/x/term"
-)
+	"bytes"
+	"crypto/rand"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"strings"
 
+	"golang.org/x/crypto/argon2"
+	"golang.org/x/crypto/chacha20poly1305"
+	"golang.org/x/term"
+)
 
 const (
-    SaltSize = 32 // in bytes
-    NonceSize = 24 // in bytes. taken from aead.NonceSize()
-    KeySize = uint32(32) // KeySize is 32 bytes (256 bits).
-    KeyTime = uint32(5)
-    KeyMemory = uint32(1024*64) // KeyMemory in KiB. here, 64 MiB.
-    KeyThreads = uint8(4)
-    chunkSize = 1024*32 // chunkSize in bytes. here, 32 KiB.
+	SaltSize   = 32        // in bytes
+	KeySize    = 32        // KeySize is 32 bytes (256 bits).
+	KeyTime    = uint32(5)
+	KeyMemory  = uint32(1024 * 64) // KeyMemory in KiB. here, 64 MiB.
+	KeyThreads = uint8(4)
+	ChunkSize  = 1024 * 32 // chunkSize in bytes. here, 32 KiB.
 )
 
-
 func main() {
-    fmt.Println("Welcome to chachacrypt")
+	fmt.Println("Welcome to chachacrypt")
 
-    if len(os.Args) == 1 {
-        showHelp()
-        os.Exit(0)
-    }
+	// Define command-line flags
+	enc := flag.NewFlagSet("enc", flag.ExitOnError)
+	encInput := enc.String("i", "", "Input file to encrypt")
+	encOutput := enc.String("o", "", "Output filename")
 
-    enc := flag.NewFlagSet("enc", flag.ExitOnError)
-    enci := enc.String("i", "", "Provide an input file to encrypt.")
-    enco := enc.String("o", "", "Provide an output filename.")
+	dec := flag.NewFlagSet("dec", flag.ExitOnError)
+	decInput := dec.String("i", "", "Input file to decrypt")
+	decOutput := dec.String("o", "", "Output filename")
 
-    dec := flag.NewFlagSet("dec", flag.ExitOnError)
-    deci := dec.String("i", "", "Provide an input file to decrypt.")
-    deco := dec.String("o", "", "Provide an output filename.")
+	pw := flag.NewFlagSet("pw", flag.ExitOnError)
+	pwSize := pw.Int("s", 15, "Password length")
 
-    pw := flag.NewFlagSet("pw", flag.ExitOnError)
-    pwsize := pw.Int("s", 15, "Generate password of given length.")
+	// Parse command-line arguments
+	flag.Parse()
+	if len(os.Args) < 2 {
+		showHelp()
+		os.Exit(1)
+	}
 
-    switch os.Args[1] {
-        case "enc" :
-            if err := enc.Parse(os.Args[2:]); err != nil {
-                log.Println("Error when parsing arguments to enc")
-                panic(err)
-            }
-            if *enci == "" {
-                fmt.Println("Provide an input file to encrypt.")
-                os.Exit(1)
-            }
-            if *enco != "" {
-                encryption(*enci, *enco)
-            } else {
-                encryption(*enci, *enci+".enc")
-            }
+	switch os.Args[1] {
+	case "enc":
+		enc.Parse(os.Args[2:])
+		if *encInput == "" {
+			fmt.Println("Provide an input file to encrypt.")
+			os.Exit(1)
+		}
+		if *encOutput == "" {
+			*encOutput = *encInput + ".enc"
+		}
+		encryption(*encInput, *encOutput)
 
-        case "dec" :
-            if err := dec.Parse(os.Args[2:]); err != nil {
-                log.Println("Error when parsing arguments to dec")
-                panic(err)
-            }
-            if *deci == "" {
-                fmt.Println("Provide an input file to decrypt.")
-                os.Exit(1)
-            }
-            if *deco != "" {
-                decryption(*deci, *deco)
-            } else {
-                dd := *deci
-                o := "decrypted-" + *deci
-                if dd[len(dd)-4:] == ".enc" { 
-                    o = "decrypted-" + dd[:len(dd)-4]
-                }
-                decryption(*deci, o)
-            }
+	case "dec":
+		dec.Parse(os.Args[2:])
+		if *decInput == "" {
+			fmt.Println("Provide an input file to decrypt.")
+			os.Exit(1)
+		}
+		if *decOutput == "" {
+			*decOutput = strings.TrimSuffix(*decInput, ".enc")
+		}
+		decryption(*decInput, *decOutput)
 
-        case "pw" :
-            if err := pw.Parse(os.Args[2:]); err != nil {
-                log.Println("Error when parsing arguments to pw")
-                panic(err)
-            }
-            fmt.Println("Password :", getPassword(*pwsize))
+	case "pw":
+		pw.Parse(os.Args[2:])
+		fmt.Println("Password:", getPassword(*pwSize))
 
-        default :
-            showHelp()
-    }
+	default:
+		showHelp()
+	}
 }
-
 
 func showHelp() {
-    fmt.Println("Example commands :")
-    fmt.Println("Encrypt a file : chachacrypt enc -i plaintext.txt -o ciphertext.enc")
-    fmt.Println("Decrypt a file : chachacrypt dec -i ciphertext.enc -o decrypted-plaintext.txt")
-    fmt.Println("Generate a password : chachacrypt pw -s 15")
+	fmt.Println("Example commands:")
+	fmt.Println("Encrypt a file: chachacrypt enc -i plaintext.txt -o ciphertext.enc")
+	fmt.Println("Decrypt a file: chachacrypt dec -i ciphertext.enc -o decrypted-plaintext.txt")
+	fmt.Println("Generate a password: chachacrypt pw -s 15")
 }
-
 
 func getPassword(pwLength int) string {
-    smallAlpha := "abcdefghijklmnopqrstuvwxyz"
-    bigAlpha := "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    digits := "0123456789"
-    specialChars := "`~!@#$%^&*()_+-={}|[]\\;':\",./<>?"
+	// Define character sets
+	characterSets := []string{
+		"abcdefghijklmnopqrstuvwxyz",
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+		"0123456789",
+		"`~!@#$%^&*()_+-={}|[]\\;':\",./<>?",
+	}
 
-    letters := smallAlpha + bigAlpha + digits + specialChars
-
-    pw := ""
-    for i := 0; i < pwLength; i++ {
-        pw += string(letters[getRandNum(int64(len(letters)))])
-    }
-
-    return pw
+	var password strings.Builder
+	rng := rand.Reader
+	for i := 0; i < pwLength; i++ {
+		charSet := characterSets[i%len(characterSets)]
+		charIndex, err := rand.Int(rng, big.NewInt(int64(len(charSet))))
+		if err != nil {
+			log.Fatal("Error generating password:", err)
+		}
+		password.WriteByte(charSet[charIndex.Int64()])
+	}
+	return password.String()
 }
 
+func encryption(plaintextFilename, ciphertextFilename string) {
+	// Prompt for password
+	fmt.Println("Encrypting.\nEnter a long and random password:")
+	password := readPassword()
 
-func getRandNum(max int64) int64 {
-    if i, err := cryptorand.Int(cryptorand.Reader, big.NewInt(max)); err != nil {
-        log.Println("Error when generating random num : ", err)
-        panic(err)
-    } else {
-        return i.Int64()
-    }
+	// Generate salt
+	salt := make([]byte, SaltSize)
+	if _, err := rand.Read(salt); err != nil {
+		log.Fatal("Error generating random salt:", err)
+	}
+
+	// Derive key from password and salt using Argon2
+	key := argon2.IDKey([]byte(password), salt, KeyTime, KeyMemory, KeyThreads, KeySize)
+
+	// Open input and output files
+	infile, err := os.Open(plaintextFilename)
+	if err != nil {
+		log.Fatal("Error opening input file:", err)
+	}
+	defer infile.Close()
+
+	outfile, err := os.Create(ciphertextFilename)
+	if err != nil {
+		log.Fatal("Error creating output file:", err)
+	}
+	defer outfile.Close()
+
+	// Write salt to the beginning of the output file
+	if _, err := outfile.Write(salt); err != nil {
+		log.Fatal("Error writing salt to output file:", err)
+	}
+
+	// Create AEAD cipher with ChaCha20-Poly1305
+	aead, err := chacha20poly1305.NewX(key)
+	if err != nil {
+		log.Fatal("Error creating cipher:", err)
+	}
+
+	// Encrypt the file chunk by chunk
+	buf := make([]byte, ChunkSize)
+	nonce := make([]byte, aead.NonceSize())
+	for {
+		n, err := infile.Read(buf)
+		if n == 0 && err == io.EOF {
+			break
+		} else if err != nil && err != io.EOF {
+			log.Fatal("Error reading from input file:", err)
+		}
+
+		// Generate unique nonce for each chunk
+		if _, err := rand.Read(nonce); err != nil {
+			log.Fatal("Error generating random nonce:", err)
+		}
+
+		// Encrypt the chunk and write to output file
+		encrypted := aead.Seal(nil, nonce, buf[:n], nil)
+		if _, err := outfile.Write(encrypted); err != nil {
+			log.Fatal("Error writing encrypted data to output file:", err)
+		}
+	}
 }
 
+func decryption(ciphertextFilename, plaintextFilename string) {
+	// Prompt for password
+	fmt.Println("Decrypting.\nEnter the password:")
+	password := readPassword()
 
-func encryption(plaintextFilename string, ciphertextFilename string) {
-    fmt.Println("Encrypting.\nEnter a long and random password : ")
-    bytepw, err := term.ReadPassword(int(os.Stdin.Fd()))
-    if err != nil {
-        log.Println("Error when reading password from terminal")
-        panic(err)
-    }
+	// Open input and output files
+	infile, err := os.Open(ciphertextFilename)
+	if err != nil {
+		log.Fatal("Error opening input file:", err)
+	}
+	defer infile.Close()
 
-    fmt.Println("Enter the same password again : ")
-    bytepw2, err := term.ReadPassword(int(os.Stdin.Fd()))
-    if err != nil {
-        log.Println("Error when reading password2 from terminal.")
-        panic(err)
-    }
+	outfile, err := os.Create(plaintextFilename)
+	if err != nil {
+		log.Fatal("Error creating output file:", err)
+	}
+	defer outfile.Close()
 
-    if bytes.Compare(bytepw, bytepw2) != 0 {
-        log.Println("Passwords don't match! Exiting.")
-        os.Exit(1)
-    }
+	// Read salt from the beginning of the input file
+	salt := make([]byte, SaltSize)
+	if _, err := infile.Read(salt); err != nil {
+		log.Fatal("Error reading salt from input file:", err)
+	}
 
-    salt := make([]byte, SaltSize)
-    if n, err := cryptorand.Read(salt); err != nil || n != SaltSize {
-        log.Println("Error when generating radom salt.")
-        panic(err)
-    }
+	// Derive key from password and salt using Argon2
+	key := argon2.IDKey([]byte(password), salt, KeyTime, KeyMemory, KeyThreads, KeySize)
 
-    outfile, err := os.OpenFile(ciphertextFilename, os.O_RDWR|os.O_CREATE, 0666)
-    if err != nil {
-        log.Println("Error when opening/creating output file.")
-        panic(err)
-    }
-    defer outfile.Close()
+	// Create AEAD cipher with ChaCha20-Poly1305
+	aead, err := chacha20poly1305.NewX(key)
+	if err != nil {
+		log.Fatal("Error creating cipher:", err)
+	}
 
-    outfile.Write(salt)
+	// Decrypt the file chunk by chunk
+	buf := make([]byte, ChunkSize+aead.NonceSize())
+	for {
+		n, err := infile.Read(buf)
+		if n == 0 && err == io.EOF {
+			break
+		} else if err != nil && err != io.EOF {
+			log.Fatal("Error reading from input file:", err)
+		}
 
-    key := argon2.IDKey(bytepw, salt, KeyTime, KeyMemory, KeyThreads, KeySize)
+		// Extract nonce and ciphertext from the chunk
+		nonce := buf[:aead.NonceSize()]
+		ciphertext := buf[aead.NonceSize():n]
 
-    aead, err := chacha20poly1305.NewX(key)
-    if err != nil {
-        log.Println("Error when creating cipher.")
-        panic(err)
-    }
+		// Decrypt the chunk and write to output file
+		plaintext, err := aead.Open(nil, nonce, ciphertext, nil)
+		if err != nil {
+			log.Fatal("Error decrypting chunk:", err)
+		}
 
-    infile, err := os.Open(plaintextFilename)
-    if err != nil {
-        log.Println("Error when opening input file.")
-        panic(err)
-    }
-    defer infile.Close()
-
-    buf := make([]byte, chunkSize)
-    adCounter := 0 // associated data is a counter
-
-    for {
-        n, err := infile.Read(buf)
-
-        if n > 0 {
-            // Select a random nonce, and leave capacity for the ciphertext.
-            nonce := make([]byte, aead.NonceSize(), aead.NonceSize() + n + aead.Overhead())
-            if m, err := cryptorand.Read(nonce); err != nil || m != aead.NonceSize() {
-                log.Println("Error when generating random nonce :", err)
-                log.Println("Generated nonce is of following size. m : ", m)
-                panic(err)
-            }
-
-            msg := buf[:n]
-            // Encrypt the message and append the ciphertext to the nonce.
-            encryptedMsg := aead.Seal(nonce, nonce, msg, []byte(string(adCounter))) 
-            outfile.Write(encryptedMsg)
-            adCounter++
-        }
-
-        if err == io.EOF {
-            break
-        }
-
-        if err != nil {
-            log.Println("Error when reading input file chunk :", err)
-            panic(err)
-        }
-    }
+		if _, err := outfile.Write(plaintext); err != nil {
+			log.Fatal("Error writing decrypted data to output file:", err)
+		}
+	}
 }
 
-
-func decryption(ciphertextFilename string, decryptedplaintext string) {
-    fmt.Println("Decrypting.\nEnter the password : ")
-    bytepw, err := term.ReadPassword(int(os.Stdin.Fd()))
-    if err != nil {
-        log.Println("Error when reading password from terminal.")
-        panic(err)
-    }
-
-    infile, err := os.Open(ciphertextFilename)
-    if err != nil {
-        log.Println("Error when opening input file.")
-        panic(err)
-    }
-    defer infile.Close()
-
-    salt := make([]byte, SaltSize)
-    n, err := infile.Read(salt)
-    if n != SaltSize {
-        log.Printf("Error. Salt should be %d bytes long. salt n : %d", SaltSize, n)
-        log.Printf("Another Error :", err)
-        panic("Generated salt is not of required length")
-    }
-    if err == io.EOF {
-        log.Println("Encountered EOF error.")
-        panic(err)
-    }
-    if err != nil {
-        log.Println("Error encountered :", err)
-        panic(err)
-    }
-
-    key := argon2.IDKey(bytepw, salt, KeyTime, KeyMemory, KeyThreads, KeySize)
-    aead, err := chacha20poly1305.NewX(key)
-    decbufsize := aead.NonceSize() + chunkSize + aead.Overhead()
-
-    outfile, err := os.OpenFile(decryptedplaintext, os.O_RDWR|os.O_CREATE, 0666)
-    if err != nil {
-        log.Println("Error when opening output file.")
-        panic(err)
-    }
-    defer outfile.Close()
-
-    buf := make([]byte, decbufsize)
-    adCounter := 0 // associated data is a counter
-
-    for {
-        n, err := infile.Read(buf)
-        if n > 0 {
-            encryptedMsg := buf[:n]
-            if len(encryptedMsg) < aead.NonceSize() {
-                log.Println("Error. Ciphertext is too short.")
-                panic("Ciphertext too short")
-            }
-
-            // Split nonce and ciphertext.
-            nonce, ciphertext := encryptedMsg[:aead.NonceSize()], encryptedMsg[aead.NonceSize():]
-            // Decrypt the message and check it wasn't tampered with.
-            plaintext, err := aead.Open(nil, nonce, ciphertext, []byte(string(adCounter)))
-            if err != nil {
-                log.Println("Error when decrypting ciphertext. May be wrong password or file is damaged.")
-                panic(err)
-            }
-
-            outfile.Write(plaintext)
-        }
-        if err == io.EOF {
-            break
-        }
-        if err != nil {
-            log.Printf("Error encountered. Read %d bytes: %v", n, err)
-            panic(err)
-        }
-
-        adCounter++
-    }
+func readPassword() string {
+	password, err := term.ReadPassword(int(os.Stdin.Fd()))
+	if err != nil {
+		log.Fatal("Error reading password from terminal:", err)
+	}
+	return string(password)
 }
