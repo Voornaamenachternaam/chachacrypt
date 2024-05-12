@@ -39,7 +39,7 @@ func main() {
 	decOutput := dec.String("o", "", "Output filename")
 
 	pw := flag.NewFlagSet("pw", flag.ExitOnError)
-	pwSize := pw.Int("s", 15, "Password length")
+	pwSizeFlag := pw.Int("s", 15, "Password length")
 
 	// Parse command-line arguments
 	flag.Parse()
@@ -73,7 +73,7 @@ func main() {
 
 	case "pw":
 		pw.Parse(os.Args[2:])
-		fmt.Println("Password:", getPassword(*pwSize))
+		fmt.Println("Password:", getPassword(*pwSizeFlag))
 
 	default:
 		showHelp()
