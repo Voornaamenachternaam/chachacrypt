@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"os"
 	"strings"
 
@@ -165,6 +166,9 @@ func encryption(plaintextFilename, ciphertextFilename string) {
 
 		// Encrypt the chunk and write to output file
 		encrypted := aead.Seal(nil, nonce, buf[:n], nil)
+		if _, err := outfile.Write(nonce); err != nil {
+			log.Fatal("Error writing nonce to output file:", err)
+		}
 		if _, err := outfile.Write(encrypted); err != nil {
 			log.Fatal("Error writing encrypted data to output file:", err)
 		}
@@ -231,7 +235,9 @@ func decryption(ciphertextFilename, plaintextFilename string) {
 }
 
 func readPassword() string {
+	fmt.Print("Enter password: ")
 	password, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Println()
 	if err != nil {
 		log.Fatal("Error reading password from terminal:", err)
 	}
