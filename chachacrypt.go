@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/rand"
 	"flag"
 	"fmt"
