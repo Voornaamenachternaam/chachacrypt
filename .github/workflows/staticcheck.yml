@@ -1,0 +1,28 @@
+name: "CI"
+on: ["push", "pull_request"]
+
+jobs:
+  ci:
+    name: "Run CI"
+    strategy:
+      fail-fast: false
+      matrix:
+        os:  ["windows-latest", "ubuntu-latest", "macOS-latest"]
+        go:  ["1.18.x", "1.19.x"]
+        dir: ["server", "client"]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        fetch-depth: 1
+    - uses: WillAbides/setup-go-faster@v1.14.0
+      with:
+        go-version: ${{ matrix.go }}
+    - run: "go test ./..."
+    - run: "go vet ./..."
+    - uses: dominikh/staticcheck-action@v1
+      with:
+        version: "latest"
+        install-go: false
+        cache-key: ${{ matrix.go }}
+        working-directory: ${{ matrix.dir }}
