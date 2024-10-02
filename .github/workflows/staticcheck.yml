@@ -1,2 +1,0 @@
-name: Staticcheck
-uses: dominikh/staticcheck-action@v1.3.1
