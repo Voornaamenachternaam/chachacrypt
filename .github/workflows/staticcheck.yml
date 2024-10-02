@@ -1,14 +1,2 @@
-name: "CI"
-on: ["push", "pull_request"]
-
-jobs:
-  ci:
-    name: "Run CI"
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v2
-      with:
-        fetch-depth: 1
-    - uses: dominikh/staticcheck-action@v1.3.1
-      with:
-        version: "latest"
+name: Staticcheck
+uses: dominikh/staticcheck-action@v1.3.1
