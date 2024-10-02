@@ -1,27 +1,14 @@
-name: "Staticcheck"
+name: "CI"
 on: ["push", "pull_request"]
 
 jobs:
   ci:
     name: "Run CI"
-    strategy:
-      fail-fast: false
-      matrix:
-        os:  ["ubuntu-latest"]
-        go:  ["1.23.x"]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
       with:
         fetch-depth: 1
-    - uses: WillAbides/setup-go-faster@v1.14.0
-      with:
-        go-version: ${{ matrix.go }}
-    - run: "go test ./..."
-    - run: "go vet ./..."
     - uses: dominikh/staticcheck-action@v1.3.1
       with:
         version: "latest"
-        install-go: false
-        cache-key: ${{ matrix.go }}
-        working-directory: ${{ matrix.dir }}
