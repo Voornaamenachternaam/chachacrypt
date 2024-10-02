@@ -1,6 +1,6 @@
-name: Staticcheck
-uses: dominikh/staticcheck-action@v1.3.1
-on: ["push", "pull_request"]
+- name: Staticcheck
+  uses: dominikh/staticcheck-action@v1.3.1
+  on: ["push", "pull_request"]
 
 jobs:
   ci:
