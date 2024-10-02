@@ -6,6 +6,12 @@ env:
   - GO111MODULE=on
   - CGO_ENABLED=0
 
+name: Save state
+run: echo "{name}={value}" >> $GITHUB_STATE
+
+name: Set output
+run: echo "{name}={value}" >> $GITHUB_OUTPUT
+
 # (Optional) Flags for the compiler.
 flags:
   - -trimpath
