@@ -18,4 +18,4 @@ jobs:
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         goarch: amd64
-        compress_assets: FALSE
+        compress_assets: "FALSE"
