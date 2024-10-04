@@ -13,9 +13,9 @@ jobs:
     name: release linux/amd64
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4.2.0
-    - uses: wangyoucao577/go-release-action@v1.51
+    - uses: actions/checkout@master
+    - uses: wangyoucao577/go-release-action@master
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
-        goos: linux
+        goos: windows
         goarch: amd64
