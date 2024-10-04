@@ -9,9 +9,9 @@ permissions:
     packages: write
 
 jobs:
-  release-linux-amd64:
-    name: release linux/amd64
-    runs-on: ubuntu-latest
+  release-windows-amd64:
+    name: release windows/amd64
+    runs-on: windows-latest
     steps:
     - uses: actions/checkout@master
     - uses: wangyoucao577/go-release-action@master
