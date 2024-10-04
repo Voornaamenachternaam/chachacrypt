@@ -251,5 +251,5 @@ func readPassword() string {
 	if err != nil {
 		log.Fatal("Error reading password from terminal:", err)
 	}
-	return string(password)
+	return strings.TrimSpace(string(password))
 }
