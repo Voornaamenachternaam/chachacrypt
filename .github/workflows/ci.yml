@@ -16,8 +16,11 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
 
-      - name: Run Tests
-        run: go test -v ./...
+      - name: Run mod init
+        run: go mod init chachacrypt -v ./...
+  
+      - name: Run tidy init
+        run: go mod tidy -v ./...
 
       - name: Build
         run: go build -v ./...
