@@ -19,4 +19,4 @@ jobs:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         goos: windows
         goarch: amd64
-        executable_compression: OFF
+        executable_compression: AUTO
