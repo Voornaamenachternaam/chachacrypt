@@ -1,4 +1,4 @@
-module github.com/Voornaamenachternaam/chachacrypt
+module chachacrypt
 
 go 1.23.1
 
