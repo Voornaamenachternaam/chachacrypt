@@ -29,7 +29,6 @@ const (
 	defaultChunkSize  = 1024 * 32
 )
 
-// Config holds the cryptographic parameters.
 type Config struct {
 	SaltSize   int
 	KeySize    int
@@ -41,21 +40,21 @@ type Config struct {
 
 var config Config
 
-// init sets the default configuration.
+// Initialize the default configuration.
 func init() {
-	config.SaltSize = defaultSaltSize
-	config.KeySize = defaultKeySize
-	config.KeyTime = defaultKeyTime
-	config.KeyMemory = defaultKeyMemory
-	config.KeyThreads = defaultKeyThreads
-	config.ChunkSize = defaultChunkSize
+	config = Config{
+		SaltSize:   defaultSaltSize,
+		KeySize:    defaultKeySize,
+		KeyTime:    defaultKeyTime,
+		KeyMemory:  defaultKeyMemory,
+		KeyThreads: defaultKeyThreads,
+		ChunkSize:  defaultChunkSize,
+	}
 }
 
-// main function to parse commands and invoke appropriate actions.
 func main() {
 	fmt.Println("Welcome to chachacrypt")
 
-	// Define command-line flags
 	enc := flag.NewFlagSet("enc", flag.ExitOnError)
 	encInput := enc.String("i", "", "Input file to encrypt")
 	encOutput := enc.String("o", "", "Output filename")
@@ -67,7 +66,6 @@ func main() {
 	pw := flag.NewFlagSet("pw", flag.ExitOnError)
 	pwSizeFlag := pw.Int("s", 15, "Password length")
 
-	// Parse command-line arguments
 	if len(os.Args) < 2 {
 		showHelp()
 		os.Exit(1)
@@ -96,14 +94,12 @@ func main() {
 		_ = pw.Parse(os.Args[2:])
 		password := getPassword(*pwSizeFlag)
 		fmt.Println("Password generated successfully.")
-		// Use the password as needed without logging it
 
 	default:
 		showHelp()
 	}
 }
 
-// showHelp displays usage instructions.
 func showHelp() {
 	fmt.Println("Example commands:")
 	fmt.Println("Encrypt a file: chachacrypt enc -i plaintext.txt -o ciphertext.enc")
@@ -111,10 +107,9 @@ func showHelp() {
 	fmt.Println("Generate a password: chachacrypt pw -s 15")
 }
 
-// getPassword generates a random password of specified length.
 func getPassword(pwLength int) string {
 	if pwLength < 12 {
-		log.Fatal("Error: Password length should be at least 12 characters.")
+		log.Fatal("Password length must be at least 12 characters.")
 	}
 
 	characterSets := []string{
@@ -126,11 +121,17 @@ func getPassword(pwLength int) string {
 
 	var password strings.Builder
 	rng := rand.Reader
+
 	for i := 0; i < pwLength; i++ {
-		charSet := characterSets[i%len(characterSets)]
+		setIndex, err := rand.Int(rng, big.NewInt(int64(len(characterSets))))
+		if err != nil {
+			log.Fatal("Error selecting character set:", err)
+		}
+		charSet := characterSets[setIndex.Int64()]
+
 		charIndex, err := rand.Int(rng, big.NewInt(int64(len(charSet))))
 		if err != nil {
-			log.Fatal("Error generating password:", err)
+			log.Fatal("Error generating password character:", err)
 		}
 		password.WriteByte(charSet[charIndex.Int64()])
 	}
@@ -138,7 +139,6 @@ func getPassword(pwLength int) string {
 	return password.String()
 }
 
-// validateFileInput checks if the input and output file names are valid.
 func validateFileInput(inputFile, outputFile string) error {
 	if inputFile == "" || !fileExists(inputFile) {
 		return errors.New("provide a valid input file")
@@ -149,7 +149,6 @@ func validateFileInput(inputFile, outputFile string) error {
 	return nil
 }
 
-// encryption encrypts the input file and writes to the output file.
 func encryption(plaintextFilename, ciphertextFilename string) error {
 	fmt.Println("Encrypting.\nEnter a long and random password:")
 	password := readPassword()
@@ -183,7 +182,7 @@ func encryption(plaintextFilename, ciphertextFilename string) error {
 	}
 
 	var wg sync.WaitGroup
-	nonce := make([]byte, aead.NonceSize())
+	var counter uint64
 	buf := make([]byte, config.ChunkSize)
 
 	for {
@@ -195,21 +194,19 @@ func encryption(plaintextFilename, ciphertextFilename string) error {
 			return fmt.Errorf("error reading from input file: %w", err)
 		}
 
-		if _, err := rand.Read(nonce); err != nil {
-			return fmt.Errorf("error generating random nonce: %w", err)
-		}
+		chunk := make([]byte, n)
+		copy(chunk, buf[:n])
+
+		nonce := generateNonce(counter, aead.NonceSize())
+		counter++
 
 		wg.Add(1)
 		go func(data []byte) {
 			defer wg.Done()
 			encrypted := aead.Seal(nil, nonce, data, nil)
-			if _, err := outfile.Write(nonce); err != nil {
-				log.Printf("error writing nonce to output file: %v", err)
-			}
-			if _, err := outfile.Write(encrypted); err != nil {
-				log.Printf("error writing encrypted data to output file: %v", err)
-			}
-		}(buf[:n])
+			outfile.Write(nonce)
+			outfile.Write(encrypted)
+		}(chunk)
 	}
 
 	wg.Wait()
@@ -218,7 +215,6 @@ func encryption(plaintextFilename, ciphertextFilename string) error {
 	return nil
 }
 
-// decryption decrypts the input file and writes to the output file.
 func decryption(ciphertextFilename, plaintextFilename string) error {
 	fmt.Println("Decrypting.\nEnter the password:")
 	password := readPassword()
@@ -249,6 +245,7 @@ func decryption(ciphertextFilename, plaintextFilename string) error {
 
 	nonce := make([]byte, aead.NonceSize())
 	buf := make([]byte, config.ChunkSize+aead.NonceSize())
+
 	for {
 		n, err := infile.Read(buf)
 		if n == 0 {
@@ -256,10 +253,6 @@ func decryption(ciphertextFilename, plaintextFilename string) error {
 				break
 			}
 			return fmt.Errorf("error reading from input file: %w", err)
-		}
-
-		if n < aead.NonceSize() {
-			return fmt.Errorf("not enough data to read nonce")
 		}
 
 		copy(nonce, buf[:aead.NonceSize()])
@@ -271,7 +264,7 @@ func decryption(ciphertextFilename, plaintextFilename string) error {
 		}
 
 		if _, err := outfile.Write(plaintext); err != nil {
-			return fmt.Errorf("error writing decrypted data to output file: %w", err)
+			return fmt.Errorf("error writing decrypted data: %w", err)
 		}
 	}
 
@@ -280,36 +273,29 @@ func decryption(ciphertextFilename, plaintextFilename string) error {
 	return nil
 }
 
-// readPassword securely reads the password from the terminal.
+func generateNonce(counter uint64, nonceSize int) []byte {
+	nonce := make([]byte, nonceSize)
+	binary.LittleEndian.PutUint64(nonce, counter)
+	return nonce
+}
+
 func readPassword() string {
 	fmt.Print("Enter password: ")
 	password, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
 	if err != nil {
-		log.Fatal("Error reading password from terminal:", err)
+		log.Fatal("Error reading password:", err)
 	}
 	defer zeroBytes(password)
 	return strings.TrimSpace(string(password))
+}
 
-// zeroBytes securely clears the byte slice
 func zeroBytes(b []byte) {
-    for i := range b {
-        b[i] = 0
-    }
+	for i := range b {
+		b[i] = 0
+	}
 }
 
-// someFunction demonstrates how to use zeroBytes to handle sensitive data.
-func someFunction() string {
-    password := []byte("examplePassword")
-    
-    // Ensure zeroing happens when the function returns, even in case of an error.
-    defer zeroBytes(password) 
-
-    // Process the password (e.g., convert it to a string and trim spaces).
-    return strings.TrimSpace(string(password))
-}
-
-// fileExists checks if the file exists.
 func fileExists(filename string) bool {
 	info, err := os.Stat(filename)
 	return err == nil && !info.IsDir()
