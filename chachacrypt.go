@@ -94,7 +94,9 @@ func main() {
 
 	case "pw":
 		_ = pw.Parse(os.Args[2:])
-		fmt.Println("Generated Password:", getPassword(*pwSizeFlag))
+		password := getPassword(*pwSizeFlag)
+		fmt.Println("Password generated successfully.")
+		// Use the password as needed without logging it
 
 	default:
 		showHelp()
