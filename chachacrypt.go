@@ -293,9 +293,16 @@ func readPassword() string {
 
 // zeroBytes securely clears the byte slice
 func zeroBytes(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
+    for i := range b {
+        b[i] = 0
+    }
+}
+
+// Example usage of zeroBytes inside a function
+func someFunction() string {
+    password := []byte("examplePassword")
+    defer zeroBytes(password) // Ensure zeroing happens when function returns
+    return strings.TrimSpace(string(password))
 }
 
 // fileExists checks if the file exists.
