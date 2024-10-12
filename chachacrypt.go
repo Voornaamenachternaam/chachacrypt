@@ -298,10 +298,14 @@ func zeroBytes(b []byte) {
     }
 }
 
-// Example usage of zeroBytes inside a function
+// someFunction demonstrates how to use zeroBytes to handle sensitive data.
 func someFunction() string {
     password := []byte("examplePassword")
-    defer zeroBytes(password) // Ensure zeroing happens when function returns
+    
+    // Ensure zeroing happens when the function returns, even in case of an error.
+    defer zeroBytes(password) 
+
+    // Process the password (e.g., convert it to a string and trim spaces).
     return strings.TrimSpace(string(password))
 }
 
