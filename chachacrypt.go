@@ -29,13 +29,14 @@ const (
 	defaultChunkSize  = 1024 * 32
 )
 
+// Config holds cryptographic parameters for encryption and decryption.
 type Config struct {
-	SaltSize   int
-	KeySize    int
-	KeyTime    uint32
-	KeyMemory  uint32
-	KeyThreads uint8
-	ChunkSize  int
+    SaltSize   int    // Size of the salt in bytes.
+    KeySize    int    // Size of the key in bytes.
+    KeyTime    uint32 // Time cost for Argon2 key derivation.
+    KeyMemory  uint32 // Memory cost for Argon2 key derivation.
+    KeyThreads uint8  // Number of threads for Argon2.
+    ChunkSize  int    // Size of each chunk processed during encryption.
 }
 
 var config Config
