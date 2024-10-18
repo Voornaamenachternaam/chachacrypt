@@ -35,7 +35,7 @@ type Config struct {
     KeySize    int    // Size of the key in bytes.
     KeyTime    uint32 // Time cost for Argon2 key derivation.
     KeyMemory  uint32 // Memory cost for Argon2 key derivation.
-    KeyThreads uint8  // Number of threads for Argon2.
+    KeyThreads uint8  // Number of threads used for Argon2.
     ChunkSize  int    // Size of each chunk processed during encryption.
 }
 
