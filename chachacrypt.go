@@ -151,7 +151,7 @@ func validateFileInput(inputFile, outputFile string) error {
 }
 
 func encryption(plaintextFilename, ciphertextFilename string) error {
-	fmt.Println("Encrypting.\nEnter a long and random password:")
+	fmt.Println("Encrypting.\nEnter a long and very random password:")
 	password := readPassword()
 
 	salt := make([]byte, config.SaltSize)
