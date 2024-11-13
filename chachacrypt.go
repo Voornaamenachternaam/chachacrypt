@@ -41,7 +41,7 @@ type Config struct {
 
 var config Config
 
-// Initialize the default configuration.
+// Initialize the default key configuration.
 func init() {
 	config = Config{
 		SaltSize:   defaultSaltSize,
