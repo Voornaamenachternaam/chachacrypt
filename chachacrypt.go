@@ -29,7 +29,7 @@ const (
 	defaultChunkSize  = 1024 * 32
 )
 
-// Config holds cryptographic parameters for encryption and decryption.
+// Config holds all cryptographic parameters for encryption and decryption.
 type Config struct {
     SaltSize   int    // Size of the salt in bytes.
     KeySize    int    // Size of the key in bytes.
