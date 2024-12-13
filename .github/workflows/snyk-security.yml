@@ -2,7 +2,7 @@ name: Example workflow for Golang using Snyk
 on: push
 jobs:
   security:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@master
       - name: Run Snyk to check for vulnerabilities
