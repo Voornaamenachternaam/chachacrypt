@@ -6,7 +6,11 @@ on:
     types:
       - opened
       - synchronize
-permissions: write-all
+
+permissions:
+  pull-requests: write
+  contents: read
+
 jobs:
   code_review:
     runs-on: ubuntu-latest
