@@ -20,14 +20,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@main
 
       - id: octoscan
         name: Run octoscan
-        uses: synacktiv/action-octoscan@v1
+        uses: synacktiv/action-octoscan@main
 
       - name: Upload SARIF file to GitHub
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@main
         with:
           sarif_file: "${{steps.octoscan.outputs.sarif_output}}"
           category: octoscan
