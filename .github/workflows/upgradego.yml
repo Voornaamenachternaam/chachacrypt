@@ -1,0 +1,19 @@
+name: Upgrade Go
+
+on: 
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * 1,3,6"  
+
+jobs:
+  upgrade-go:
+    runs-on: ubuntu-latest
+    permissions: # Only required if using default `secrets.GITHUB_TOKEN`
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: StefMa/Upgrade-Go-Action@main
+        with:
+          base-branch: 'master'
+          gh-token: ${{ secrets.CUSTOM_TOKEN }}
