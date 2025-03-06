@@ -8,9 +8,6 @@ on:
 jobs:
   upgrade-go:
     runs-on: ubuntu-latest
-    permissions: # Only required if using default `secrets.GITHUB_TOKEN`
-      contents: write
-      pull-requests: write
     steps:
       - uses: actions/checkout@main
       - uses: StefMa/Upgrade-Go-Action@main
