@@ -16,4 +16,3 @@ jobs:
       - uses: StefMa/Upgrade-Go-Action@main
         with:
           base-branch: 'master'
-          gh-token: ${{ secrets.CUSTOM_TOKEN }}
