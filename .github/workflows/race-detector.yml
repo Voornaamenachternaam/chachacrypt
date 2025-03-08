@@ -2,7 +2,7 @@ name: Race Detector
 on:
   pull_request:
   push:
-    branches: [ master ]
+    branches: [ main ]
 concurrency: 
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
