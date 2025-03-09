@@ -19,17 +19,17 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@main
         with:
           fetch-depth: 0
       - name: Setup Go environment
-        uses: actions/setup-go@v5.3.0
+        uses: actions/setup-go@main
         with:
           go-version: stable
       # More assembly might be required: Docker logins, GPG, etc.
       # It all depends on your needs.
       - name: GoReleaser Action
-        uses: goreleaser/goreleaser-action@v6.2.1
+        uses: goreleaser/goreleaser-action@main
         with:
           # either 'goreleaser' (default) or 'goreleaser-pro'
           distribution: goreleaser
