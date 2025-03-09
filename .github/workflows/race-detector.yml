@@ -12,11 +12,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Check out repository
-      uses: actions/checkout@cbb722410c2e876e24abbe8de2cc27693e501dcb # v4.2.2
+      uses: actions/checkout@main
       with:
         fetch-depth: 0
     - name: Set up Go
-      uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+      uses: actions/setup-go@main
       with:
         go-version-file: 'go.mod'
         check-latest: true
