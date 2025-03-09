@@ -14,8 +14,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        go-version: [stable, oldstable ]
-        os: [ubuntu-latest, macos-latest] # Go plugins are only supported on linux, freebsd, and darwin.
+        go-version: [stable]
+        os: [ubuntu-latest] # Go plugins are only supported on linux, freebsd, and darwin.
     env:
       CGO_ENABLED: 0
     steps:
