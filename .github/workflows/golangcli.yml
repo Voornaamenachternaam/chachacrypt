@@ -1,54 +1,66 @@
-name: golangci-lint
+# SPDX-FileCopyrightText: 2023 Shun Sakai
+#
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+name: CI
+
 on:
+  pull_request:
   push:
     branches:
-      - main
-  pull_request:
-
-permissions:
-  contents: read
+      - "main"
+      - "master"
+  schedule:
+    - cron: "0 0 * * *"
 
 jobs:
-  linter:
-    name: golangci-lint
+  test:
+    name: Test
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        go-version: [stable]
-        os: [ubuntu-latest] # Go plugins are only supported on linux, freebsd, and darwin.
-    env:
-      CGO_ENABLED: 0
+        os-alias:
+          - ununtu
+          - windows
+        go-version-alias:
+          - minimum
+          - stable
+        include:
+          - os-alias: ubuntu
+            os: ubuntu-latest
+          - os-alias: windows
+            os: windows-latest
+          - go-version-alias: minimum
+            go-version: "1.24.0"
+          - go-version-alias: stable
+            go-version: "stable"
     steps:
-      - uses: actions/checkout@main
-      - uses: actions/setup-go@main
+      - name: Set Git to use LF
+        if: matrix.os == 'windows-latest'
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - name: Checkout code
+        uses: actions/checkout@main
+      - name: Setup Go environment
+        uses: actions/setup-go@main
         with:
           go-version: ${{ matrix.go-version }}
+      - name: Run tests
+        run: go test -race -v ./...
 
-      - name: Check and get dependencies
-        run: |
-          go mod tidy
-          git diff --exit-code go.mod
-          # git diff --exit-code go.sum
-
-      - name: Install plugins
-        run: |
-          git clone https://github.com/golangci/example-plugin-linter.git
-          cd example-plugin-linter
-          go build -o '${{ github.workspace }}/.plugins/example.so' -buildmode=plugin plugin/example.go
-        working-directory: ${{ runner.temp }}
-        env:
-          CGO_ENABLED: 1
-
-      - name: golangci-lint
+  golangci-lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@main
+      - name: Setup Go environment
+        uses: actions/setup-go@main
+        with:
+          go-version: "stable"
+      - name: Run golangci-lint
         uses: golangci/golangci-lint-action@main
         with:
-          version: v1.64.6
-          # The installation mode `goinstall` always uses `CGO_ENABLED=1`.
-          install-mode: goinstall
-          args: --timeout=10m
-
-      - name: Test
-        run: go test -v -cover ./...
-
-      - name: Build
-        run: go build -v -ldflags "-s -w" -trimpath
+          version: "latest"
+          args: -E gofmt,goimports -v
