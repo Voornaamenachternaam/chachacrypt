@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
