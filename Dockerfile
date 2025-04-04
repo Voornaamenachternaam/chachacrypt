@@ -1,23 +1,32 @@
-FROM golang:latest as build
+# Build stage
+FROM golang:latest AS build
 
 WORKDIR /app
 
-# Copy the Go module files
+# Copy go mod and sum first to leverage caching
 COPY go.mod .
 COPY go.sum .
 
-# Download the Go module dependencies
+# Download dependencies
 RUN go mod download
 
+# Copy the rest of the code
 COPY . .
 
-RUN go build -o /chachacrypt ./cmd/web/...
- 
-FROM ubuntu:latest as run
+# Build the binary from chachacrypt.go
+RUN go build -o /chachacrypt ./chachacrypt.go
 
-# Copy the application executable from the build image
+# Run stage
+FROM ubuntu:latest AS run
+
+# Copy the binary from the build stage
 COPY --from=build /chachacrypt /chachacrypt
 
+# Set working directory (optional)
 WORKDIR /app
+
+# Expose port (optional, based on your app needs)
 EXPOSE 8080
+
+# Command to run the binary
 CMD ["/chachacrypt"]
