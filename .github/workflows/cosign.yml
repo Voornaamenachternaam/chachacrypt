@@ -13,9 +13,8 @@ jobs:
     permissions:
       id-token: write
     steps:
-        # This step ensures that your project is available in the workflow environment.
         - uses: actions/checkout@v4
-        with:
+          with:
           persist-credentials: false
 
         # This step uses 'gh-action-sigstore-python' to sign the file designated in the inputs field.
