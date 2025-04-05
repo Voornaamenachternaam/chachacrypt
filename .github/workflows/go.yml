@@ -1,25 +1,97 @@
-# This workflow will build a golang project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
-
-name: Go
+name: Update Go Version in go.mod Files
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+  schedule:
+    - cron: '0 0 * * *'  # Runs weekly
+  workflow_dispatch: {}  # Allow manual triggering
 
 jobs:
-
-  build:
+  update-go-mod:
     runs-on: ubuntu-latest
+
     steps:
-    - uses: actions/checkout@v4.2.2
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+      
+      - name: (Optional) Set up Go
+        # GitHub runners come with Go pre-installed so this step is optional.
+        run: echo "Using Go installed on this runner (version via 'go version')"
 
-    - name: Set up Go
-      uses: actions/setup-go@v5.4.0
-      with:
-         go-version-file: 'go.mod'
+      - name: Fetch latest Go version
+        id: go-info
+        run: |
+          # Get the installed Go version from 'go version'
+          # Example output: "go version go1.20.6 linux/amd64"
+          full_version=$(go version | awk '{print $3}' | sed 's/^go//')
+          # We only need the major.minor portion (e.g. "1.20")
+          latest_go=$(echo "$full_version" | cut -d. -f1,2)
+          echo "Latest Go version (major.minor): $latest_go"
+          echo "latest_go=$latest_go" >> $GITHUB_ENV
 
-    - name: Build
-      run: go build -v ./...
+      - name: Find and update go.mod files
+        id: update
+        run: |
+          changes_made=false
+          echo "Latest Go version: $latest_go"
+          
+          # Find all go.mod files (in root and subdirectories)
+          for file in $(find . -name "go.mod"); do
+            echo "Processing $file"
+            # Extract the current Go version from the go.mod file (line starting with "go ")
+            current_go=$(grep '^go ' "$file" | awk '{print $2}')
+            if [ -z "$current_go" ]; then
+              echo "No 'go' directive found in $file, skipping."
+              continue
+            fi
+            echo "Current Go version in $file: $current_go"
+            
+            # Compare versions using sort -V.
+            # If the latest_go is newer than the current_go, update the file.
+            if [ "$(printf '%s\n' "$latest_go" "$current_go" | sort -V | tail -n1)" != "$current_go" ]; then
+              echo "Updating $file: setting Go version to $latest_go"
+              sed -i "s/^go .*/go $latest_go/" "$file"
+              changes_made=true
+            fi
+          done
+          
+          if [ "$changes_made" = true ]; then
+            git config --global user.name "github-actions"
+            git config --global user.email "github-actions@github.com"
+            # Create (or update) a dedicated branch for these changes.
+            git checkout -B update-go-version
+            git commit -am "Update go.mod files: go version to $latest_go"
+            echo "changes_made=true" >> $GITHUB_ENV
+          else
+            echo "changes_made=false" >> $GITHUB_ENV
+            echo "No updates needed for any go.mod files"
+          fi
+
+      - name: Push changes if any were made
+        if: env.changes_made == 'true'
+        run: |
+          git push origin update-go-version --force
+
+      - name: Create pull request if needed
+        if: env.changes_made == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          repo=${GITHUB_REPOSITORY}
+          api_url="https://api.github.com/repos/${repo}/pulls"
+          title="Update go.mod files: set Go version to $latest_go"
+          body="This pull request updates all go.mod files by setting the Go version (the directive in 'go.mod') to the latest version: $latest_go."
+          head="update-go-version"
+          base="$DEFAULT_BRANCH"
+          
+          # Check if a pull request already exists for our branch.
+          existing_pr=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/${repo}/pulls?head=${repo}:$head")
+          if echo "$existing_pr" | grep -q "\"number\":"; then
+            echo "A pull request for branch $head already exists."
+          else
+            # Create a new pull request.
+            curl -s -H "Authorization: token $GITHUB_TOKEN" \
+              -X POST "$api_url" \
+              -d "{\"title\":\"$title\",\"head\":\"$head\",\"base\":\"$base\",\"body\":\"$body\"}"
+            echo "Pull request created."
+          fi
