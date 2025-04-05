@@ -3,6 +3,7 @@ name: signing_files
 # This is easy for testing purposes, but for your final workflow use whatever event or schedule 
 # makes sense for your project.
 on:
+workflow_dispatch:
   push:
     branches: [ main ]
 jobs:
