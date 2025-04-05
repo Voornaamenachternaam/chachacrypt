@@ -12,32 +12,30 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4.2.2
-      
-      - name: (Optional) Set up Go
-        # GitHub runners come with Go pre-installed so this step is optional.
-        run: echo "Using Go installed on this runner (version via 'go version')"
 
-      - name: Fetch latest Go version
+      - name: Confirm Go installation
+        run: |
+          echo "Using the system-installed Go: $(go version)"
+
+      - name: Fetch the latest Go full version
         id: go-info
         run: |
-          # Get the installed Go version from 'go version'
-          # Example output: "go version go1.20.6 linux/amd64"
+          # Get the installed Go version, e.g. "go1.24.2"
           full_version=$(go version | awk '{print $3}' | sed 's/^go//')
-          # We only need the major.minor portion (e.g. "1.20")
-          latest_go=$(echo "$full_version" | cut -d. -f1,2)
-          echo "Latest Go version (major.minor): $latest_go"
-          echo "latest_go=$latest_go" >> $GITHUB_ENV
+          echo "Latest Go full version: $full_version"
+          # Export the full version (e.g. "1.24.2") to subsequent steps
+          echo "latest_go_full=$full_version" >> $GITHUB_ENV
 
       - name: Find and update go.mod files
         id: update
         run: |
           changes_made=false
-          echo "Latest Go version: $latest_go"
+          echo "Latest Go version (full): $latest_go_full"
           
-          # Find all go.mod files (in root and subdirectories)
+          # Locate all go.mod files in the repository (including subfolders)
           for file in $(find . -name "go.mod"); do
             echo "Processing $file"
-            # Extract the current Go version from the go.mod file (line starting with "go ")
+            # Extract the current go directive; e.g., "1.24", "1.24.1", etc.
             current_go=$(grep '^go ' "$file" | awk '{print $2}')
             if [ -z "$current_go" ]; then
               echo "No 'go' directive found in $file, skipping."
@@ -45,21 +43,19 @@ jobs:
             fi
             echo "Current Go version in $file: $current_go"
             
-            # Compare versions using sort -V.
-            # If the latest_go is newer than the current_go, update the file.
-            if [ "$(printf '%s\n' "$latest_go" "$current_go" | sort -V | tail -n1)" != "$current_go" ]; then
-              echo "Updating $file: setting Go version to $latest_go"
-              sed -i "s/^go .*/go $latest_go/" "$file"
+            # Compare the versions using sort -V so that e.g. 1.24.2 > 1.24.1 and 1.24.2 > 1.24
+            if [ "$(printf '%s\n' "$latest_go_full" "$current_go" | sort -V | tail -n1)" != "$current_go" ]; then
+              echo "Updating $file: setting Go version to $latest_go_full"
+              sed -i "s/^go .*/go $latest_go_full/" "$file"
               changes_made=true
             fi
           done
-          
+
           if [ "$changes_made" = true ]; then
             git config --global user.name "github-actions"
             git config --global user.email "github-actions@github.com"
-            # Create (or update) a dedicated branch for these changes.
             git checkout -B update-go-version
-            git commit -am "Update go.mod files: go version to $latest_go"
+            git commit -am "Update go.mod files: set Go version to $latest_go_full"
             echo "changes_made=true" >> $GITHUB_ENV
           else
             echo "changes_made=false" >> $GITHUB_ENV
@@ -79,17 +75,17 @@ jobs:
         run: |
           repo=${GITHUB_REPOSITORY}
           api_url="https://api.github.com/repos/${repo}/pulls"
-          title="Update go.mod files: set Go version to $latest_go"
-          body="This pull request updates all go.mod files by setting the Go version (the directive in 'go.mod') to the latest version: $latest_go."
+          title="Update go.mod files: set Go version to $latest_go_full"
+          body="This pull request updates all go.mod files in the repository by setting the Go version in the 'go' directive to $latest_go_full."
           head="update-go-version"
           base="$DEFAULT_BRANCH"
           
-          # Check if a pull request already exists for our branch.
+          # Check if a pull request for the branch already exists
           existing_pr=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/${repo}/pulls?head=${repo}:$head")
           if echo "$existing_pr" | grep -q "\"number\":"; then
             echo "A pull request for branch $head already exists."
           else
-            # Create a new pull request.
+            # Create a new pull request
             curl -s -H "Authorization: token $GITHUB_TOKEN" \
               -X POST "$api_url" \
               -d "{\"title\":\"$title\",\"head\":\"$head\",\"base\":\"$base\",\"body\":\"$body\"}"
