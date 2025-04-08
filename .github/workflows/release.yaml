@@ -4,36 +4,21 @@ name: goreleaser
 on:
   workflow_dispatch:
   pull_request:
-  push:
-    # run only against tags
-    tags:
-      - "*"
+  release:
+    types: [created]
 
 permissions:
-  contents: write
+    contents: write
+    packages: write
 
 jobs:
-  goreleaser:
+  release-linux-amd64:
+    name: release linux/amd64
     runs-on: ubuntu-latest
     steps:
-      -
-        name: Checkout
-        uses: actions/checkout@v4.2.2
-        with:
-          fetch-depth: 0
-      -
-        name: Set up Go
-        uses: actions/setup-go@v5.4.0
-      -
-        name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6.3.0
-        with:
-          # either 'goreleaser' (default) or 'goreleaser-pro'
-          distribution: goreleaser
-          # 'latest', 'nightly', or a semver
-          version: '~> v2'
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Your GoReleaser Pro key, if you are using the 'goreleaser-pro' distribution
-          # GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
+    - uses: actions/checkout@v4.2.2
+    - uses: wangyoucao577/go-release-action@v1.5.3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        goos: linux
+        goarch: amd64
