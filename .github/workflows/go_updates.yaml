@@ -9,23 +9,24 @@ jobs:
   discover-modules:
     runs-on: ubuntu-latest
     outputs:
-      modules: ${{ steps.set-modules.outputs.modules }}
+      matrix-json: ${{ steps.set-matrix.outputs.matrix-json }}
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-      - name: Locate Go modules
-        id: set-modules
+      - name: Build dynamic matrix JSON
+        id: set-matrix
         run: |
-          # Produce a compact, single-line JSON array of module paths
-          mods=$(find . -name go.mod -exec dirname {} \; | jq -R -s -c .)
-          echo "modules=$mods" >> $GITHUB_OUTPUT
+          # Find all go.mod parents, wrap in {"module": […]}:
+          matrix=$(find . -name go.mod -exec dirname {} \; \
+                     | jq -R -s -c '{module: .}')
+          echo "matrix-json=$matrix" >> $GITHUB_OUTPUT
 
   update-and-fix:
     needs: discover-modules
     runs-on: ubuntu-latest
     strategy:
-      matrix:
-        module: ${{ fromJson(needs.discover-modules.outputs.modules) }}
+      matrix: ${{ fromJson(needs.discover-modules.outputs.matrix-json) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -46,7 +47,6 @@ jobs:
             **/go.sum
             **/go.mod
             **/pkg/mod
-          # Use format() to build the path string instead of '+' operator
           key: go-mod-${{ matrix.module }}-${{ hashFiles(format('{0}/go.sum', matrix.module)) }}
 
       - name: Update dependencies
@@ -71,7 +71,7 @@ jobs:
       - name: Commit & detect changes
         id: commit
         run: |
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if git diff --quiet; then
             echo "changes=false" >> $GITHUB_OUTPUT
@@ -89,6 +89,6 @@ jobs:
           title: "chore: update deps & AI fixes for ${{ matrix.module }}"
           body: |
             Automated dependency updates and AI-driven compatibility fixes.
-          commit-message: "chore: update deps & AI fixes for ${{ matrix.module }}"
+          commit-message:  "chore: update deps & AI fixes for ${{ matrix.module }}"
           branch: update-fixes-${{ matrix.module }}-${{ github.run_number }}
           labels: automated-pr
