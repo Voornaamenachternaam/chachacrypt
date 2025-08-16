@@ -85,9 +85,9 @@ jobs:
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          title: chore: update deps & AI fixes for ${{ matrix.module }}
+          title: "chore: update deps & AI fixes for ${{ matrix.module }}"
           body: |
             Automated dependency updates and AI-driven compatibility fixes.
-          commit-message: chore: update deps & AI fixes for ${{ matrix.module }}
+          commit-message: "chore: update deps & AI fixes for ${{ matrix.module }}"
           branch: update-fixes-${{ matrix.module }}-${{ github.run_number }}
           labels: automated-pr
