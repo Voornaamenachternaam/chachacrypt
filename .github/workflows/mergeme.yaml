@@ -10,6 +10,9 @@ on:
 
 jobs:
   merge-me:
+    permissions:
+      contents: write
+      pull-requests: write
     name: Merge me!
     runs-on: ubuntu-latest
     steps:
