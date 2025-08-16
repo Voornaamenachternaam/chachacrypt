@@ -71,6 +71,7 @@ jobs:
             git add .
             git commit -m "chore: update deps & AI fixes for ${{ matrix.module }}"
             echo "changes=true" >> $GITHUB_OUTPUT
+          fi
       - name: Create Pull Request
         if: steps.commit.outputs.changes == 'true'
         uses: peter-evans/create-pull-request@v7
