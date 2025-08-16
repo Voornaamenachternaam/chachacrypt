@@ -11,8 +11,7 @@ jobs:
     outputs:
       modules: ${{ steps.set-modules.outputs.modules }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
       - name: Locate Go modules
         id: set-modules
@@ -27,14 +26,12 @@ jobs:
       matrix:
         module: ${{ fromJson(needs.discover-modules.outputs.modules) }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
         with:
           persist-credentials: true
           fetch-depth: 0
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version: '1.25.0'
           cache: true
@@ -46,7 +43,7 @@ jobs:
             **/go.sum
             **/go.mod
             **/pkg/mod
-          key: go-mod-${{ matrix.module }}-${{ hashFiles(matrix.module + '/go.sum') }}
+          key: go-mod-${{ matrix.module }}-${{ hashFiles(format('{0}/go.sum', matrix.module)) }}
 
       - name: Update dependencies
         working-directory: ${{ matrix.module }}
@@ -70,8 +67,8 @@ jobs:
       - name: Commit & detect changes
         id: commit
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name  "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
           if git diff --quiet; then
             echo "changes=false" >> $GITHUB_OUTPUT
           else
@@ -88,6 +85,6 @@ jobs:
           title: "chore: update deps & AI fixes for ${{ matrix.module }}"
           body: |
             Automated dependency updates and AI-driven compatibility fixes.
-          commit-message: "chore: update deps & AI fixes for ${{ matrix.module }}"
+          commit-message: chore: update deps & AI fixes for ${{ matrix.module }}
           branch: update-fixes-${{ matrix.module }}-${{ github.run_number }}
           labels: automated-pr
