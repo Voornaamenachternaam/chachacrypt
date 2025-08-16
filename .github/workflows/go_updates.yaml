@@ -2,7 +2,7 @@ name: Go Dependency & Compatibility Updates
 
 on:
   schedule:
-    - cron: '0 4 * * *'  # Daily at midnight UTC
+    - cron: '0 4 * * *'    # every day at 04:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -19,24 +19,31 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@main
 
-      - name: Find all Go modules
+      - name: Find all Go modules and emit JSON
         id: set-modules
         run: |
-          modules=$(find . -name "go.mod" -exec dirname {} \; | tr '\n' ',' | sed 's/,$//')
-          echo "Found modules: $modules"
-          echo "::set-output name=modules::$modules"
+          # gather all go.mod dirs (strip leading "./")
+          module_paths=$(find . -name "go.mod" -exec dirname {} \; | sed 's#^\./##')
+          # quote and comma-separate them, then wrap in [ … ]
+          json=$(printf '%s\n' $module_paths \
+                 | sed 's/.*/"&"/' \
+                 | paste -sd, -)
+          json="[$json]"
+          echo "Discovered modules JSON: $json"
+          echo "::set-output name=modules::$json"
 
   update-and-fix:
     needs: discover-modules
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        module: ${{fromJson('[' + needs.discover-modules.outputs.modules + ']')}}
+        module: ${{ fromJson(needs.discover-modules.outputs.modules) }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@main
 
-      - name: Set Go version to latest
+      - name: Determine latest Go version
         id: go-version
         run: |
           latest=$(curl -s https://go.dev/VERSION?m=text)
@@ -49,13 +56,14 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Cache Go modules
-        uses: actions/cache@v4.2.4
+        uses: actions/cache@v4
         with:
           path: |
             ${{ github.workspace }}/**/go.sum
             ${{ github.workspace }}/**/go.mod
             ${{ github.workspace }}/**/pkg/mod
-          key: go-mod-${{ matrix.module }}-${{ hashFiles(matrix.module + '/go.sum') }}
+          # use format() instead of '+'
+          key: go-mod-${{ matrix.module }}-${{ hashFiles(format('{0}/go.sum', matrix.module)) }}
           restore-keys: |
             go-mod-${{ matrix.module }}-
 
@@ -78,60 +86,58 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
 
-      - name: Check for changes
-        id: changes
+      - name: Check for local changes
+        id: detect-changes
         run: |
           cd ${{ matrix.module }}
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if git diff --quiet; then
-            echo "No changes detected"
             echo "changes=false" >> $GITHUB_ENV
           else
-            echo "Changes detected"
             echo "changes=true" >> $GITHUB_ENV
             git add .
-            git commit -m "Update Go module dependencies and apply AI fixes"
+            git commit -m "chore: update ${{ matrix.module }} deps & AI fixes"
+          fi
 
-      - name: Pull latest main to prevent conflicts
-        if: env.changes == 'true'
+      - name: Sync with main and switch branch
+        if: ${{ env.changes == 'true' }}
         run: |
           git fetch origin main
-          git checkout -B "update/${{ matrix.module }}/$(date +'%Y%m%d')"
+          branch="update/${{ matrix.module }}/$(date +'%Y%m%d')"
+          git checkout -b "$branch"
           git rebase origin/main || git rebase --abort
 
-      - name: Create PR if changes exist
-        if: env.changes == 'true'
+      - name: Create Pull Request
+        if: ${{ env.changes == 'true' }}
         uses: peter-evans/create-pull-request@v7.0.8
-        id: create-pr
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           branch: "update/${{ matrix.module }}/$(date +'%Y%m%d')"
-          commit-message: "Update ${{ matrix.module }} dependencies & AI fixes"
+          commit-message: "chore: Update ${{ matrix.module }} dependencies & AI fixes"
           title: "Update ${{ matrix.module }} dependencies & AI fixes"
-          body: "Automated PR: updates dependencies and applies AI compatibility fixes for module `${{ matrix.module }}`."
+          body: |
+            Automated updates for module `${{ matrix.module }}` including dependency bumps and AI-powered compatibility fixes.
           labels: automated
           base: main
 
-      - name: Generate PR summary comment
-        if: env.changes == 'true'
+      - name: Build PR summary
+        if: ${{ env.changes == 'true' }}
         run: |
           cd ${{ matrix.module }}
-          echo "## Automated Go Updates & AI Fixes Summary" > pr-summary.md
+          echo "## Automated Go Updates & AI Fixes" > pr-summary.md
           echo "" >> pr-summary.md
-          echo "**Module:** ${{ matrix.module }}" >> pr-summary.md
+          echo "**Module:** `${{ matrix.module }}`" >> pr-summary.md
           echo "" >> pr-summary.md
           echo "**Dependency changes:**" >> pr-summary.md
-          git --no-pager diff --name-status HEAD~1 HEAD >> pr-summary.md || echo "No diff output"
-          echo "" >> pr-summary.md
-          echo "**AI fixes applied:**" >> pr-summary.md
-          echo "_See commit message and code changes above for AI fixes details._" >> pr-summary.md
-          cat pr-summary.md
+          git --no-pager diff --name-status HEAD~1 HEAD >> pr-summary.md || echo "– no diffs –"
+        shell: bash
 
-      - name: Post PR comment with summary
-        if: env.changes == 'true'
+      - name: Post PR summary comment
+        if: ${{ env.changes == 'true' }}
         uses: peter-evans/create-or-update-comment@v4.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          issue-number: ${{ steps.create-pr.outputs.pull-request-number }}
+          issue-number: ${{ steps.create-pull-request.outputs.pull-request-number }}
           body: |
             $(cat pr-summary.md)
