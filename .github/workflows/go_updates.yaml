@@ -16,7 +16,8 @@ jobs:
       - name: Locate Go modules
         id: set-modules
         run: |
-          mods=$(find . -name go.mod -exec dirname {} \; | jq -R . | jq -s .)
+          # Produce a compact, single-line JSON array of module paths
+          mods=$(find . -name go.mod -exec dirname {} \; | jq -R -s -c .)
           echo "modules=$mods" >> $GITHUB_OUTPUT
 
   update-and-fix:
@@ -26,12 +27,14 @@ jobs:
       matrix:
         module: ${{ fromJson(needs.discover-modules.outputs.modules) }}
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
         with:
           persist-credentials: true
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
           go-version: '1.25.0'
           cache: true
@@ -43,6 +46,7 @@ jobs:
             **/go.sum
             **/go.mod
             **/pkg/mod
+          # Use format() to build the path string instead of '+' operator
           key: go-mod-${{ matrix.module }}-${{ hashFiles(format('{0}/go.sum', matrix.module)) }}
 
       - name: Update dependencies
@@ -67,8 +71,8 @@ jobs:
       - name: Commit & detect changes
         id: commit
         run: |
-          git config --local user.name  "github-actions[bot]"
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           if git diff --quiet; then
             echo "changes=false" >> $GITHUB_OUTPUT
           else
