@@ -23,7 +23,7 @@ jobs:
         id: set-modules
         run: |
           module_paths=$(find . -name go.mod -exec dirname {} \; | sed 's#^\./##')
-          items=$(printf '%s\n' $module_paths \
+          items=$(printf '%s\n' "$module_paths" \
                   | sed 's/.*/"&"/' \
                   | paste -sd, -)
           modules="[${items}]"
@@ -32,6 +32,8 @@ jobs:
   update-and-fix:
     needs: discover-modules
     runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     strategy:
       matrix:
         module: ${{ fromJson(needs.discover-modules.outputs.modules) }}
@@ -40,12 +42,12 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v3
 
-      - name: Determine latest Go version
+      - name: Determine Go version
         id: go-version
         run: |
           echo "GO_VERSION=$(curl -s https://go.dev/VERSION?m=text)" >> $GITHUB_ENV
 
-      - name: Set up Go
+      - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -61,7 +63,7 @@ jobs:
           restore-keys: |
             go-mod-${{ matrix.module }}-
 
-      - name: Change to module directory
+      - name: Change into module dir
         run: cd ${{ matrix.module }}
 
       - name: Update dependencies
@@ -71,12 +73,12 @@ jobs:
           go mod tidy
 
       - name: Run AI compatibility fixes
-        if: ${{ secrets.OPENAI_API_KEY }}
+        if: ${{ env.OPENAI_API_KEY }}
         uses: dlidstrom/genai-code-review@v3.0.8
         with:
           entryPoint: compatibility
           args: --fix
-          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          openai_api_key: ${{ env.OPENAI_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
 
@@ -94,7 +96,7 @@ jobs:
             git commit -m "chore: update deps & AI fixes for ${{ matrix.module }}"
           fi
 
-      - name: Sync with main and create branch
+      - name: Create update branch
         if: ${{ env.changes == 'true' }}
         run: |
           git fetch origin main
@@ -112,8 +114,8 @@ jobs:
           commit-message: "chore: update deps & AI fixes for ${{ matrix.module }}"
           title: "Update ${{ matrix.module }} dependencies & AI fixes"
           body: |
-            Automated updates for module `${{ matrix.module }}` including 
-            dependency bumps and AI-powered compatibility fixes.
+            Automated updates for module `${{ matrix.module }}`  
+            – dependency bumps & AI-powered compatibility fixes.
           labels: automated
           base: main
 
@@ -124,7 +126,7 @@ jobs:
           {
             echo "## Automated Go Updates & AI Fixes"
             echo
-            echo "**Module:** `${{ matrix.module }}`"
+            echo "**Module:** \`${{ matrix.module }}\`"
             echo
             echo "**Dependency changes:**"
             git --no-pager diff --name-status HEAD~1 HEAD || echo "No changes detected"
