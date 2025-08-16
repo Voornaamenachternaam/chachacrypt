@@ -1,9 +1,15 @@
 name: Update & AI-Driven Fixes
+
 on:
   workflow_dispatch:
   schedule:
     - cron: '0 2 * * *'
 
+permissions:
+  issues: write
+  pull-requests: write
+  contents: write
+  
 jobs:
   discover-modules:
     runs-on: ubuntu-latest
