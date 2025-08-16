@@ -16,7 +16,7 @@ jobs:
     outputs:
       modules: ${{ steps.set-modules.outputs.modules }}
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v3
 
       - name: Find Go modules and emit JSON array
@@ -37,7 +37,7 @@ jobs:
         module: ${{ fromJson(needs.discover-modules.outputs.modules) }}
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v3
 
       - name: Determine latest Go version
@@ -71,7 +71,7 @@ jobs:
           go mod tidy
 
       - name: Run AI compatibility fixes
-        if: ${{ secrets.OPENAI_API_KEY != '' }}
+        if: ${{ secrets.OPENAI_API_KEY }}
         uses: dlidstrom/genai-code-review@v3.0.8
         with:
           entryPoint: compatibility
@@ -112,7 +112,8 @@ jobs:
           commit-message: "chore: update deps & AI fixes for ${{ matrix.module }}"
           title: "Update ${{ matrix.module }} dependencies & AI fixes"
           body: |
-            Automated updates for module `${{ matrix.module }}` including dependency bumps and AI-powered compatibility fixes.
+            Automated updates for module `${{ matrix.module }}` including 
+            dependency bumps and AI-powered compatibility fixes.
           labels: automated
           base: main
 
