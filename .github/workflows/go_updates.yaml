@@ -16,17 +16,19 @@ jobs:
     outputs:
       modules: ${{ steps.set-modules.outputs.modules }}
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v3
 
       - name: Find Go modules and emit JSON array
         id: set-modules
         run: |
-          modules=$(find . -name go.mod -exec dirname {} \; \
-            | sed 's#^\./##' \
-            | sed 's/.*/"&"/' \
-            | paste -sd, -)
-          echo "modules=[${modules}]" >> $GITHUB_OUTPUT
+          {
+            items=$(find . -name go.mod -exec dirname {} \; \
+                      | sed 's#^\./##' \
+                      | sed 's/.*/"&"/' \
+                      | paste -sd, -)
+            echo "modules=[${items}]"
+          } | grep '^[[:alnum:]_]\+=' >> $GITHUB_OUTPUT
 
   update-and-fix:
     needs: discover-modules
@@ -38,12 +40,16 @@ jobs:
         module: ${{ fromJson(needs.discover-modules.outputs.modules) }}
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v3
 
       - name: Determine latest Go version
         id: go-version
-        run: echo "version=$(curl -s https://go.dev/VERSION?m=text)" >> $GITHUB_OUTPUT
+        run: |
+          {
+            version=$(curl -s https://go.dev/VERSION?m=text)
+            echo "version=$version"
+          } | grep '^[[:alnum:]_]\+=' >> $GITHUB_OUTPUT
 
       - name: Set up Go
         uses: actions/setup-go@v5
