@@ -1,5 +1,4 @@
 name: Update & AI-Driven Fixes
-
 on:
   workflow_dispatch:
   schedule:
@@ -13,38 +12,29 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-
       - name: Build matrix JSON
         id: set-matrix
         run: |
-          # 1. Find every directory that contains a go.mod
-          modules=$(find . -type f -name go.mod -exec dirname {} \; \
-                    | jq -R -s -c .)
-          # 2. Wrap the array in an object under the key "module"
-          matrix=$(jq -n --argjson m "$modules" '{module: $m}')
-          # 3. Emit a single-line JSON map for strategy.matrix
+          modules=$(find . -type f -name go.mod -exec dirname {} \; | jq -R -s -c 'split("\n")[:-1]')
+          matrix=$(jq -n -c --argjson m "$modules" '{module: $m}')
           echo "matrix=$matrix" >> $GITHUB_OUTPUT
 
   update-and-fix:
     needs: discover-modules
     runs-on: ubuntu-latest
     strategy:
-      # Inject the JSON map {"module":[".","pkg/foo",…]} directly
       matrix: ${{ fromJson(needs.discover-modules.outputs.matrix) }}
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
           persist-credentials: true
-
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.25.0'
           cache: true
-
       - name: Cache Go modules
         uses: actions/cache@v4
         with:
@@ -53,13 +43,11 @@ jobs:
             **/go.mod
             **/pkg/mod
           key: go-mod-${{ matrix.module }}-${{ hashFiles(format('{0}/go.sum', matrix.module)) }}
-
       - name: Update dependencies
         working-directory: ${{ matrix.module }}
         run: |
           go get -u ./...
           go mod tidy
-
       - name: AI compatibility fixes
         uses: dlidstrom/genai-code-review@v3.0.8
         continue-on-error: true
@@ -72,11 +60,10 @@ jobs:
           openai_max_tokens: 2048
           mode: files
           language: en
-
       - name: Commit & detect changes
         id: commit
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if git diff --quiet; then
             echo "changes=false" >> $GITHUB_OUTPUT
@@ -84,16 +71,13 @@ jobs:
             git add .
             git commit -m "chore: update deps & AI fixes for ${{ matrix.module }}"
             echo "changes=true" >> $GITHUB_OUTPUT
-          fi
-
       - name: Create Pull Request
         if: steps.commit.outputs.changes == 'true'
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           title: "chore: update deps & AI fixes for ${{ matrix.module }}"
-          body: |
-            Automated dependency updates and AI-driven compatibility fixes.
+          body: Automated dependency updates and AI-driven compatibility fixes.
           commit-message: "chore: update deps & AI fixes for ${{ matrix.module }}"
           branch: update-fixes-${{ matrix.module }}-${{ github.run_number }}
           labels: automated-pr
