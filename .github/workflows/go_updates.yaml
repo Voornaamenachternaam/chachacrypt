@@ -22,14 +22,11 @@ jobs:
       - name: Find Go modules and emit JSON array
         id: set-modules
         run: |
-          # strip leading "./" and collect module dirs
-          module_paths=$(find . -name go.mod -exec dirname {} \; | sed 's#^\./##')
-          # quote each, comma-join, wrap in [ … ]
-          items=$(printf '%s\n' "$module_paths" \
-                   | sed 's/.*/"&"/' \
-                   | paste -sd, -)
-          modules="[${items}]"
-          echo "modules=$modules" >> $GITHUB_OUTPUT
+          modules=$(find . -name go.mod -exec dirname {} \; \
+            | sed 's#^\./##' \
+            | sed 's/.*/"&"/' \
+            | paste -sd, -)
+          echo "modules=[${modules}]" >> $GITHUB_OUTPUT
 
   update-and-fix:
     needs: discover-modules
@@ -46,9 +43,7 @@ jobs:
 
       - name: Determine latest Go version
         id: go-version
-        run: |
-          version=$(curl -s https://go.dev/VERSION?m=text)
-          echo "version=$version" >> $GITHUB_OUTPUT
+        run: echo "version=$(curl -s https://go.dev/VERSION?m=text)" >> $GITHUB_OUTPUT
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -92,16 +87,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if git diff --quiet; then
-            echo "::set-output name=changes::false"
+            echo "changes=false" >> $GITHUB_ENV
           else
-            echo "::set-output name=changes::true"
+            echo "changes=true" >> $GITHUB_ENV
             git add .
             git commit -m "chore: update deps & AI fixes for ${{ matrix.module }}"
           fi
-        shell: bash
 
-      - name: Sync with main and create branch
-        if: ${{ steps.detect-changes.outputs.changes == 'true' }}
+      - name: Create update branch
+        if: ${{ env.changes == 'true' }}
         run: |
           git fetch origin main
           branch="update/${{ matrix.module }}/$(date +'%Y%m%d')"
@@ -109,7 +103,7 @@ jobs:
           git rebase origin/main || git rebase --abort
 
       - name: Create Pull Request
-        if: ${{ steps.detect-changes.outputs.changes == 'true' }}
+        if: ${{ env.changes == 'true' }}
         id: create-pr
         uses: peter-evans/create-pull-request@v7
         with:
@@ -118,12 +112,13 @@ jobs:
           commit-message: "chore: update deps & AI fixes for ${{ matrix.module }}"
           title: "Update ${{ matrix.module }} dependencies & AI fixes"
           body: |
-            Automated updates for module `${{ matrix.module }}` including dependency bumps and AI-powered compatibility fixes.
+            Automated updates for module `${{ matrix.module }}`  
+            – dependency bumps & AI-powered compatibility fixes.
           labels: automated
           base: main
 
       - name: Build PR summary
-        if: ${{ steps.detect-changes.outputs.changes == 'true' }}
+        if: ${{ env.changes == 'true' }}
         run: |
           cd ${{ matrix.module }}
           {
@@ -137,7 +132,7 @@ jobs:
         shell: bash
 
       - name: Post PR summary comment
-        if: ${{ steps.detect-changes.outputs.changes == 'true' }}
+        if: ${{ env.changes == 'true' }}
         uses: peter-evans/create-or-update-comment@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
