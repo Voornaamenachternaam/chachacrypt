@@ -22,12 +22,11 @@ jobs:
       - name: Find Go modules and emit JSON array
         id: set-modules
         run: |
-          # strip leading "./" and collect all module directories
           module_paths=$(find . -name go.mod -exec dirname {} \; | sed 's#^\./##')
-          # quote each path, comma-separate, and wrap in [...]
-          items=$(printf '%s\n' $module_paths | sed 's/.*/"&"/' | paste -sd, -)
+          items=$(printf '%s\n' $module_paths \
+                  | sed 's/.*/"&"/' \
+                  | paste -sd, -)
           modules="[${items}]"
-          echo "Discovered modules JSON: $modules"
           echo "::set-output name=modules::$modules"
 
   update-and-fix:
@@ -44,8 +43,7 @@ jobs:
       - name: Determine latest Go version
         id: go-version
         run: |
-          latest=$(curl -s https://go.dev/VERSION?m=text)
-          echo "GO_VERSION=$latest" >> $GITHUB_ENV
+          echo "GO_VERSION=$(curl -s https://go.dev/VERSION?m=text)" >> $GITHUB_ENV
 
       - name: Set up Go
         uses: actions/setup-go@v5
