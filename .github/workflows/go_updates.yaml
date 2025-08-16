@@ -16,18 +16,20 @@ jobs:
     outputs:
       modules: ${{ steps.set-modules.outputs.modules }}
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v3
 
       - name: Find Go modules and emit JSON array
         id: set-modules
         run: |
+          # strip leading "./" and collect module dirs
           module_paths=$(find . -name go.mod -exec dirname {} \; | sed 's#^\./##')
+          # quote each, comma-join, wrap in [ … ]
           items=$(printf '%s\n' "$module_paths" \
-                  | sed 's/.*/"&"/' \
-                  | paste -sd, -)
+                   | sed 's/.*/"&"/' \
+                   | paste -sd, -)
           modules="[${items}]"
-          echo "::set-output name=modules::$modules"
+          echo "modules=$modules" >> $GITHUB_OUTPUT
 
   update-and-fix:
     needs: discover-modules
@@ -39,18 +41,19 @@ jobs:
         module: ${{ fromJson(needs.discover-modules.outputs.modules) }}
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Determine Go version
+      - name: Determine latest Go version
         id: go-version
         run: |
-          echo "GO_VERSION=$(curl -s https://go.dev/VERSION?m=text)" >> $GITHUB_ENV
+          version=$(curl -s https://go.dev/VERSION?m=text)
+          echo "version=$version" >> $GITHUB_OUTPUT
 
-      - name: Setup Go
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version: ${{ steps.go-version.outputs.version }}
 
       - name: Cache Go modules
         uses: actions/cache@v4
@@ -63,7 +66,7 @@ jobs:
           restore-keys: |
             go-mod-${{ matrix.module }}-
 
-      - name: Change into module dir
+      - name: Change into module directory
         run: cd ${{ matrix.module }}
 
       - name: Update dependencies
@@ -89,15 +92,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if git diff --quiet; then
-            echo "changes=false" >> $GITHUB_ENV
+            echo "::set-output name=changes::false"
           else
-            echo "changes=true" >> $GITHUB_ENV
+            echo "::set-output name=changes::true"
             git add .
             git commit -m "chore: update deps & AI fixes for ${{ matrix.module }}"
           fi
+        shell: bash
 
-      - name: Create update branch
-        if: ${{ env.changes == 'true' }}
+      - name: Sync with main and create branch
+        if: ${{ steps.detect-changes.outputs.changes == 'true' }}
         run: |
           git fetch origin main
           branch="update/${{ matrix.module }}/$(date +'%Y%m%d')"
@@ -105,7 +109,7 @@ jobs:
           git rebase origin/main || git rebase --abort
 
       - name: Create Pull Request
-        if: ${{ env.changes == 'true' }}
+        if: ${{ steps.detect-changes.outputs.changes == 'true' }}
         id: create-pr
         uses: peter-evans/create-pull-request@v7
         with:
@@ -114,13 +118,12 @@ jobs:
           commit-message: "chore: update deps & AI fixes for ${{ matrix.module }}"
           title: "Update ${{ matrix.module }} dependencies & AI fixes"
           body: |
-            Automated updates for module `${{ matrix.module }}`  
-            – dependency bumps & AI-powered compatibility fixes.
+            Automated updates for module `${{ matrix.module }}` including dependency bumps and AI-powered compatibility fixes.
           labels: automated
           base: main
 
       - name: Build PR summary
-        if: ${{ env.changes == 'true' }}
+        if: ${{ steps.detect-changes.outputs.changes == 'true' }}
         run: |
           cd ${{ matrix.module }}
           {
@@ -134,7 +137,7 @@ jobs:
         shell: bash
 
       - name: Post PR summary comment
-        if: ${{ env.changes == 'true' }}
+        if: ${{ steps.detect-changes.outputs.changes == 'true' }}
         uses: peter-evans/create-or-update-comment@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
