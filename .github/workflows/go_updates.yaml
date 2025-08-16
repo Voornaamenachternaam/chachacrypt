@@ -1,151 +1,93 @@
-name: Go Dependency & Compatibility Updates
+name: Update & AI-Driven Fixes
 
 on:
-  schedule:
-    - cron: '0 4 * * *'    # daily at 04:00 UTC
   workflow_dispatch:
-
-permissions:
-  issues: write
-  pull-requests: write
-  contents: write
+  schedule:
+    - cron: '0 2 * * *'
 
 jobs:
   discover-modules:
     runs-on: ubuntu-latest
     outputs:
       modules: ${{ steps.set-modules.outputs.modules }}
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Find Go modules and emit JSON array
+      - name: Locate Go modules
         id: set-modules
         run: |
-          {
-            # strip leading "./", quote each path, join with commas
-            items=$(find . -name go.mod -exec dirname {} \; \
-                      | sed 's#^\./##' \
-                      | sed 's/.*/"&"/' \
-                      | paste -sd, -)
-            echo "modules=[${items}]"
-          } | grep '^[[:alnum:]_]\+=' >> $GITHUB_OUTPUT
+          mods=$(find . -name go.mod -exec dirname {} \; | jq -R . | jq -s .)
+          echo "modules=$mods" >> $GITHUB_OUTPUT
 
   update-and-fix:
     needs: discover-modules
     runs-on: ubuntu-latest
-    env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     strategy:
       matrix:
         module: ${{ fromJson(needs.discover-modules.outputs.modules) }}
-
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v3
-
-      - name: Determine latest Go version
-        id: go-version
-        run: |
-          {
-            full=$(curl -s https://go.dev/VERSION?m=text)    # e.g. "go1.25.0"
-            version=${full#go}                               # strip "go"
-            echo "version=$version"
-          } | grep '^[[:alnum:]_]\+=' >> $GITHUB_OUTPUT
+        with:
+          persist-credentials: true
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ steps.go-version.outputs.version }}
+          go-version: '1.25.0'
           cache: true
 
       - name: Cache Go modules
         uses: actions/cache@v4
         with:
           path: |
-            ${{ github.workspace }}/**/go.sum
-            ${{ github.workspace }}/**/go.mod
-            ${{ github.workspace }}/**/pkg/mod
-          key: go-mod-${{ matrix.module }}-${{ hashFiles(format('{0}/go.sum', matrix.module)) }}
-          restore-keys: |
-            go-mod-${{ matrix.module }}-
-
-      - name: Change into module directory
-        run: cd ${{ matrix.module }}
+            **/go.sum
+            **/go.mod
+            **/pkg/mod
+          key: go-mod-${{ matrix.module }}-${{ hashFiles(matrix.module + '/go.sum') }}
 
       - name: Update dependencies
+        working-directory: ${{ matrix.module }}
         run: |
-          cd ${{ matrix.module }}
           go get -u ./...
           go mod tidy
 
-      - name: Run AI compatibility fixes
-        if: ${{ env.OPENAI_API_KEY }}
+      - name: AI compatibility fixes
         uses: dlidstrom/genai-code-review@v3.0.8
-        with:
-          entryPoint: compatibility
-          args: --fix
-          openai_api_key: ${{ env.OPENAI_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
+        with:
+          args: compatibility --fix
+          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          openai_model: gpt-3.5-turbo
+          openai_temperature: 0.5
+          openai_max_tokens: 2048
+          mode: files
+          language: en
 
-      - name: Detect local changes
-        id: detect-changes
+      - name: Commit & detect changes
+        id: commit
         run: |
-          cd ${{ matrix.module }}
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if git diff --quiet; then
-            echo "changes=false"
+            echo "changes=false" >> $GITHUB_OUTPUT
           else
-            echo "changes=true"
             git add .
             git commit -m "chore: update deps & AI fixes for ${{ matrix.module }}"
-          fi | grep '^[[:alnum:]_]\+=' >> $GITHUB_OUTPUT
-        shell: bash
-
-      - name: Create update branch
-        if: ${{ steps.detect-changes.outputs.changes == 'true' }}
-        run: |
-          git fetch origin main
-          branch="update/${{ matrix.module }}/$(date +'%Y%m%d')"
-          git checkout -b "$branch"
-          git rebase origin/main || git rebase --abort
+            echo "changes=true" >> $GITHUB_OUTPUT
+          fi
 
       - name: Create Pull Request
-        if: ${{ steps.detect-changes.outputs.changes == 'true' }}
-        id: create-pr
+        if: steps.commit.outputs.changes == 'true'
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          branch: update/${{ matrix.module }}/$(date +'%Y%m%d')
-          commit-message: "chore: update deps & AI fixes for ${{ matrix.module }}"
-          title: "Update ${{ matrix.module }} dependencies & AI fixes"
+          title: chore: update deps & AI fixes for ${{ matrix.module }}
           body: |
-            Automated updates for module `${{ matrix.module }}` including dependency bumps and AI-powered compatibility fixes.
-          labels: automated
-          base: main
-
-      - name: Build PR summary
-        if: ${{ steps.detect-changes.outputs.changes == 'true' }}
-        run: |
-          cd ${{ matrix.module }}
-          {
-            echo "## Automated Go Updates & AI Fixes"
-            echo
-            echo "**Module:** \`${{ matrix.module }}\`"
-            echo
-            echo "**Dependency changes:**"
-            git --no-pager diff --name-status HEAD~1 HEAD || echo "No changes detected"
-          } > pr-summary.md
-        shell: bash
-
-      - name: Post PR summary comment
-        if: ${{ steps.detect-changes.outputs.changes == 'true' }}
-        uses: peter-evans/create-or-update-comment@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          issue-number: ${{ steps.create-pr.outputs.pull-request-number }}
-          body: |
-            $(cat pr-summary.md)
+            Automated dependency updates and AI-driven compatibility fixes.
+          commit-message: chore: update deps & AI fixes for ${{ matrix.module }}
+          branch: update-fixes-${{ matrix.module }}-${{ github.run_number }}
+          labels: automated-pr
