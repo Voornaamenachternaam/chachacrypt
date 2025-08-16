@@ -46,10 +46,11 @@ jobs:
       - name: Determine latest Go version
         id: go-version
         run: |
-          {
-            version=$(curl -s https://go.dev/VERSION?m=text)
-            echo "version=$version"
-          } | grep '^[[:alnum:]_]\+=' >> $GITHUB_OUTPUT
+          # e.g. full="go1.25.0"
+          full=$(curl -s https://go.dev/VERSION?m=text)
+          # strip the leading "go" → "1.25.0"
+          version=${full#go}
+          echo "version=$version" >> $GITHUB_OUTPUT
 
       - name: Set up Go
         uses: actions/setup-go@v5
