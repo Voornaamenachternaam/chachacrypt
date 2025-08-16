@@ -19,16 +19,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Find all Go modules and emit JSON
+      - name: Find Go modules and emit JSON array
         id: set-modules
         run: |
-          module_paths=$(find . -name "go.mod" -exec dirname {} \; | sed 's#^\./##')
-          json=$(printf '%s\n' $module_paths \
-                 | sed 's/.*/"&"/' \
-                 | paste -sd, -)
-          json="[$json]"
-          echo "Discovered modules: $json"
-          echo "::set-output name=modules::$json"
+          # strip leading "./" and collect all module directories
+          module_paths=$(find . -name go.mod -exec dirname {} \; | sed 's#^\./##')
+          # quote each path, comma-separate, and wrap in [...]
+          items=$(printf '%s\n' $module_paths | sed 's/.*/"&"/' | paste -sd, -)
+          modules="[${items}]"
+          echo "Discovered modules JSON: $modules"
+          echo "::set-output name=modules::$modules"
 
   update-and-fix:
     needs: discover-modules
@@ -82,7 +82,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
 
-      - name: Check for local changes
+      - name: Detect local changes
         id: detect-changes
         run: |
           cd ${{ matrix.module }}
@@ -96,7 +96,7 @@ jobs:
             git commit -m "chore: update deps & AI fixes for ${{ matrix.module }}"
           fi
 
-      - name: Sync branch with main
+      - name: Sync with main and create branch
         if: ${{ env.changes == 'true' }}
         run: |
           git fetch origin main
@@ -106,11 +106,12 @@ jobs:
 
       - name: Create Pull Request
         if: ${{ env.changes == 'true' }}
+        id: create-pr
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: update/${{ matrix.module }}/$(date +'%Y%m%d')
-          commit-message: "chore: update ${{ matrix.module }} deps & AI fixes"
+          commit-message: "chore: update deps & AI fixes for ${{ matrix.module }}"
           title: "Update ${{ matrix.module }} dependencies & AI fixes"
           body: |
             Automated updates for module `${{ matrix.module }}` including dependency bumps and AI-powered compatibility fixes.
@@ -121,12 +122,14 @@ jobs:
         if: ${{ env.changes == 'true' }}
         run: |
           cd ${{ matrix.module }}
-          echo "## Automated Go Updates & AI Fixes" > pr-summary.md
-          echo "" >> pr-summary.md
-          echo "**Module:** `${{ matrix.module }}`" >> pr-summary.md
-          echo "" >> pr-summary.md
-          echo "**Dependency changes:**" >> pr-summary.md
-          git --no-pager diff --name-status HEAD~1 HEAD >> pr-summary.md || echo "– no diffs –"
+          {
+            echo "## Automated Go Updates & AI Fixes"
+            echo
+            echo "**Module:** `${{ matrix.module }}`"
+            echo
+            echo "**Dependency changes:**"
+            git --no-pager diff --name-status HEAD~1 HEAD || echo "No changes detected"
+          } > pr-summary.md
         shell: bash
 
       - name: Post PR summary comment
@@ -134,6 +137,6 @@ jobs:
         uses: peter-evans/create-or-update-comment@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          issue-number: ${{ steps.create-pull-request.outputs.pull-request-number }}
+          issue-number: ${{ steps.create-pr.outputs.pull-request-number }}
           body: |
             $(cat pr-summary.md)
