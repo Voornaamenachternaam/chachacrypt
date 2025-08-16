@@ -9,32 +9,35 @@ jobs:
   discover-modules:
     runs-on: ubuntu-latest
     outputs:
-      modules: ${{ steps.mod-list.outputs.modules }}
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: List Go modules
-        id: mod-list
+      - name: Build matrix JSON
+        id: set-matrix
         run: |
-          # find all go.mod dirs, wrap in JSON array on one line
-          modules=$(find . -name go.mod -exec dirname {} \; \
+          # 1. Find every directory that contains a go.mod
+          modules=$(find . -type f -name go.mod -exec dirname {} \; \
                     | jq -R -s -c .)
-          echo "modules=$modules" >> $GITHUB_OUTPUT
+          # 2. Wrap the array in an object under the key "module"
+          matrix=$(jq -n --argjson m "$modules" '{module: $m}')
+          # 3. Emit a single-line JSON map for strategy.matrix
+          echo "matrix=$matrix" >> $GITHUB_OUTPUT
 
   update-and-fix:
     needs: discover-modules
     runs-on: ubuntu-latest
     strategy:
-      matrix:
-        module: ${{ fromJson(needs.discover-modules.outputs.modules) }}
+      # Inject the JSON map {"module":[".","pkg/foo",…]} directly
+      matrix: ${{ fromJson(needs.discover-modules.outputs.matrix) }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
         with:
-          persist-credentials: true
           fetch-depth: 0
+          persist-credentials: true
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -91,6 +94,6 @@ jobs:
           title: "chore: update deps & AI fixes for ${{ matrix.module }}"
           body: |
             Automated dependency updates and AI-driven compatibility fixes.
-          commit-message:  "chore: update deps & AI fixes for ${{ matrix.module }}"
+          commit-message: "chore: update deps & AI fixes for ${{ matrix.module }}"
           branch: update-fixes-${{ matrix.module }}-${{ github.run_number }}
           labels: automated-pr
