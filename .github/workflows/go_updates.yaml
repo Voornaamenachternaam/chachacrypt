@@ -2,7 +2,7 @@ name: Go Dependency & Compatibility Updates
 
 on:
   schedule:
-    - cron: '0 4 * * *'    # every day at 04:00 UTC
+    - cron: '0 4 * * *'    # daily at 04:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -20,15 +20,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Find all Go modules & produce JSON array
+      - name: Find Go modules and emit JSON array
         id: set-modules
         run: |
-          modules=$(find . -name go.mod -exec dirname {} \; \
-            | sed 's#^\./##' \
-            | sed 's/.*/"&"/' \
-            | paste -sd, -)
-          modules="[${modules}]"
-          echo "::set-output name=modules::$modules"
+          {
+            # strip leading "./", quote each path, join with commas
+            items=$(find . -name go.mod -exec dirname {} \; \
+                      | sed 's#^\./##' \
+                      | sed 's/.*/"&"/' \
+                      | paste -sd, -)
+            echo "modules=[${items}]"
+          } | grep '^[[:alnum:]_]\+=' >> $GITHUB_OUTPUT
 
   update-and-fix:
     needs: discover-modules
@@ -46,9 +48,11 @@ jobs:
       - name: Determine latest Go version
         id: go-version
         run: |
-          full="$(curl -s https://go.dev/VERSION?m=text)"
-          version="${full#go}"
-          echo "::set-output name=version::$version"
+          {
+            full=$(curl -s https://go.dev/VERSION?m=text)    # e.g. "go1.25.0"
+            version=${full#go}                               # strip "go"
+            echo "version=$version"
+          } | grep '^[[:alnum:]_]\+=' >> $GITHUB_OUTPUT
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -93,14 +97,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if git diff --quiet; then
-            echo "::set-output name=changes::false"
+            echo "changes=false"
           else
-            echo "::set-output name=changes::true"
+            echo "changes=true"
             git add .
             git commit -m "chore: update deps & AI fixes for ${{ matrix.module }}"
-          fi
+          fi | grep '^[[:alnum:]_]\+=' >> $GITHUB_OUTPUT
+        shell: bash
 
-      - name: Sync with main & create branch
+      - name: Create update branch
         if: ${{ steps.detect-changes.outputs.changes == 'true' }}
         run: |
           git fetch origin main
