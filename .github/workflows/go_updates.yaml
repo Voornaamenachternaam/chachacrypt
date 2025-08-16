@@ -9,24 +9,26 @@ jobs:
   discover-modules:
     runs-on: ubuntu-latest
     outputs:
-      matrix-json: ${{ steps.set-matrix.outputs.matrix-json }}
+      modules: ${{ steps.mod-list.outputs.modules }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Build dynamic matrix JSON
-        id: set-matrix
+      - name: List Go modules
+        id: mod-list
         run: |
-          # Find all go.mod parents, wrap in {"module": […]}:
-          matrix=$(find . -name go.mod -exec dirname {} \; \
-                     | jq -R -s -c '{module: .}')
-          echo "matrix-json=$matrix" >> $GITHUB_OUTPUT
+          # find all go.mod dirs, wrap in JSON array on one line
+          modules=$(find . -name go.mod -exec dirname {} \; \
+                    | jq -R -s -c .)
+          echo "modules=$modules" >> $GITHUB_OUTPUT
 
   update-and-fix:
     needs: discover-modules
     runs-on: ubuntu-latest
     strategy:
-      matrix: ${{ fromJson(needs.discover-modules.outputs.matrix-json) }}
+      matrix:
+        module: ${{ fromJson(needs.discover-modules.outputs.modules) }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
