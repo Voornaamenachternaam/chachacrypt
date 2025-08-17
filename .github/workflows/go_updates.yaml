@@ -1,5 +1,10 @@
 name: Update and Fix Go Modules
 
+# 1️⃣ Grant the minimum required write permissions so the bot can push branches & create PRs
+permissions:
+  contents: write
+  pull-requests: write
+
 on:
   workflow_dispatch:
 
@@ -13,6 +18,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5.0.0
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 1
 
       - name: Install jq
@@ -21,20 +27,18 @@ jobs:
       - name: Discover all go.mod files
         id: set-matrix
         run: |
-          # Find all go.mod files (excluding vendor and hidden dirs)
+          # 2️⃣ Find every go.mod, strip "/go.mod" and "./" prefixes
           modules=$(find . -type f -name 'go.mod' \
             -not -path './vendor/*' \
             -not -path '*/.*/*' \
-            | sed 's|/go.mod||' \
-            | sed 's|^\./||')
+            | sed 's|/go.mod||' | sed 's|^\./||')
 
-          # Build a compact JSON object: {"module":[".","services/api","libs/utils",...]}
+          # 3️⃣ Build compact JSON matrix {"module":[...]}
           json_matrix=$(printf '%s\n' "$modules" \
             | jq -R . | jq -s '{ module: . }' | jq -c .)
 
           echo "Discovered modules matrix: $json_matrix"
-
-          # Emit the matrix in a single line
+          # 4️⃣ Emit as single line
           echo "matrix=$json_matrix" >> $GITHUB_OUTPUT
 
   update-and-fix:
@@ -48,6 +52,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5.0.0
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
           persist-credentials: true
 
@@ -113,3 +118,44 @@ jobs:
           commit-message: "chore: update deps & AI fixes for ${{ matrix.module }}"
           branch: update-fixes-${{ matrix.module }}-${{ github.run_number }}
           labels: automated-pr
+name: Update and Fix Go Modules
+
+on:
+  workflow_dispatch:
+
+jobs:
+  discover-modules:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5.0.0
+        with:
+          fetch-depth: 1
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Discover all go.mod files
+        id: set-matrix
+        run: |
+          # Find all go.mod files (excluding vendor and hidden dirs)
+          modules=$(find . -type f -name 'go.mod' \
+            -not -path './vendor/*' \
+            -not -path '*/.*/*' \
+            | sed 's|/go.mod||' \
+            | sed 's|^\./||')
+
+          # Build a compact JSON object: {"module":[".","services/api","libs/utils",...]}
+          json_matrix=$(printf '%s\n' "$modules" \
+            | jq -R . | jq -s '{ module: . }' | jq -c .)
+
+          echo "Discovered modules matrix: $json_matrix"
+
+          # Emit the matrix in a single line
+          echo "matrix=$json_matrix" >> $GITHUB_OUTPUT
+
+  update-and-fix:
+    needs: discover-modules
