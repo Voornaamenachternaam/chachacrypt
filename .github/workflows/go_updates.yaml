@@ -1,4 +1,4 @@
-name: Update and Fix Modules
+name: Update and Fix Go Modules
 
 on:
   workflow_dispatch:
@@ -9,16 +9,34 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      - name: Discover modules
+      - name: Checkout code
+        uses: actions/checkout@v5.0.0
+        with:
+          fetch-depth: 1
+
+      - name: Discover all go.mod files
         id: set-matrix
         run: |
-          echo '::set-output name=matrix::{"module": ["moduleA", "moduleB"]}' # Replace with actual discovery logic
+          # Find all go.mod files, excluding vendor and hidden folders
+          modules=$(find . -type f -name 'go.mod' \
+            -not -path './vendor/*' \
+            -not -path '*/.*/*' \
+            | sed 's|/go.mod||' | sed 's|^\./||')
+
+          # Convert to JSON array
+          json_array=$(printf '%s\n' "$modules" | jq -R . | jq -s '{ "module": . }')
+
+          echo "Discovered modules:"
+          echo "$json_array"
+
+          # Output matrix
+          echo "matrix=$json_array" >> $GITHUB_OUTPUT
 
   update-and-fix:
     needs: discover-modules
     runs-on: ubuntu-latest
     strategy:
-      matrix: 
+      matrix:
         module: ${{ fromJson(needs.discover-modules.outputs.matrix).module }}
     steps:
       - name: Checkout code
@@ -86,4 +104,4 @@ jobs:
           body: Automated dependency updates and AI-driven compatibility fixes.
           commit-message: "chore: update deps & AI fixes for ${{ matrix.module }}"
           branch: update-fixes-${{ matrix.module }}-${{ github.run_number }}
-          labels: automated-pr
+          labels:  automated-pr
