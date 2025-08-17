@@ -1,12 +1,14 @@
 name: Update and Fix Go Modules
 
-# 1️⃣ Grant the minimum required write permissions so the bot can push branches & create PRs
-permissions:
-  contents: write
-  pull-requests: write
-
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 6"
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: write
 
 jobs:
   discover-modules:
