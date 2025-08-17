@@ -1,46 +1,42 @@
-name: Update & AI-Driven Fixes
+name: Update and Fix Modules
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 2 * * *'
 
-permissions:
-  issues: write
-  pull-requests: write
-  contents: write
-  
 jobs:
   discover-modules:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v5.0.0
-      - name: Build matrix JSON
+      - name: Discover modules
         id: set-matrix
         run: |
-          modules=$(find . -type f -name go.mod -exec dirname {} \; | jq -R -s -c 'split("\n")[:-1]')
-          matrix=$(jq -n -c --argjson m "$modules" '{module: $m}')
-          echo "matrix=$matrix" >> $GITHUB_OUTPUT
+          echo '::set-output name=matrix::{"module": ["moduleA", "moduleB"]}' # Replace with actual discovery logic
 
   update-and-fix:
     needs: discover-modules
     runs-on: ubuntu-latest
     strategy:
-      matrix: ${{ fromJson(needs.discover-modules.outputs.matrix) }}
+      matrix: 
+        module: ${{ fromJson(needs.discover-modules.outputs.matrix).module }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v5.0.0
         with:
           fetch-depth: 0
           persist-credentials: true
+
       - name: Set up Go
         uses: actions/setup-go@v5.5.0
         with:
           go-version: '1.25.0'
           cache: true
+
+      - name: Update Go version in go.mod
+        working-directory: ${{ matrix.module }}
+        run: go mod edit -go=1.25.0
+
       - name: Cache Go modules
         uses: actions/cache@v4.2.4
         with:
@@ -49,11 +45,13 @@ jobs:
             **/go.mod
             **/pkg/mod
           key: go-mod-${{ matrix.module }}-${{ hashFiles(format('{0}/go.sum', matrix.module)) }}
+
       - name: Update dependencies
         working-directory: ${{ matrix.module }}
         run: |
           go get -u ./...
           go mod tidy
+
       - name: AI compatibility fixes
         uses: dlidstrom/genai-code-review@v3.0.8
         continue-on-error: true
@@ -66,6 +64,7 @@ jobs:
           openai_max_tokens: 2048
           mode: files
           language: en
+
       - name: Commit & detect changes
         id: commit
         run: |
@@ -77,7 +76,7 @@ jobs:
             git add .
             git commit -m "chore: update deps & AI fixes for ${{ matrix.module }}"
             echo "changes=true" >> $GITHUB_OUTPUT
-          fi
+
       - name: Create Pull Request
         if: steps.commit.outputs.changes == 'true'
         uses: peter-evans/create-pull-request@v7.0.8
