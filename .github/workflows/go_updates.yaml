@@ -3,7 +3,7 @@ name: Update and Fix Go Modules
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * 6"
+    - cron: "0 3 * * *"
 
 permissions:
   issues: write
