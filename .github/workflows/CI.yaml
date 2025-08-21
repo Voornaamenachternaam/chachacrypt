@@ -57,7 +57,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest' # only run once
         run: |
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
-            | sh -s -- -b $(go env GOPATH)/bin v8.0.0
+            | sh -s -- -b $(go env GOPATH)/bin v2.4.0
           golangci-lint run ./...
 
       - name: Unit tests (with race detector)
