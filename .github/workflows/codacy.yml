@@ -1,5 +1,11 @@
 name: Codacy Security Scan
 
+# Give the runner the permissions needed to upload SARIF results
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+
 on:
   push:
     branches: [ main, master ]
@@ -40,13 +46,11 @@ jobs:
           echo "Found $count run(s) in results.sarif"
 
           if [ "$count" -le 1 ]; then
-            # single run -> keep original
             echo "sarif_files=[\"results.sarif\"]" >> $GITHUB_OUTPUT
           else
             files_array="["
             for i in $(seq 0 $((count - 1))); do
               out="results.${i}.sarif"
-              # Build a SARIF file that keeps top-level keys and only a single run
               jq --argjson i "$i" '. as $orig | ($orig | del(.runs)) + { runs: [ $orig.runs[$i] ] }' results.sarif > "$out"
               files_array="${files_array}\"${out}\""
               if [ "$i" -lt $((count - 1)) ]; then
@@ -92,3 +96,5 @@ jobs:
         uses: github/codeql-action/upload-sarif@main
         with:
           sarif_file: ${{ matrix.sarif_file }}
+          # Optional: explicitly provide a token (use only if GITHUB_TOKEN is insufficient).
+          # token: ${{ secrets.SARIF_UPLOAD_PAT }}
