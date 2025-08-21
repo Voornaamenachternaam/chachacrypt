@@ -1,18 +1,24 @@
+// chachacrypt.go
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
-	"math/big"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"runtime"
-	"strings"
-	"sync"
+	"syscall"
+	"time"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
@@ -20,307 +26,656 @@ import (
 )
 
 const (
-	defaultSaltSize  = 32
-	defaultKeySize   = 32
-	defaultKeyTime   = uint32(5)
-	defaultKeyMemory = uint32(1024 * 64)
-	defaultChunkSize = 1024 * 32
+	// File format / protocol constants
+	magic         = "CCRYPT1\x00"
+	formatVersion = 1
+
+	// Crypto parameters
+	keyLen       = 32            // bytes for AEAD key portion
+	hmacKeyLen   = 32            // bytes for HMAC key portion
+	derivedKeyLen = keyLen + hmacKeyLen
+
+	saltLen      = 16
+	baseNonceLen = 16 // we'll append 8-byte counter to this to make 24-byte nonce
+	nonceSizeX   = chacha20poly1305.NonceSizeX
+
+	// Chunking
+	chunkDefault = 1 << 20        // 1 MiB
+	chunkMin     = 1 << 12        // 4 KiB
+	chunkMax     = 16 << 20       // 16 MiB
+
+	// Parameter defaults and caps
+	memoryKBDef  = 64 * 1024      // 64 MiB expressed in KB
+	memoryKBMax  = 1024 * 1024    // 1 GiB in KB
+	timeDef      = 3
+	timeMax      = 12
+	threadsMaxCap = 256
+
+	// HMAC size
+	hmacSize = sha256.Size
+
+	// Files
+	tmpPrefix = ".chachacrypt_tmp_"
 )
 
-type Config struct {
-	SaltSize   int
-	KeySize    int
-	KeyTime    uint32
-	KeyMemory  uint32
-	KeyThreads uint8
-	ChunkSize  int
+var (
+	// Channel holds temporary file paths to clean up on signal.
+	tempFilesToRemove = make(chan string, 16)
+	logger            = log.New(os.Stderr, "chachacrypt: ", log.LstdFlags)
+)
+
+// header represents the on-disk header (without trailing HMAC).
+// Serialized layout:
+// [1 byte version][len(magic) bytes magic][4 Time][4 MemoryKB][1 Threads][1 SaltLen][2 Reserved][Salt][BaseNonce]
+type header struct {
+	Version   uint8
+	Time      uint32
+	MemoryKB  uint32
+	Threads   uint8
+	SaltLen   uint8
+	Reserved  uint16
+	Salt      []byte
+	BaseNonce []byte
 }
 
-var config Config
-
-func init() {
-	// Cap threads to GOMAXPROCS to avoid oversubscription.
-	maxProcs := runtime.GOMAXPROCS(0)
-	numCPU := runtime.NumCPU()
-	threads := uint8(numCPU)
-	if numCPU > maxProcs {
-		threads = uint8(maxProcs)
-	}
-
-	config = Config{
-		SaltSize:   defaultSaltSize,
-		KeySize:    defaultKeySize,
-		KeyTime:    defaultKeyTime,
-		KeyMemory:  defaultKeyMemory,
-		KeyThreads: threads,
-		ChunkSize:  defaultChunkSize,
-	}
+// encryption options used by the CLI and internal functions.
+type encryptOptions struct {
+	Time       uint32
+	MemoryKB   uint32
+	Threads    uint8
+	ChunkBytes int
 }
 
 func main() {
-	fmt.Println("Welcome to chachacrypt")
-
-	enc := flag.NewFlagSet("enc", flag.ExitOnError)
-	encInput := enc.String("i", "", "Input file to encrypt")
-	encOutput := enc.String("o", "", "Output file")
-
-	dec := flag.NewFlagSet("dec", flag.ExitOnError)
-	decInput := dec.String("i", "", "Input file to decrypt")
-	decOutput := dec.String("o", "", "Output file")
-
-	pw := flag.NewFlagSet("pw", flag.ExitOnError)
-	pwSize := pw.Int("s", 15, "Password length (min 12)")
+	setupSignalHandler()
 
 	if len(os.Args) < 2 {
-		showHelp()
-		os.Exit(1)
+		usage()
+		os.Exit(2)
 	}
-
 	switch os.Args[1] {
 	case "enc":
-		_ = enc.Parse(os.Args[2:])
-		if err := validateFileInput(*encInput, *encOutput); err != nil {
-			log.Fatalf("Input validation error: %v", err)
-		}
-		if err := encryptFile(*encInput, *encOutput); err != nil {
-			log.Fatalf("Encryption failed: %v", err)
-		}
+		enc(os.Args[2:])
 	case "dec":
-		_ = dec.Parse(os.Args[2:])
-		if err := validateFileInput(*decInput, *decOutput); err != nil {
-			log.Fatalf("Input validation error: %v", err)
-		}
-		if err := decryptFile(*decInput, *decOutput); err != nil {
-			log.Fatalf("Decryption failed: %v", err)
-		}
+		dec(os.Args[2:])
 	case "pw":
-		_ = pw.Parse(os.Args[2:])
-		fmt.Println("Generated password:", generatePassword(*pwSize))
+		pw(os.Args[2:])
+	case "help", "-h", "--help":
+		usage()
 	default:
-		showHelp()
+		fmt.Fprintln(os.Stderr, "unknown command:", os.Args[1])
+		usage()
+		os.Exit(2)
 	}
 }
 
-func showHelp() {
+func usage() {
 	fmt.Println("Usage:")
-	fmt.Println("  Encrypt: chachacrypt enc -i input.txt -o output.enc")
-	fmt.Println("  Decrypt: chachacrypt dec -i input.enc -o output.txt")
-	fmt.Println("  Password: chachacrypt pw -s 15")
+	fmt.Println("  chachacrypt enc -i <in> -o <out> [-mem 65536] [-time 3] [-threads N] [-chunk 1048576] [-overwrite]")
+	fmt.Println("  chachacrypt dec -i <in> -o <out> [-overwrite]")
+	fmt.Println("  chachacrypt pw  -s <length>")
 }
 
-func generatePassword(length int) string {
-	if length < 12 {
-		log.Fatal("Password length must be at least 12 characters.")
-	}
-
-	sets := []string{
-		"abcdefghijklmnopqrstuvwxyz",
-		"ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-		"0123456789",
-		"`~!@#$%^&*()_+-={}|[]\\;':\",./<>?",
-	}
-
-	var sb strings.Builder
-	for i := 0; i < length; i++ {
-		si, err := rand.Int(rand.Reader, big.NewInt(int64(len(sets))))
-		if err != nil {
-			log.Fatalf("Random error: %v", err)
+// setupSignalHandler removes temporary files on interrupt/terminate.
+func setupSignalHandler() {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		logger.Println("received interrupt; cleaning up temporary files")
+		close(tempFilesToRemove)
+		for p := range tempFilesToRemove {
+			_ = os.Remove(p)
 		}
-		set := sets[si.Int64()]
-
-		ci, err := rand.Int(rand.Reader, big.NewInt(int64(len(set))))
-		if err != nil {
-			log.Fatalf("Random error: %v", err)
-		}
-		sb.WriteByte(set[ci.Int64()])
-	}
-	return sb.String()
+		// brief pause before exiting to allow any deferred cleanup
+		time.Sleep(50 * time.Millisecond)
+		os.Exit(2)
+	}()
 }
 
-func validateFileInput(inPath, outPath string) error {
-	if inPath == "" || !fileExists(inPath) {
-		return errors.New("provide a valid input file")
+func enc(args []string) {
+	fs := flag.NewFlagSet("enc", flag.ExitOnError)
+	in := fs.String("i", "", "input file")
+	out := fs.String("o", "", "output file")
+	mem := fs.Uint("mem", memoryKBDef, "argon2 memory in KB")
+	tm := fs.Uint("time", timeDef, "argon2 iterations")
+	thr := fs.Uint("threads", uint(runtime.NumCPU()), "argon2 parallelism")
+	chunk := fs.Uint("chunk", chunkDefault, "chunk size in bytes")
+	overwrite := fs.Bool("overwrite", false, "overwrite output if exists")
+	_ = fs.Parse(args)
+
+	if *in == "" || *out == "" {
+		fmt.Fprintln(os.Stderr, "missing -i or -o")
+		os.Exit(2)
 	}
-	if outPath == "" {
-		return errors.New("output file must be provided")
+	if !*overwrite && fileExists(*out) {
+		ok, err := confirm(fmt.Sprintf("Overwrite %s? [y/N]: ", *out))
+		if err != nil {
+			logger.Printf("prompt failed: %v", err)
+			os.Exit(1)
+		}
+		if !ok {
+			os.Exit(1)
+		}
+	}
+	pw, err := readPassword("Password: ")
+	if err != nil {
+		logger.Fatalf("read password: %v", err)
+	}
+	if len(pw) == 0 {
+		logger.Fatal("empty password")
+	}
+
+	opt := encryptOptions{
+		Time:       uint32(*tm),
+		MemoryKB:   uint32(*mem),
+		Threads:    uint8(*thr),
+		ChunkBytes: int(*chunk),
+	}
+	if err := validateAndFixOptions(&opt); err != nil {
+		logger.Fatalf("invalid options: %v", err)
+	}
+
+	if err := encryptFileAtomic(*in, *out, pw, opt); err != nil {
+		logger.Fatalf("encrypt failed: %v", err)
+	}
+	zero(pw)
+	logger.Println("encryption successful")
+}
+
+func dec(args []string) {
+	fs := flag.NewFlagSet("dec", flag.ExitOnError)
+	in := fs.String("i", "", "input file")
+	out := fs.String("o", "", "output file")
+	overwrite := fs.Bool("overwrite", false, "overwrite output if exists")
+	_ = fs.Parse(args)
+
+	if *in == "" || *out == "" {
+		fmt.Fprintln(os.Stderr, "missing -i or -o")
+		os.Exit(2)
+	}
+	if !*overwrite && fileExists(*out) {
+		ok, err := confirm(fmt.Sprintf("Overwrite %s? [y/N]: ", *out))
+		if err != nil {
+			logger.Printf("prompt failed: %v", err)
+			os.Exit(1)
+		}
+		if !ok {
+			os.Exit(1)
+		}
+	}
+	pw, err := readPassword("Password: ")
+	if err != nil {
+		logger.Fatalf("read password: %v", err)
+	}
+	if len(pw) == 0 {
+		logger.Fatal("empty password")
+	}
+
+	if err := decryptFileAtomic(*in, *out, pw); err != nil {
+		logger.Fatalf("decrypt failed: %v", err)
+	}
+	zero(pw)
+	logger.Println("decryption successful")
+}
+
+func pw(args []string) {
+	fs := flag.NewFlagSet("pw", flag.ExitOnError)
+	size := fs.Uint("s", 16, "password length")
+	_ = fs.Parse(args)
+	n := int(*size)
+	if n <= 0 || n > 1024 {
+		logger.Fatal("invalid size")
+	}
+	out, err := randomPassword(n)
+	if err != nil {
+		logger.Fatalf("generate password: %v", err)
+	}
+	fmt.Println(string(out))
+	zero(out)
+}
+
+// validateAndFixOptions enforces conservative bounds on user-supplied parameters.
+func validateAndFixOptions(opt *encryptOptions) error {
+	if opt.Time == 0 {
+		opt.Time = timeDef
+	}
+	if opt.Time > timeMax {
+		return fmt.Errorf("time too large (>%d)", timeMax)
+	}
+	if opt.MemoryKB == 0 {
+		opt.MemoryKB = memoryKBDef
+	}
+	if opt.MemoryKB > memoryKBMax {
+		return fmt.Errorf("memory too large (>%d KB)", memoryKBMax)
+	}
+	maxThreads := runtime.NumCPU()
+	if maxThreads < 1 {
+		maxThreads = 1
+	}
+	threadsCap := maxThreads * 4
+	if threadsCap > threadsMaxCap {
+		threadsCap = threadsMaxCap
+	}
+	if opt.Threads == 0 {
+		opt.Threads = uint8(maxThreads)
+	}
+	if int(opt.Threads) > threadsCap {
+		return fmt.Errorf("threads too large (>%d)", threadsCap)
+	}
+	if opt.ChunkBytes <= 0 {
+		opt.ChunkBytes = chunkDefault
+	}
+	if opt.ChunkBytes < chunkMin || opt.ChunkBytes > chunkMax {
+		return fmt.Errorf("chunk size must be between %d and %d", chunkMin, chunkMax)
 	}
 	return nil
 }
 
-func encryptFile(inPath, outPath string) error {
-	fmt.Print("Enter password: ")
-	passwordBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
+// encryptFileAtomic writes output to a temporary file in the destination directory and renames it on success.
+// It writes header + HMAC followed by framed ciphertext chunks.
+func encryptFileAtomic(inPath, outPath string, password []byte, opt encryptOptions) error {
+	dir := filepath.Dir(outPath)
+	tmp, err := os.CreateTemp(dir, tmpPrefix)
 	if err != nil {
-		return fmt.Errorf("reading password: %w", err)
+		return fmt.Errorf("create temp file: %w", err)
 	}
-	password := string(passwordBytes)
+	tmpPath := tmp.Name()
 
-	salt := make([]byte, config.SaltSize)
-	if _, err := rand.Read(salt); err != nil {
-		return fmt.Errorf("generating salt: %w", err)
+	// register temp path for signal cleanup
+	select {
+	case tempFilesToRemove <- tmpPath:
+	default:
 	}
 
-	key := argon2.IDKey([]byte(password), salt, config.KeyTime, config.KeyMemory, config.KeyThreads, uint32(config.KeySize))
-	aead, err := chacha20poly1305.NewX(key)
+	// ensure temp is removed on early return
+	defer func() {
+		_ = os.Remove(tmpPath)
+	}()
+
+	// set file mode (best-effort; not fatal)
+	_ = tmp.Chmod(0o600)
+
+	// do encryption writing to tmp
+	if err := encryptToWriter(inPath, tmp, password, opt); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+
+	// flush & close
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+
+	// atomic rename
+	if err := os.Rename(tmpPath, outPath); err != nil {
+		return fmt.Errorf("rename temp file: %w", err)
+	}
+	return nil
+}
+
+// encryptToWriter performs the actual encryption and writes to the provided writer (usually a temp file).
+func encryptToWriter(inPath string, out io.Writer, password []byte, opt encryptOptions) error {
+	// generate salt and base nonce
+	salt := make([]byte, saltLen)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return fmt.Errorf("generate salt: %w", err)
+	}
+	baseNonce := make([]byte, baseNonceLen)
+	if _, err := io.ReadFull(rand.Reader, baseNonce); err != nil {
+		return fmt.Errorf("generate base nonce: %w", err)
+	}
+
+	// derive keys (AEAD key + HMAC key)
+	derived := argon2.IDKey(password, salt, opt.Time, opt.MemoryKB, opt.Threads, uint32(derivedKeyLen))
+	defer func() {
+		zero(derived)
+		runtime.KeepAlive(derived)
+	}()
+	aeadKey := derived[:keyLen]
+	hmacKey := derived[keyLen:derivedKeyLen]
+
+	h := header{
+		Version:   formatVersion,
+		Time:      opt.Time,
+		MemoryKB:  opt.MemoryKB,
+		Threads:   opt.Threads,
+		SaltLen:   uint8(len(salt)),
+		Reserved:  0,
+		Salt:      salt,
+		BaseNonce: baseNonce,
+	}
+	// write header and get AAD (exact bytes)
+	aad, err := writeHeader(out, &h)
 	if err != nil {
-		return fmt.Errorf("initializing AEAD: %w", err)
+		return fmt.Errorf("write header: %w", err)
+	}
+	// compute HMAC over header bytes and write it
+	hmacVal := computeHMAC(hmacKey, aad)
+	if _, err := out.Write(hmacVal); err != nil {
+		return fmt.Errorf("write header hmac: %w", err)
 	}
 
+	// create AEAD
+	aead, err := chacha20poly1305.NewX(aeadKey)
+	if err != nil {
+		return fmt.Errorf("create aead: %w", err)
+	}
+
+	// open input file
 	inFile, err := os.Open(inPath)
 	if err != nil {
-		return fmt.Errorf("opening input: %w", err)
+		return fmt.Errorf("open input: %w", err)
 	}
 	defer inFile.Close()
 
-	outFile, err := os.Create(outPath)
-	if err != nil {
-		return fmt.Errorf("creating output: %w", err)
-	}
-	defer outFile.Close()
-
-	// Write salt and chunk size header
-	if err := binary.Write(outFile, binary.BigEndian, uint32(config.SaltSize)); err != nil {
-		return fmt.Errorf("writing header: %w", err)
-	}
-	if _, err := outFile.Write(salt); err != nil {
-		return fmt.Errorf("writing salt: %w", err)
-	}
-	if err := binary.Write(outFile, binary.BigEndian, uint32(config.ChunkSize)); err != nil {
-		return fmt.Errorf("writing header: %w", err)
-	}
-
-	var wg sync.WaitGroup
-	errCh := make(chan error, 1)
-	sem := make(chan struct{}, config.KeyThreads)
+	buf := make([]byte, opt.ChunkBytes)
+	counter := uint64(0)
+	lenBuf := make([]byte, 4)
 
 	for {
-		buf := make([]byte, config.ChunkSize)
-		n, readErr := inFile.Read(buf)
+		n, rErr := io.ReadFull(inFile, buf)
+		if rErr != nil && rErr != io.ErrUnexpectedEOF && rErr != io.EOF {
+			return fmt.Errorf("read input: %w", rErr)
+		}
 		if n == 0 {
-			if readErr == io.EOF {
-				break
-			}
-			return fmt.Errorf("reading input: %w", readErr)
+			break
 		}
-
-		plaintext := make([]byte, n)
-		copy(plaintext, buf[:n])
-
-		nonce := make([]byte, aead.NonceSize())
-		if _, err := rand.Read(nonce); err != nil {
-			return fmt.Errorf("generating nonce: %w", err)
+		pt := buf[:n]
+		nonce := makeNonce(baseNonce, counter)
+		ct := aead.Seal(nil, nonce, pt, aad)
+		binary.LittleEndian.PutUint32(lenBuf, uint32(len(ct)))
+		if _, err := out.Write(lenBuf); err != nil {
+			return fmt.Errorf("write length: %w", err)
 		}
-
-		wg.Add(1)
-		sem <- struct{}{}
-
-		go func(pt, nn []byte) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			ciphertext := aead.Seal(nil, nn, pt, nil)
-			packet := append(nn, ciphertext...)
-
-			if _, err := outFile.Write(packet); err != nil {
-				select {
-				case errCh <- fmt.Errorf("writing chunk: %w", err):
-				default:
-				}
-			}
-		}(plaintext, nonce)
-
-		// Check if any goroutine reported an error
-		select {
-		case e := <-errCh:
-			return e
-		default:
+		if _, err := out.Write(ct); err != nil {
+			return fmt.Errorf("write ciphertext: %w", err)
+		}
+		counter++
+		if rErr == io.ErrUnexpectedEOF || rErr == io.EOF {
+			break
 		}
 	}
-
-	wg.Wait()
-	close(errCh)
-	if e, ok := <-errCh; ok {
-		return e
-	}
-
 	return nil
 }
 
-func decryptFile(inPath, outPath string) error {
-	fmt.Print("Enter password: ")
-	passwordBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
+// decryptFileAtomic decrypts to a temp file and renames the result on success.
+func decryptFileAtomic(inPath, outPath string, password []byte) error {
+	dir := filepath.Dir(outPath)
+	tmp, err := os.CreateTemp(dir, tmpPrefix)
 	if err != nil {
-		return fmt.Errorf("reading password: %w", err)
+		return fmt.Errorf("create temp file: %w", err)
 	}
-	password := string(passwordBytes)
+	tmpPath := tmp.Name()
+	select {
+	case tempFilesToRemove <- tmpPath:
+	default:
+	}
+	defer func() {
+		_ = os.Remove(tmpPath)
+	}()
 
+	_ = tmp.Chmod(0o600)
+
+	if err := decryptToWriter(inPath, tmp, password); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, outPath); err != nil {
+		return fmt.Errorf("rename temp file: %w", err)
+	}
+	return nil
+}
+
+// decryptToWriter performs header reading, HMAC verification, and chunk decryption to writer.
+func decryptToWriter(inPath string, out io.Writer, password []byte) error {
 	inFile, err := os.Open(inPath)
 	if err != nil {
-		return fmt.Errorf("opening input: %w", err)
+		return fmt.Errorf("open input: %w", err)
 	}
 	defer inFile.Close()
 
-	outFile, err := os.Create(outPath)
+	// read header bytes and HMAC
+	hdrBuf, hdr, err := readHeaderAndBuf(inFile)
 	if err != nil {
-		return fmt.Errorf("creating output: %w", err)
-	}
-	defer outFile.Close()
-
-	// Read headers: salt size, salt, chunk size
-	var saltSize uint32
-	if err := binary.Read(inFile, binary.BigEndian, &saltSize); err != nil {
-		return fmt.Errorf("reading header: %w", err)
-	}
-	salt := make([]byte, saltSize)
-	if _, err := io.ReadFull(inFile, salt); err != nil {
-		return fmt.Errorf("reading salt: %w", err)
-	}
-	var chunkSize uint32
-	if err := binary.Read(inFile, binary.BigEndian, &chunkSize); err != nil {
-		return fmt.Errorf("reading header: %w", err)
+		return fmt.Errorf("read header: %w", err)
 	}
 
-	key := argon2.IDKey([]byte(password), salt, config.KeyTime, config.KeyMemory, config.KeyThreads, uint32(config.KeySize))
-	aead, err := chacha20poly1305.NewX(key)
+	// derive keys
+	derived := argon2.IDKey(password, hdr.Salt, hdr.Time, hdr.MemoryKB, hdr.Threads, uint32(derivedKeyLen))
+	defer func() {
+		zero(derived)
+		runtime.KeepAlive(derived)
+	}()
+	aeadKey := derived[:keyLen]
+	hmacKey := derived[keyLen:derivedKeyLen]
+
+	// verify HMAC (protects header integrity)
+	hmacOnDisk := make([]byte, hmacSize)
+	if _, err := io.ReadFull(inFile, hmacOnDisk); err != nil {
+		return fmt.Errorf("read header hmac: %w", err)
+	}
+	expected := computeHMAC(hmacKey, hdrBuf)
+	if !hmac.Equal(hmacOnDisk, expected) {
+		return errors.New("header integrity check failed (wrong password or corrupted file)")
+	}
+	// AAD includes header bytes (same as written)
+	aad := hdrBuf
+
+	aead, err := chacha20poly1305.NewX(aeadKey)
 	if err != nil {
-		return fmt.Errorf("initializing AEAD: %w", err)
+		return fmt.Errorf("create aead: %w", err)
 	}
 
-	nonceSize := aead.NonceSize()
-	packetSize := int(chunkSize) + nonceSize + aead.Overhead()
-	buf := make([]byte, packetSize)
+	lenBuf := make([]byte, 4)
+	counter := uint64(0)
 
 	for {
-		n, readErr := inFile.Read(buf)
-		if n == 0 {
-			if readErr == io.EOF {
-				break
-			}
-			return fmt.Errorf("reading input: %w", readErr)
+		_, rErr := io.ReadFull(inFile, lenBuf)
+		if rErr == io.EOF {
+			break
 		}
-		if n < nonceSize {
-			return fmt.Errorf("malformed chunk: too small (%d bytes)", n)
+		if rErr != nil {
+			return fmt.Errorf("read length: %w", rErr)
 		}
-
-		nonce := buf[:nonceSize]
-		ciphertext := buf[nonceSize:n]
-
-		plaintext, err := aead.Open(nil, nonce, ciphertext, nil)
+		size := binary.LittleEndian.Uint32(lenBuf)
+		if size > uint32(chunkMax)+chacha20poly1305.Overhead {
+			return errors.New("invalid chunk size")
+		}
+		ct := make([]byte, int(size))
+		if _, err := io.ReadFull(inFile, ct); err != nil {
+			return fmt.Errorf("read ciphertext: %w", err)
+		}
+		nonce := makeNonce(hdr.BaseNonce, counter)
+		pt, err := aead.Open(nil, nonce, ct, aad)
 		if err != nil {
-			return fmt.Errorf("decryption failed: %w", err)
+			return fmt.Errorf("decrypt chunk %d: %w", counter, err)
 		}
-
-		if _, err := outFile.Write(plaintext); err != nil {
-			return fmt.Errorf("writing output: %w", err)
+		if _, err := out.Write(pt); err != nil {
+			return fmt.Errorf("write plaintext: %w", err)
 		}
+		counter++
 	}
-
 	return nil
 }
 
-func fileExists(name string) bool {
-	_, err := os.Stat(name)
-	return err == nil
+// writeHeader serializes header to writer and returns the header bytes used as AAD.
+func writeHeader(w io.Writer, h *header) ([]byte, error) {
+	total := 1 + len(magic) + 4 + 4 + 1 + 1 + 2 + len(h.Salt) + baseNonceLen
+	buf := make([]byte, 0, total)
+	buf = append(buf, byte(h.Version))
+	buf = append(buf, []byte(magic)...)
+	tmp4 := make([]byte, 4)
+	binary.LittleEndian.PutUint32(tmp4, h.Time)
+	buf = append(buf, tmp4...)
+	binary.LittleEndian.PutUint32(tmp4, h.MemoryKB)
+	buf = append(buf, tmp4...)
+	buf = append(buf, h.Threads)
+	buf = append(buf, h.SaltLen)
+	buf = append(buf, 0, 0) // reserved
+	buf = append(buf, h.Salt...)
+	buf = append(buf, h.BaseNonce...)
+
+	if _, err := w.Write(buf); err != nil {
+		return nil, fmt.Errorf("write header: %w", err)
+	}
+	return buf, nil
+}
+
+// readHeaderAndBuf reads header fields from reader and returns the raw header bytes and parsed header.
+func readHeaderAndBuf(r io.Reader) ([]byte, *header, error) {
+	var h header
+	// Read version + magic first to verify size
+	verBuf := make([]byte, 1)
+	if _, err := io.ReadFull(r, verBuf); err != nil {
+		return nil, nil, fmt.Errorf("read version: %w", err)
+	}
+	h.Version = uint8(verBuf[0])
+	if h.Version != formatVersion {
+		return nil, nil, fmt.Errorf("unsupported file version: %d", h.Version)
+	}
+	magicBuf := make([]byte, len(magic))
+	if _, err := io.ReadFull(r, magicBuf); err != nil {
+		return nil, nil, fmt.Errorf("read magic: %w", err)
+	}
+	if string(magicBuf) != magic {
+		return nil, nil, errors.New("magic mismatch (not a chachacrypt file)")
+	}
+	tmp4 := make([]byte, 4)
+	if _, err := io.ReadFull(r, tmp4); err != nil {
+		return nil, nil, fmt.Errorf("read time: %w", err)
+	}
+	h.Time = binary.LittleEndian.Uint32(tmp4)
+	if _, err := io.ReadFull(r, tmp4); err != nil {
+		return nil, nil, fmt.Errorf("read memory: %w", err)
+	}
+	h.MemoryKB = binary.LittleEndian.Uint32(tmp4)
+	b1 := make([]byte, 1)
+	if _, err := io.ReadFull(r, b1); err != nil {
+		return nil, nil, fmt.Errorf("read threads: %w", err)
+	}
+	h.Threads = uint8(b1[0])
+	if _, err := io.ReadFull(r, b1); err != nil {
+		return nil, nil, fmt.Errorf("read saltlen: %w", err)
+	}
+	h.SaltLen = uint8(b1[0])
+	res := make([]byte, 2)
+	if _, err := io.ReadFull(r, res); err != nil {
+		return nil, nil, fmt.Errorf("read reserved: %w", err)
+	}
+	h.Reserved = binary.LittleEndian.Uint16(res)
+	h.Salt = make([]byte, int(h.SaltLen))
+	if _, err := io.ReadFull(r, h.Salt); err != nil {
+		return nil, nil, fmt.Errorf("read salt: %w", err)
+	}
+	h.BaseNonce = make([]byte, baseNonceLen)
+	if _, err := io.ReadFull(r, h.BaseNonce); err != nil {
+		return nil, nil, fmt.Errorf("read base nonce: %w", err)
+	}
+
+	// reconstruct header buffer exactly as written (version + magic + fields + salt + baseNonce)
+	total := 1 + len(magic) + 4 + 4 + 1 + 1 + 2 + len(h.Salt) + baseNonceLen
+	buf := make([]byte, total)
+	off := 0
+	buf[off] = byte(h.Version)
+	off++
+	copy(buf[off:off+len(magic)], []byte(magic))
+	off += len(magic)
+	binary.LittleEndian.PutUint32(buf[off:off+4], h.Time)
+	off += 4
+	binary.LittleEndian.PutUint32(buf[off:off+4], h.MemoryKB)
+	off += 4
+	buf[off] = byte(h.Threads)
+	off++
+	buf[off] = byte(h.SaltLen)
+	off++
+	binary.LittleEndian.PutUint16(buf[off:off+2], h.Reserved)
+	off += 2
+	copy(buf[off:off+len(h.Salt)], h.Salt)
+	off += len(h.Salt)
+	copy(buf[off:off+baseNonceLen], h.BaseNonce)
+
+	return buf, &h, nil
+}
+
+// computeHMAC returns HMAC-SHA256 over message using key.
+func computeHMAC(key, message []byte) []byte {
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(message)
+	return mac.Sum(nil)
+}
+
+// makeNonce constructs a 24-byte XChaCha nonce by copying base (16 bytes) and appending counter (8 bytes little-endian).
+func makeNonce(base []byte, counter uint64) []byte {
+	n := make([]byte, nonceSizeX)
+	copy(n, base)
+	binary.LittleEndian.PutUint64(n[baseNonceLen:], counter)
+	return n
+}
+
+// readPassword reads password from tty without echo.
+func readPassword(prompt string) ([]byte, error) {
+	fmt.Fprint(os.Stderr, prompt)
+	pw, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	return pw, err
+}
+
+// confirm prompts user and returns true if they answered 'y' or 'Y'.
+func confirm(prompt string) (bool, error) {
+	fmt.Fprint(os.Stderr, prompt)
+	rd := bufio.NewReader(os.Stdin)
+	line, err := rd.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	if len(line) > 0 && (line[0] == 'y' || line[0] == 'Y') {
+		return true, nil
+	}
+	return false, nil
+}
+
+// randomPassword generates a password of length n.
+func randomPassword(n int) ([]byte, error) {
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{};:,.?/"
+	out := make([]byte, n)
+	buf := make([]byte, 1)
+	for i := 0; i < n; i++ {
+		if _, err := io.ReadFull(rand.Reader, buf); err != nil {
+			return nil, err
+		}
+		out[i] = alphabet[int(buf[0])%len(alphabet)]
+	}
+	return out, nil
+}
+
+// zero overwrites slice content (best-effort) and calls KeepAlive.
+func zero(b []byte) {
+	if b == nil {
+		return
+	}
+	for i := range b {
+		b[i] = 0
+	}
+	runtime.KeepAlive(b)
+}
+
+// fileExists checks if path exists and is a regular file (not a directory).
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir()
 }
