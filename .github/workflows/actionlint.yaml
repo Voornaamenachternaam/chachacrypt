@@ -1,0 +1,26 @@
+name: actionlint
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/*.yaml
+  push:
+    paths:
+      - .github/workflows/*.yaml
+
+permissions:
+  contents: read
+
+jobs:
+  validation:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Check no lint warnings
+        uses: docker://rhysd/actionlint:latest
+        with:
+          args: -color -verbose
