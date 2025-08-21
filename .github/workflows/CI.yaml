@@ -40,12 +40,12 @@ jobs:
           go mod tidy
           git diff --exit-code go.mod go.sum
 
-      - name: Run gofmt check
-        if: matrix.os == 'ubuntu-latest' # only check formatting once
+      - name: Run gofmt (auto-fix and check)
         run: |
-          if [ -n "$(gofmt -l .)" ]; then
-            echo "The following files are not formatted:"
-            gofmt -l .
+          gofmt -w .
+          if ! git diff --exit-code; then
+            echo "Code was not gofmt-clean. CI formatted it for you."
+            echo "Please run 'gofmt -w .' locally and re-commit."
             exit 1
           fi
 
