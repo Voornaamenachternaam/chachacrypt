@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	nonceSize = chacha20poly1305.NonceSizeX
-	keySize = chacha20poly1305.KeySize
-	chunkSize = 64 * 1024
+	nonceSize   = chacha20poly1305.NonceSizeX
+	keySize     = chacha20poly1305.KeySize
+	chunkSize   = 64 * 1024
 	versionByte = 1
 )
 
