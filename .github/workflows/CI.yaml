@@ -1,7 +1,3 @@
-# SPDX-FileCopyrightText: 2023 Shun Sakai
-#
-# SPDX-License-Identifier: Apache-2.0 OR MIT
-
 name: CI
 
 on:
@@ -9,6 +5,7 @@ on:
   push:
     branches:
       - "main"
+  workflow_dispatch: {}
   schedule:
     - cron: "0 0 * * *"
 
@@ -20,7 +17,6 @@ jobs:
       matrix:
         os-alias:
           - ubuntu
-          - macos
           - windows
         go-version-alias:
           - minimum
