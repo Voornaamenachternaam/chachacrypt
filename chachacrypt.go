@@ -32,13 +32,21 @@ func encryptFile(inputPath, outputPath string, key []byte) error {
 	if err != nil {
 		return err
 	}
-	defer inFile.Close()
+	defer func() {
+		if cerr := inFile.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close input file: %v\n", cerr)
+		}
+	}()
 
 	outFile, err := os.Create(outputPath)
 	if err != nil {
 		return err
 	}
-	defer outFile.Close()
+	defer func() {
+		if cerr := outFile.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close output file: %v\n", cerr)
+		}
+	}()
 
 	aead, err := chacha20poly1305.NewX(key)
 	if err != nil {
@@ -82,13 +90,21 @@ func decryptFile(inputPath, outputPath string, key []byte) error {
 	if err != nil {
 		return err
 	}
-	defer inFile.Close()
+	defer func() {
+		if cerr := inFile.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close input file: %v\n", cerr)
+		}
+	}()
 
 	outFile, err := os.Create(outputPath)
 	if err != nil {
 		return err
 	}
-	defer outFile.Close()
+	defer func() {
+		if cerr := outFile.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close output file: %v\n", cerr)
+		}
+	}()
 
 	version := make([]byte, 1)
 	if _, err := io.ReadFull(inFile, version); err != nil {
