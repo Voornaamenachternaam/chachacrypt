@@ -34,7 +34,7 @@ func encryptFile(inputPath, outputPath string, key []byte) error {
 	}
 	defer func() {
 		if cerr := inFile.Close(); cerr != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to close input file: %v\n", cerr)
+			fmt.Fprintf(os.Stderr, "warning: error closing input file: %v\n", cerr)
 		}
 	}()
 
@@ -44,7 +44,7 @@ func encryptFile(inputPath, outputPath string, key []byte) error {
 	}
 	defer func() {
 		if cerr := outFile.Close(); cerr != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to close output file: %v\n", cerr)
+			fmt.Fprintf(os.Stderr, "warning: error closing output file: %v\n", cerr)
 		}
 	}()
 
@@ -92,7 +92,7 @@ func decryptFile(inputPath, outputPath string, key []byte) error {
 	}
 	defer func() {
 		if cerr := inFile.Close(); cerr != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to close input file: %v\n", cerr)
+			fmt.Fprintf(os.Stderr, "warning: error closing input file: %v\n", cerr)
 		}
 	}()
 
@@ -102,7 +102,7 @@ func decryptFile(inputPath, outputPath string, key []byte) error {
 	}
 	defer func() {
 		if cerr := outFile.Close(); cerr != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to close output file: %v\n", cerr)
+			fmt.Fprintf(os.Stderr, "warning: error closing output file: %v\n", cerr)
 		}
 	}()
 
