@@ -32,28 +32,22 @@ jobs:
         run: |
           echo "current_version=$(grep -Po '^go \K[\d.]+' go.mod)" >> $GITHUB_OUTPUT
 
-      - name: Fetch latest Go 1.x release
-        id: latest
+      - name: Fetch latest Go release
+        id: latest_go
         uses: actions/github-script@v7.0.1
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            // listReleases moved under github.rest
-            const releases = await github.rest.repos.listReleases({
-              owner: 'golang',
-              repo: 'go',
-              per_page: 20
-            });
-            const versions = releases.data
-              .map(r => r.tag_name)
-              .filter(t => /^v1\.\d+\.\d+$/.test(t))
-              .sort((a, b) => {
-                const [ma, pa] = a.slice(1).split('.').map(n => +n);
-                const [mb, pb] = b.slice(1).split('.').map(n => +n);
-                if (ma !== mb) return mb - ma;
-                return pb - pa;
-              });
-            const latestRelease = versions[0].replace(/^v/, '');
-            core.setOutput('version', latestRelease);
+             // call Octokit’s getLatestRelease endpoint
+             const { data: release } = await github.rest.repos.getLatestRelease({
+               owner: 'golang',
+               repo:  'go'
+             });
+
+             // strip leading "v" from tag_name, e.g. "v1.25.4" → "1.25.4"
+             const version = release.tag_name.replace(/^v/, '');
+
+             core.setOutput('version', version);
 
       - name: "Exit if already up-to-date"
         if: ${{ steps.current.outputs.current_version == steps.latest.outputs.version }}
