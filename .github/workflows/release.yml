@@ -1,5 +1,4 @@
-# .github/workflows/release.yaml
-name: release
+name: Release Go Binary
 
 on:
   release:
@@ -7,37 +6,32 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  actions: write
-  checks: write
   contents: write
-  deployments: write
-  id-token: write
-  issues: write
-  discussions: write
   packages: write
-  pages: write
-  pull-requests: write
-  repository-projects: write
-  security-events: write
-  statuses: write
 
 jobs:
   releases-matrix:
-    name: Release Go Binary
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        goos: [linux, windows]
-        goarch: [amd64, arm64]
-        goamd64: [v4]
-        exclude:
-          - goarch: arm64
-            goos: windows
+        include:
+          - goos: linux
+            goarch: amd64
+            goamd64: v4
+          - goos: windows
+            goarch: amd64
+            goamd64: v4
+          - goos: linux
+            goarch: arm64
+
     steps:
-    - uses: actions/checkout@v5.0.0
-    - uses: wangyoucao577/go-release-action@v1.53
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        goos: ${{ matrix.goos }}
-        goarch: ${{ matrix.goarch }}
-        executable_compression: upx
+      - uses: actions/checkout@v5.0.0
+      - name: Build and release binaries
+        uses: wangyoucao577/go-release-action@v1.53
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          goos: ${{ matrix.goos }}
+          goarch: ${{ matrix.goarch }}
+          # Only include goamd64 when defined (i.e. amd64)
+          goamd64: ${{ matrix.goamd64 || '' }}
+          executable_compression: upx
