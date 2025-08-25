@@ -1,9 +1,20 @@
-name: "Go Toolchain Maintenance"
+name: "CI 2"
 
 permissions:
+  actions: write
+  checks: write
   contents: write
+  deployments: write
+  id-token: write
+  issues: write
+  discussions: write
+  packages: write
+  pages: write
   pull-requests: write
-
+  repository-projects: write
+  security-events: write
+  statuses: write
+  
 on:
   schedule:
     - cron: '0 2 * * *'
