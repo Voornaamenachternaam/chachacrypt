@@ -1,9 +1,8 @@
 # .github/workflows/release.yml
-name: 89gr7f%&*^B^(NNY56401:">":>;'.
+name: release
 
 on:
   workflow_dispatch:
-  pull_request:
   release:
     types: [created]
 
