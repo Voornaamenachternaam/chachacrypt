@@ -3,15 +3,17 @@ name: "Go Toolchain Maintenance"
 permissions:
   contents: write
   pull-requests: write
- 
+
 on:
   schedule:
     - cron: '0 2 * * *'
+
   workflow_dispatch:
 
   pull_request:
     types:
       - opened
+
 
 jobs:
   bump:
@@ -87,7 +89,6 @@ jobs:
           title: "chore: update Go version to v${{ steps.latest.outputs.version }}"
           body: |
             This PR bumps the Go version in go.mod to **v${{ steps.latest.outputs.version }}**
-
             - ran go fix & fmt
             - verified tests pass
           labels: automated, dependencies
