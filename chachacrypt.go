@@ -26,10 +26,10 @@ const (
 
 	// Argon2id parameters (balanced for interactive CLI use)
 	// You can tune these later; raising timeCost or memoryKB increases security & CPU/RAM.
-	argonTimeCost  uint32 = 1          // iterations
-	argonMemoryKB  uint32 = 64 * 1024  // 64 MiB
-	argonThreads   uint8  = 4          // parallelism
-	saltSize               = 16        // bytes
+	argonTimeCost uint32 = 1         // iterations
+	argonMemoryKB uint32 = 64 * 1024 // 64 MiB
+	argonThreads  uint8  = 4         // parallelism
+	saltSize             = 16        // bytes
 )
 
 // deriveKeyArgon2id derives a 32-byte key from passphrase and salt using Argon2id.
@@ -46,7 +46,8 @@ func deriveKeyArgon2id(passphrase, salt []byte) ([]byte, error) {
 
 // encryptFile encrypts inputPath -> outputPath with per-file random salt and per-chunk random nonce.
 // File format:
-//  [1B version][1B saltLen][salt][ { per-chunk: [24B nonce][4B ctLenLE][ct] }... ]
+//
+//	[1B version][1B saltLen][salt][ { per-chunk: [24B nonce][4B ctLenLE][ct] }... ]
 func encryptFile(inputPath, outputPath string, passphrase []byte) (err error) {
 	inFile, err := os.Open(inputPath)
 	if err != nil {
