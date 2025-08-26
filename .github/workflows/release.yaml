@@ -1,5 +1,5 @@
 # .github/workflows/release.yml
-name: 5t4frv67bynguv657R&B^T*NGiunuyg
+name: rekeasenow
 
 on:
   workflow_dispatch:
@@ -19,5 +19,5 @@ jobs:
     - uses: wangyoucao577/go-release-action@v1.53
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
-        goos: linux
+        goos: windows
         goarch: amd64
