@@ -37,26 +37,26 @@ jobs:
           FALLBACK='["1.25","1.24","1.23"]'
 
           echo "Fetching go.dev release list..."
-          JSON=$(curl -sS 'https://go.dev/dl/?mode=json' || true)
-
-          if [ -z "${JSON}" ]; then
+          TMP_JSON="$(mktemp)"
+          if ! curl -sS 'https://go.dev/dl/?mode=json' -o "$TMP_JSON"; then
             echo "::warning::Failed to fetch go.dev JSON; using fallback matrix"
             echo "matrix=$FALLBACK" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # extract stable versions, normalize to major.minor, unique in order
-          VERSIONS=$(printf '%s\n' "$JSON" \
-            | jq -r 'map(select(.stable==true)) | .[] | .version' \
-            | sed 's/^go//' \
-            | awk -F. '{print $1"."$2}' \
-            | awk '!seen[$0]++')
+          # Extract stable versions as "1.25" "1.24" ... (one-per-line), preserve order
+          # Use jq to output .version (like "go1.25.0"), strip leading "go", take major.minor,
+          # and dedupe in order using awk seen[].
+          mapfile -t VERSIONS_ARR < <(
+            jq -r 'map(select(.stable==true)) | .[] | .version' "$TMP_JSON" \
+              | sed 's/^go//' \
+              | awk -F. '{print $1"."$2}' \
+              | awk '!seen[$0]++'
+          )
 
-          # safely convert the newline-separated VERSIONS into a bash array
-          IFS=$'\n' read -r -d '' -a VERSIONS_ARR <<< "$(printf '%s\n' "$VERSIONS"; printf '\0')"
-
-          COUNT=0
+          # build matrix items: latest stable plus up to two previous
           ITEMS=()
+          COUNT=0
           for v in "${VERSIONS_ARR[@]}"; do
             [ -n "$v" ] || continue
             ITEMS+=("\"${v}\"")
@@ -66,14 +66,20 @@ jobs:
             fi
           done
 
+          # If nothing parsed, fallback
           if [ "${#ITEMS[@]}" -eq 0 ]; then
             echo "::warning::No versions parsed from go.dev; using fallback"
             echo "matrix=$FALLBACK" >> "$GITHUB_OUTPUT"
-          else
-            MATRIX_JSON="[${ITEMS[*]}]"
-            echo "Detected matrix: $MATRIX_JSON"
-            echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          MATRIX_JSON="[${ITEMS[*]}]"
+          echo "Detected matrix: $MATRIX_JSON"
+          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f "${TMP_JSON:-}" || true
 
   update-go:
     name: Update Go, deps & auto-PR
