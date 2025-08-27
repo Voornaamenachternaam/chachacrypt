@@ -3,7 +3,7 @@ name: CI
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 6 * * 1" # weekly Monday run
+    - cron: "0 6 * * *" # weekly Monday run
 
 jobs:
   detect-go:
@@ -63,10 +63,10 @@ jobs:
         go-version: ${{ fromJson(needs.detect-go.outputs.matrix) }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5.0.0 
 
       - name: Set up Go ${{ matrix.go-version }}
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v5.5.0 
         with:
           go-version: ${{ matrix.go-version }}
 
@@ -148,7 +148,7 @@ jobs:
           fi
 
       - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ secrets.GH_TOKEN }} # PAT with repo access
           commit-message: "chore: update Go ${{ matrix.go-version }} and dependencies"
