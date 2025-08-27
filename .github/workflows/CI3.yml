@@ -1,0 +1,187 @@
+name: Smart Go Maintenance with OpenRouter AI & Auto-Merge
+
+on:
+  schedule:
+    - cron: '0 6 * * *'        # Daily at 06:00 UTC
+  workflow_dispatch:          # Manual trigger
+  pull_request_target:        # Lint PR title on open/edit/reopen
+    types: [opened, edited, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  semantic-label:
+    name: Enforce Semantic PR Titles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6.1.1
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-go:
+    name: Update Go, Generate AI Patches & Auto-Merge
+    needs: semantic-label
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.21', '1.22', '1.23']
+    env:
+      GO_CACHE_DATE: ${{ github.run_id }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go ${{ matrix.go-version }}
+        uses: actions/setup-go@v5.5.0
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Cache Go modules & build cache
+        uses: actions/cache@v4.2.4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('go.sum') }}-${{ env.GO_CACHE_DATE }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ matrix.go-version }}-
+
+      - name: Update go.mod to Go ${{ matrix.go-version }}
+        run: sed -i "s/^go .*/go ${{ matrix.go-version }}/" go.mod
+
+      - name: Upgrade dependencies (skip major bumps)
+        run: |
+          go list -m -u -json all \
+            | jq -r '
+                select(.Update)
+                | select(.Version | test("^v[0-9]+"))
+                | select(.Update.Version | test("^v[0-9]+"))
+                | select((.Update.Version | split(".")[0]) == (.Version | split(".")[0]))
+                | .Path
+              ' \
+            | xargs -r -n 1 go get -u
+          go mod tidy
+
+      - name: Format, Vet & Lint
+        run: |
+          go fix ./...
+          go vet ./...
+          go fmt ./...
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
+            | sh -s latest
+          ./bin/golangci-lint run || echo "::warning::Linting issues flagged"
+
+      - name: Run Tests with Race Detector
+        id: test
+        continue-on-error: true
+        run: |
+          go test -race ./... > test_output.txt 2>&1
+          if grep -q FAIL test_output.txt; then
+            echo "tests_failed=true" >> $GITHUB_OUTPUT
+          else
+            echo "tests_failed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Summarize Code Changes
+        run: |
+          git fetch origin main --tags
+          git diff origin/main...HEAD > code.diff
+          {
+            echo "## Code Diff Summary"
+            echo '```diff'
+            head -n 100 code.diff
+            echo '```'
+          } > diff-summary.md
+
+      - name: AI-Generated Patch via OpenRouter
+        if: steps.test.outputs.tests_failed == 'true'
+        run: |
+          DIFF=$(head -n 100 code.diff)
+          ERR=$(head -n 50 test_output.txt)
+          curl -s https://openrouter.ai/api/v1/chat/completions \
+            -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "model": "qwen/qwen3-coder:free",
+              "messages": [
+                {"role":"system","content":"You are a Go refactoring assistant. Given a git diff and test failures, output a patch to fix the code."},
+                {"role":"user","content":"Diff:\n'"$DIFF"'\n\nTests:\n'"$ERR"'"}
+              ],
+              "temperature": 0.3,
+              "max_tokens": 512
+            }' \
+            | jq -r '.choices[0].message.content' > patch.diff
+
+      - name: Apply AI Patch
+        if: steps.test.outputs.tests_failed == 'true'
+        run: |
+          git apply patch.diff || echo "::warning::AI patch could not be applied automatically"
+
+      - name: Generate Changelog Diff (arm64)
+        run: |
+          curl -sL \
+            https://github.com/git-chglog/git-chglog/releases/download/v0.15.0/git-chglog_linux_arm64 \
+            -o git-chglog
+          chmod +x git-chglog
+          git fetch --tags
+          PREV_TAG=$(git describe --tags --abbrev=0)
+          ./git-chglog $PREV_TAG..HEAD -o CHANGELOG.md
+          echo "## Changelog Diff" > changelog.md
+          cat CHANGELOG.md >> changelog.md
+
+      - name: Create Pull Request
+        id: create_pr
+        uses: peter-evans/create-pull-request@v7.0.8
+        with:
+          commit-message: "chore: update Go to ${{ matrix.go-version }} + deps"
+          title: "chore: update Go to ${{ matrix.go-version }} + deps"
+          body: |
+            ## 🔧 Updates
+            - Go version → `${{ matrix.go-version }}`
+            - Dependencies upgraded
+
+            ## 🧠 Code Diff Summary
+            $(cat diff-summary.md)
+
+            ## 🤖 AI Patch (if applied)
+            ${{ steps.test.outputs.tests_failed == 'true' && '```diff\n' || '' }}$(cat patch.diff)${{ steps.test.outputs.tests_failed == 'true' && '\n```' || '' }}
+
+            ## 📜 Changelog Diff
+            $(cat changelog.md)
+
+            ## ✅ Test Status
+            ${{ steps.test.outputs.tests_failed == 'true' && '❌ Tests failed — patch applied' || '✅ All tests passed' }}
+          branch: update/go-${{ matrix.go-version }}
+          labels: |
+            maintenance
+            automated-update
+            ${{ steps.test.outputs.tests_failed == 'true' && 'needs-review' || 'safe-update' }}
+
+      - name: Enable Auto-Merge on Passing PR
+        if: steps.test.outputs.tests_failed == 'false'
+        uses: peter-evans/enable-pull-request-automerge@v3
+        with:
+          pull-request-number: ${{ steps.create_pr.outputs.pull-request-number }}
+          merge-method: squash
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fallback Issue if AI Patch Fails
+        if: steps.test.outputs.tests_failed == 'true' && failure()
+        uses: peter-evans/create-issue-from-file@v5.0.1
+        with:
+          title: "⚠️ Go update caused test failures — AI patch could not apply"
+          content-filepath: test_output.txt
+          labels: |
+            bug
+            breaking-change
+            needs-manual-review
