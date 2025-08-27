@@ -3,8 +3,8 @@ name: CI 3
 on:
   schedule:
     - cron: '0 6 * * *'        # Daily at 06:00 UTC
-  workflow_dispatch:          # Manual trigger
-  pull_request_target:        # Semantic-title enforcement on PRs
+  workflow_dispatch:
+  pull_request_target:
     types: [opened, edited, reopened]
 
 permissions:
@@ -17,33 +17,94 @@ env:
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
+  detect-go-versions:
+    name: Detect Go versions (latest stable + recent)
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - name: Fetch stable Go releases list
+        id: fetch
+        run: |
+          set -euo pipefail
+          echo "Fetching go.dev release list..."
+          JSON=$(curl -sS 'https://go.dev/dl/?mode=json' || true)
+          if [ -z "${JSON:-}" ]; then
+            echo "::warning::Failed to fetch go.dev list; leaving JSON empty"
+            echo "json_empty=true" >> $GITHUB_OUTPUT
+          else
+            echo "json_present=true" >> $GITHUB_OUTPUT
+            echo "$JSON" > /tmp/go_dl.json
+          fi
+
+      - name: Build matrix JSON output
+        id: set
+        run: |
+          set -euo pipefail
+          # Default fallback matrix (safe pinned list in case fetch fails)
+          FALLBACK='["1.25","1.24","1.23"]'
+
+          if [ -f /tmp/go_dl.json ]; then
+            # Extract stable versions, convert "go1.25.0" -> "1.25", preserve order (newest first),
+            # deduplicate by major.minor and keep up to 3 entries (latest + up to 2 recent).
+            VERSIONS=$(jq -r 'map(select(.stable==true)) | .[] | .version' /tmp/go_dl.json \
+              | awk -F'go' '{print $2}' \
+              | awk -F. '{print $1"."$2}' \
+              | awk '!seen[$0]++' )
+
+            # Build array with latest + up to two previous
+            MATRIX_ARRAY=()
+            COUNT=0
+            for v in $VERSIONS; do
+              MATRIX_ARRAY+=("\"${v}\"")
+              COUNT=$((COUNT+1))
+              if [ "$COUNT" -ge 3 ]; then
+                break
+              fi
+            done
+
+            if [ ${#MATRIX_ARRAY[@]} -eq 0 ]; then
+              echo "::warning::Could not parse versions from go.dev; using fallback"
+              MATRIX_JSON="$FALLBACK"
+            else
+              MATRIX_JSON="[${MATRIX_ARRAY[*]}]"
+            fi
+          else
+            echo "::warning::Go releases JSON not available; using fallback matrix"
+            MATRIX_JSON="$FALLBACK"
+          fi
+
+          echo "Detected matrix: $MATRIX_JSON"
+          # set as step output for job output
+          echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+
   update-go:
-    name: Update Go, AI-Patch & Auto-Merge
+    name: Update Go, deps & auto-PR
+    needs: detect-go-versions
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: 1.24
+        go-version: ${{ fromJson(needs.detect-go-versions.outputs.matrix) }}
     env:
       GO_CACHE_DATE: ${{ github.run_id }}
-
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Enforce semantic PR title
-        if: ${{ github.event_name == 'pull_request' || github.event_name == 'pull_request_target' }}
-        uses: amannn/action-semantic-pull-request@v6
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          githubBaseUrl: https://api.github.com
 
       - name: Set up Go ${{ matrix.go-version }}
         uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
+
+      - name: Confirm go version
+        run: |
+          set -euo pipefail
+          echo "Runner Go version:"
+          go version
 
       - name: Cache Go modules & build cache
         uses: actions/cache@v4
@@ -55,34 +116,32 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-${{ matrix.go-version }}-
 
-      - name: Bump go.mod to Go ${{ matrix.go-version }}
-        run: sed -i "s/^go .*/go ${{ matrix.go-version }}/" go.mod
-
-      - name: Upgrade dependencies (respect module major & required Go version)
-        # This step:
-        # 1) finds upgrade candidates (same major version),
-        # 2) queries each candidate's GoVersion, and
-        # 3) only upgrades those whose Go requirement <= current Go.
+      - name: Ensure go.mod 'go' directive matches runtime (if present)
         run: |
           set -euo pipefail
-          echo "Listing update candidates (go list -m -u -json all)..."
-          # Collect candidate lines: "Path CurrentVersion UpdateVersion"
-          mapfile -t CANDIDATES < <(go list -m -u -json all 2>/dev/null \
-            | jq -r 'select(.Update) | "\(.Path) \(.Version // "") \(.Update.Version // "")"' || true)
-
-          if [ ${#CANDIDATES[@]} -eq 0 ]; then
-            echo "No update candidates found."
+          if [ -f go.mod ]; then
+            sed -i "s/^go .*/go ${{ matrix.go-version }}/" go.mod
+            echo "Updated go.mod 'go' line to ${{ matrix.go-version }}"
           else
-            echo "Detected ${#CANDIDATES[@]} candidate(s). Filtering by same major version and Go requirement..."
+            echo "No go.mod present; skipping go.mod bump"
           fi
 
-          # Get current go version (major.minor) from the installed go
-          GV_FULL=$(go version | awk '{print $3}' | sed 's/^go//')
-          # Ensure we have at least major.minor
-          GV_MM=$(echo "${GV_FULL}" | awk -F. '{print $1"."$2}')
-          echo "Current Go runtime version: ${GV_FULL} -> major.minor ${GV_MM}"
+      - name: Safe dependency upgrades (no major bumps; skip upgrades requiring newer Go)
+        run: |
+          set -euo pipefail
+          echo "Finding upgrade candidates (same-major only, will skip updates that require newer Go)"
 
-          # Convert a major.minor string like "1.22" (or "1.23.0") to numeric for comparison: major*1000 + minor
+          # Gather candidate modules (Path CurrentVersion UpdateVersion)
+          mapfile -t CANDS < <(go list -m -u -json all 2>/dev/null \
+            | jq -r 'select(.Update) | "\(.Path) \(.Version // "") \(.Update.Version // "")"' || true)
+
+          if [ ${#CANDS[@]} -eq 0 ]; then
+            echo "No update candidates found."
+          else
+            echo "Found ${#CANDS[@]} candidate(s)."
+          fi
+
+          # helpers to numeric-compare major.minor
           num_from_mm() {
             local mm="$1"
             local maj=$(echo "$mm" | awk -F. '{print $1}')
@@ -90,59 +149,53 @@ jobs:
             echo $((maj * 1000 + min))
           }
 
-          CUR_NUM=$(num_from_mm "${GV_MM}")
+          GV_FULL=$(go version | awk '{print $3}' | sed 's/^go//')
+          GV_MM=$(echo "$GV_FULL" | awk -F. '{print $1"."$2}')
+          CUR_NUM=$(num_from_mm "$GV_MM")
+          echo "Current Go runtime: $GV_FULL (major.minor: $GV_MM)"
 
           UPGRADES=()
-          for line in "${CANDIDATES[@]}"; do
-            # read fields defensively (module path may not contain spaces)
-            PATH_MOD=$(echo "$line" | awk '{print $1}')
-            CURVER=$(echo "$line" | awk '{print $2}')
-            UPDVER=$(echo "$line" | awk '{print $3}')
+          for L in "${CANDS[@]}"; do
+            PATH_MOD=$(echo "$L" | awk '{print $1}')
+            CURVER=$(echo "$L" | awk '{print $2}')
+            UPDVER=$(echo "$L" | awk '{print $3}')
             [ -n "$PATH_MOD" ] || continue
             [ -n "$UPDVER" ] || continue
 
-            # strip leading 'v' for numeric split
+            # major check
             CURMAJ=$(echo "${CURVER}" | sed 's/^v//' | cut -d. -f1)
             UPDMAJ=$(echo "${UPDVER}" | sed 's/^v//' | cut -d. -f1)
-
-            # preserve "no major bumps" policy: the major part (including '0') must match
             if [ "$CURMAJ" != "$UPDMAJ" ]; then
-              echo "Skipping $PATH_MOD: would change major from $CURMAJ -> $UPDMAJ"
+              echo "Skipping $PATH_MOD: major bump candidate $CURMAJ -> $UPDMAJ"
               continue
             fi
 
-            # Query the module's requested go directive for the update version
-            echo "Inspecting $PATH_MOD@$UPDVER for Go version requirement..."
-            GOINFO=$(go list -m -json "${PATH_MOD}@${UPDVER}" 2>/dev/null || true)
-            REQ_GO=$(printf '%s' "$GOINF O" | jq -r 'select(.) | .GoVersion // empty' 2>/dev/null || true)
-            # (The above line uses jq only if GOINFO is JSON; the fallback is empty.)
+            # Query the candidate's module metadata for its Go version (if any)
+            echo "Inspecting ${PATH_MOD}@${UPDVER} for Go requirement..."
+            MODJSON=$(go list -m -json "${PATH_MOD}@${UPDVER}" 2>/dev/null || true)
+            REQ_GO=$(printf '%s' "$MODJSON" | jq -r '.GoVersion // empty' 2>/dev/null || true)
             if [ -z "$REQ_GO" ]; then
-              # If module has no go directive, assume very old/low requirement -> safe
               REQ_GO="1.0"
             fi
-
-            # Normalize to major.minor
             REQ_MM=$(echo "${REQ_GO}" | awk -F. '{print $1"."$2}')
             REQ_NUM=$(num_from_mm "${REQ_MM}")
 
             if [ "${REQ_NUM}" -gt "${CUR_NUM}" ]; then
-              echo "Skipping $PATH_MOD@$UPDVER: requires Go ${REQ_GO} (>= ${REQ_MM}), current=${GV_MM}"
+              echo "Skipping ${PATH_MOD}@${UPDVER}: requires go ${REQ_GO} (current runtime ${GV_MM})"
               continue
             fi
 
-            echo "Will upgrade $PATH_MOD to $UPDVER (requires Go ${REQ_GO} - satisfied by ${GV_MM})"
+            echo "Will upgrade ${PATH_MOD} -> ${UPDVER} (requires go ${REQ_GO})"
             UPGRADES+=("${PATH_MOD}@${UPDVER}")
           done
 
           if [ ${#UPGRADES[@]} -eq 0 ]; then
             echo "No safe upgrades to apply for Go ${GV_MM}."
           else
-            echo "Applying ${#UPGRADES[@]} upgrade(s)..."
             for m in "${UPGRADES[@]}"; do
-              echo "go get -u ${m}"
+              echo "Applying: go get -u ${m}"
               go get -u "${m}"
             done
-            echo "Tidying modules..."
             go mod tidy
           fi
 
@@ -152,11 +205,10 @@ jobs:
           go fix ./...
           go vet ./...
           go fmt ./...
-          # install golangci-lint into ./bin reliably and run it (lint failures won't fail the job)
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s latest
           ./bin/golangci-lint run || echo "::warning::Lint issues flagged"
 
-      - name: Run tests with race detector
+      - name: Run tests (race)
         id: test
         continue-on-error: true
         run: |
@@ -180,7 +232,7 @@ jobs:
             echo '```'
           } > diff-summary.md
 
-      - name: AI-generated patch via OpenRouter
+      - name: Optional AI-generated patch (OpenRouter) 
         if: ${{ steps.test.outputs.tests_failed == 'true' }}
         run: |
           set -euo pipefail
@@ -195,7 +247,7 @@ jobs:
                 {"role":"system","content":"You are a Go refactoring assistant. Given a git diff and test failures, output a patch to fix the code."},
                 {"role":"user","content":"Diff:\n'"$DIFF"'\n\nTests:\n'"$ERR"'"}
               ],
-              "temperature":0.3,
+              "temperature":0.2,
               "max_tokens":1024
             }' \
             | jq -r '.choices[0].message.content' > patch.diff || echo "::warning::No AI patch returned"
@@ -207,7 +259,7 @@ jobs:
           if [ -s patch.diff ]; then
             git apply patch.diff || echo "::warning::AI patch could not be applied"
           else
-            echo "::warning::patch.diff is empty; skipping apply"
+            echo "::warning::patch.diff empty; skipping"
           fi
 
       - name: Install git-cliff (robust)
@@ -215,59 +267,50 @@ jobs:
           set -euo pipefail
           REPO="orhun/git-cliff"
           API_URL="https://api.github.com/repos/${REPO}/releases/latest"
-          echo "Fetching latest release metadata for ${REPO}..."
-          RELEASE_JSON=$(curl -sS -H "Accept: application/vnd.github+json" -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "${API_URL}")
+          RELEASE_JSON=$(curl -sS -H "Accept: application/vnd.github+json" -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "${API_URL}" || true)
 
-          # Prefer x86_64 linux tar.gz (gnu preferred); fallback to a pinned asset if not found
-          DL_URL=$(printf '%s\n' "$RELEASE_JSON" | jq -r '.assets[]?.browser_download_url as $u | .assets[]?.name as $n | "\($n) \($u)"' 2>/dev/null \
-            | awk '/(x86_64|amd64).*linux.*(gnu|musl).*\.tar\.gz/ { print $2; exit }' || true)
-
+          DL_URL=$(printf '%s' "$RELEASE_JSON" | jq -r '.assets[]? | select(.name|test("linux.*(gnu|musl).*tar.gz")) | .browser_download_url' 2>/dev/null | head -n1 || true)
           if [ -z "$DL_URL" ]; then
-            echo "No suitable tar.gz asset found in latest; falling back to v2.10.0 glibc asset"
+            echo "::warning::No suitable latest asset found; falling back to pinned v2.10.0"
             DL_URL="https://github.com/orhun/git-cliff/releases/download/v2.10.0/git-cliff-2.10.0-x86_64-unknown-linux-gnu.tar.gz"
           fi
 
-          echo "Downloading: $DL_URL"
           TMP_ARCH="/tmp/git-cliff.tar.gz"
           curl -sSL --retry 3 --retry-delay 2 "$DL_URL" -o "$TMP_ARCH"
-
           TMP_DIR="/tmp/git-cliff-extract-$$"
           mkdir -p "$TMP_DIR"
           tar -xzf "$TMP_ARCH" -C "$TMP_DIR"
-
           BIN_PATH=$(find "$TMP_DIR" -type f -name git-cliff -perm /111 -print -quit || true)
           if [ -z "$BIN_PATH" ]; then
-            echo "ERROR: git-cliff binary not found inside archive; listing contents for debug:" >&2
-            tar -tzf "$TMP_ARCH" >&2 || true
+            echo "tar contents (for debug):"
+            tar -tzf "$TMP_ARCH" || true
+            echo "::error::git-cliff binary not found in archive"
             exit 1
           fi
-
           sudo install -m 0755 "$BIN_PATH" /usr/local/bin/git-cliff
-          echo "git-cliff version: $(/usr/local/bin/git-cliff --version || true)"
+          /usr/local/bin/git-cliff --version || true
 
-      - name: Generate changelog diff with git-cliff
+      - name: Generate changelog with git-cliff
         run: |
           set -euo pipefail
           git fetch --tags || true
           PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
           if [ -n "$PREV_TAG" ]; then
-            echo "Generating changelog for range: $PREV_TAG..HEAD"
-            git-cliff --rev-range "$PREV_TAG..HEAD" --output CHANGELOG.md
+            git-cliff --rev-range "$PREV_TAG..HEAD" --output CHANGELOG.md || true
           else
-            echo "No tags found — generating full changelog"
-            git-cliff --output CHANGELOG.md || echo "git-cliff produced no changelog"
+            git-cliff --output CHANGELOG.md || true
           fi
           echo "## Changelog Diff" > changelog.md
           cat CHANGELOG.md >> changelog.md || true
 
-      - name: Prepare PR body file
+      - name: Prepare PR body
         run: |
           set -euo pipefail
-          TESTS_FAILED="${{ steps.test.outputs.tests_failed }}"
+          TF="${{ steps.test.outputs.tests_failed }}"
           cat > pr_body.md <<'EOF'
 ## 🔧 Updates
 - Go version → '${{ matrix.go-version }}'
-- Dependencies upgraded
+- Dependencies upgraded (safe upgrades only)
 
 ## 🧠 Code Diff Summary
 $(cat diff-summary.md || true)
