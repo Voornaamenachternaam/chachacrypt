@@ -60,6 +60,7 @@ jobs:
 
       - name: Upgrade dependencies (no major bumps)
         run: |
+          set -euo pipefail
           go list -m -u -json all \
             | jq -r 'select(.Update)
                 | select((.Version|test("^v[0-9]+")))
@@ -71,18 +72,20 @@ jobs:
 
       - name: Format, vet & lint
         run: |
+          set -euo pipefail
           go fix ./...
           go vet ./...
           go fmt ./...
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
-            | sh -s latest
+          # install golangci-lint into ./bin reliably and run it (lint failures won't fail the job)
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s latest
           ./bin/golangci-lint run || echo "::warning::Lint issues flagged"
 
       - name: Run tests with race detector
         id: test
         continue-on-error: true
         run: |
-          go test -race ./... > test_output.txt 2>&1
+          set -euo pipefail
+          go test -race ./... > test_output.txt 2>&1 || true
           if grep -q FAIL test_output.txt; then
             echo "tests_failed=true" >> $GITHUB_OUTPUT
           else
@@ -91,20 +94,22 @@ jobs:
 
       - name: Summarize code changes
         run: |
-          git fetch origin main --tags
-          git diff origin/main...HEAD > code.diff
+          set -euo pipefail
+          git fetch origin main --tags || true
+          git diff origin/main...HEAD > code.diff || true
           {
             echo "## Code Diff Summary"
             echo '```diff'
-            head -n 100 code.diff
+            head -n 100 code.diff || true
             echo '```'
           } > diff-summary.md
 
       - name: AI-generated patch via OpenRouter
         if: ${{ steps.test.outputs.tests_failed == 'true' }}
         run: |
-          DIFF=$(head -n 100 code.diff)
-          ERR=$(head -n 50 test_output.txt)
+          set -euo pipefail
+          DIFF=$(head -n 100 code.diff || true)
+          ERR=$(head -n 50 test_output.txt || true)
           curl -s https://openrouter.ai/api/v1/chat/completions \
             -H "Authorization: Bearer ${{ secrets.OPENROUTER_API_KEY }}" \
             -H "Content-Type: application/json" \
@@ -117,25 +122,99 @@ jobs:
               "temperature":0.3,
               "max_tokens":512
             }' \
-            | jq -r '.choices[0].message.content' > patch.diff
+            | jq -r '.choices[0].message.content' > patch.diff || echo "::warning::No AI patch returned"
 
       - name: Apply AI patch
         if: ${{ steps.test.outputs.tests_failed == 'true' }}
         run: |
-          git apply patch.diff || echo "::warning::AI patch could not be applied"
+          set -euo pipefail
+          if [ -s patch.diff ]; then
+            git apply patch.diff || echo "::warning::AI patch could not be applied"
+          else
+            echo "::warning::patch.diff is empty; skipping apply"
+          fi
 
-      - name: Install git-cliff v2.10.0 (prebuilt binary)
+      - name: Install git-cliff (latest linux release, robust)
+        # This step is robust: it finds the appropriate asset, downloads, extracts to a temp dir,
+        # finds the binary and installs it. It avoids depending on exact internal archive paths.
         run: |
-          curl -sSfL https://github.com/orhun/git-cliff/releases/download/v2.10.0/git-cliff-2.10.0-x86_64-unknown-linux-gnu.tar.gz \
-            | tar -xz --strip-components=1 -C /usr/local/bin git-cliff-2.10.0-x86_64-unknown-linux-gnu/git-cliff
+          set -euo pipefail
+          REPO="orhun/git-cliff"
+          API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+          echo "Querying releases for ${REPO}"
+          # fetch latest release JSON (use GH_TOKEN to avoid low unauthenticated rate limits)
+          RELEASE_JSON=$(curl -sS -H "Accept: application/vnd.github+json" -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "${API_URL}")
+
+          # Prefer glibc x86_64 linux tar.gz; try matching musl or gnu variants as fallback
+          DL_URL=$(echo "$RELEASE_JSON" \
+            | jq -r '.assets[]?.browser_download_url as $u | .assets[]?.name as $n | "\($n) \($u)"' \
+            | awk '/(x86_64|amd64).*linux.*(gnu|musl).*\.tar\.gz/ { print $2; exit }' || true)
+
+          if [ -z "$DL_URL" ]; then
+            echo "No suitable x86_64 linux tar.gz asset found in latest release; falling back to v2.10.0 glibc asset"
+            DL_URL="https://github.com/orhun/git-cliff/releases/download/v2.10.0/git-cliff-2.10.0-x86_64-unknown-linux-gnu.tar.gz"
+          fi
+
+          echo "Downloading asset: $DL_URL"
+          TMP_ARCHIVE="/tmp/git-cliff.tar.gz"
+          curl -sSL "$DL_URL" -o "$TMP_ARCHIVE"
+
+          TMP_DIR="/tmp/git-cliff-extract-$$"
+          mkdir -p "$TMP_DIR"
+          tar -xzf "$TMP_ARCHIVE" -C "$TMP_DIR"
+
+          # find the git-cliff binary inside the extracted tree
+          BIN_PATH=$(find "$TMP_DIR" -type f -name git-cliff -perm -111 -print -quit || true)
+
+          if [ -z "$BIN_PATH" ]; then
+            echo "Binary 'git-cliff' not found in archive — listing archive contents for debugging:" >&2
+            tar -tzf "$TMP_ARCHIVE" >&2 || true
+            exit 1
+          fi
+
+          echo "Installing git-cliff from $BIN_PATH to /usr/local/bin/git-cliff"
+          sudo install -m 0755 "$BIN_PATH" /usr/local/bin/git-cliff
+
+          echo "Installed git-cliff version:"
+          /usr/local/bin/git-cliff --version
 
       - name: Generate changelog diff with git-cliff
         run: |
-          git fetch --tags
-          PREV_TAG=$(git describe --tags --abbrev=0)
-          git-cliff --rev-range $PREV_TAG..HEAD --output CHANGELOG.md
+          set -euo pipefail
+          git fetch --tags || true
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          if [ -n "$PREV_TAG" ]; then
+            echo "Generating changelog for range: $PREV_TAG..HEAD"
+            git-cliff --rev-range "$PREV_TAG..HEAD" --output CHANGELOG.md
+          else
+            echo "No tags found — generating full changelog"
+            git-cliff --output CHANGELOG.md
+          fi
           echo "## Changelog Diff" > changelog.md
-          cat CHANGELOG.md >> changelog.md
+          cat CHANGELOG.md >> changelog.md || true
+
+      - name: Prepare PR body file
+        run: |
+          set -euo pipefail
+          cat > pr_body.md <<'EOF'
+          ## 🔧 Updates
+          - Go version → `${{ matrix.go-version }}`
+          - Dependencies upgraded
+
+          ## 🧠 Code Diff Summary
+          $(cat diff-summary.md || true)
+
+          ## 🤖 AI Patch (if applied)
+          ```diff
+          $(cat patch.diff || true)
+          ```
+
+          ## 📜 Changelog Diff
+          $(cat changelog.md || true)
+
+          ## ✅ Test Status
+          ${{ steps.test.outputs.tests_failed == 'true' && '❌ Tests failed — patch applied' || '✅ All tests passed' }}
+          EOF
 
       - id: create_pr
         name: Create pull request
@@ -143,22 +222,7 @@ jobs:
         with:
           commit-message: "chore: bump Go to ${{ matrix.go-version }} + deps"
           title: "chore: bump Go to ${{ matrix.go-version }} + deps"
-          body: |
-            ## 🔧 Updates
-            - Go version → `${{ matrix.go-version }}`
-            - Dependencies upgraded
-
-            ## 🧠 Code Diff Summary
-            $(cat diff-summary.md)
-
-            ## 🤖 AI Patch (if applied)
-            ${{ steps.test.outputs.tests_failed == 'true' && '```diff\n' || '' }}$(cat patch.diff)${{ steps.test.outputs.tests_failed == 'true' && '\n```' || '' }}
-
-            ## 📜 Changelog Diff
-            $(cat changelog.md)
-
-            ## ✅ Test Status
-            ${{ steps.test.outputs.tests_failed == 'true' && '❌ Tests failed — patch applied' || '✅ All tests passed' }}
+          body-path: pr_body.md
           branch: update/go-${{ matrix.go-version }}
           labels: |
             maintenance
@@ -169,9 +233,9 @@ jobs:
         if: ${{ steps.test.outputs.tests_failed == 'false' }}
         uses: peter-evans/enable-pull-request-automerge@v3
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           pull-request-number: ${{ steps.create_pr.outputs.pull-request-number }}
           merge-method: squash
-          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - id: create_issue
         name: Fallback issue if AI patch fails
