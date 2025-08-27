@@ -4,7 +4,7 @@ on:
   schedule:
     - cron: '0 6 * * *'        # Daily at 06:00 UTC
   workflow_dispatch:          # Manual trigger
-  pull_request_target:        # For semantic-title check on PR events
+  pull_request_target:        # Semantic title check on PR events
     types: [opened, edited, reopened]
 
 permissions:
@@ -27,12 +27,12 @@ jobs:
       GO_CACHE_DATE: ${{ github.run_id }}
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Enforce Semantic PR Title
+      - name: Enforce semantic PR title
         if: ${{ github.event_name == 'pull_request' || github.event_name == 'pull_request_target' }}
         uses: amannn/action-semantic-pull-request@v6
         env:
@@ -55,21 +55,21 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-${{ matrix.go-version }}-
 
-      - name: Update go.mod to Go ${{ matrix.go-version }}
+      - name: Bump go.mod to ${{ matrix.go-version }}
         run: sed -i "s/^go .*/go ${{ matrix.go-version }}/" go.mod
 
-      - name: Upgrade dependencies (skip major bumps)
+      - name: Upgrade dependencies (no major bumps)
         run: |
           go list -m -u -json all \
             | jq -r 'select(.Update)
-                | select((.Version | test("^v[0-9]+")))
-                | select((.Update.Version | test("^v[0-9]+")))
-                | select((.Update.Version | split(".")[0]) == (.Version|split(".")[0]))
+                | select((.Version|test("^v[0-9]+")))
+                | select((.Update.Version|test("^v[0-9]+")))
+                | select((.Update.Version|split(".")[0]) == (.Version|split(".")[0]))
                 | .Path' \
             | xargs -r -n1 go get -u
           go mod tidy
 
-      - name: Format, Vet & Lint
+      - name: Format, vet & lint
         run: |
           go fix ./...
           go vet ./...
@@ -78,7 +78,7 @@ jobs:
             | sh -s latest
           ./bin/golangci-lint run || echo "::warning::Lint issues flagged"
 
-      - name: Run Tests with Race Detector
+      - name: Run tests (race detector)
         id: test
         continue-on-error: true
         run: |
@@ -89,7 +89,7 @@ jobs:
             echo "tests_failed=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Summarize Code Changes
+      - name: Summarize code changes
         run: |
           git fetch origin main --tags
           git diff origin/main...HEAD > code.diff
@@ -100,7 +100,7 @@ jobs:
             echo '```'
           } > diff-summary.md
 
-      - name: AI-Generated Patch via OpenRouter
+      - name: AI-generated patch via OpenRouter
         if: steps.test.outputs.tests_failed == 'true'
         run: |
           DIFF=$(head -n 100 code.diff)
@@ -109,7 +109,7 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.OPENROUTER_API_KEY }}" \
             -H "Content-Type: application/json" \
             -d '{
-              "model": "qwen/qwen3-coder:free",
+              "model":"qwen/qwen3-coder:free",
               "messages":[
                 {"role":"system","content":"You are a Go refactoring assistant. Given a git diff and test failures, output a patch to fix the code."},
                 {"role":"user","content":"Diff:\n'"$DIFF"'\n\nTests:\n'"$ERR"'"}
@@ -119,30 +119,30 @@ jobs:
             }' \
             | jq -r '.choices[0].message.content' > patch.diff
 
-      - name: Apply AI Patch
+      - name: Apply AI patch
         if: steps.test.outputs.tests_failed == 'true'
         run: |
           git apply patch.diff || echo "::warning::AI patch could not be applied"
 
-      - name: Generate Changelog Diff (arm64)
+      - name: Install git-chglog v0.15.4
         run: |
-          curl -sL \
-            https://github.com/git-chglog/git-chglog/releases/download/v0.15.4/git-chglog_0.15.4_linux_arm64.tar.gz \
-            -o git-chglog.tar.gz
-          tar -xzf git-chglog.tar.gz git-chglog
-          chmod +x git-chglog
+          mkdir -p $HOME/bin
+          GOBIN=$HOME/bin go install github.com/git-chglog/git-chglog/cmd/git-chglog@v0.15.4
+
+      - name: Generate changelog diff
+        run: |
           git fetch --tags
           PREV_TAG=$(git describe --tags --abbrev=0)
-          ./git-chglog $PREV_TAG..HEAD -o CHANGELOG.md
+          $HOME/bin/git-chglog $PREV_TAG..HEAD -o CHANGELOG.md
           echo "## Changelog Diff" > changelog.md
           cat CHANGELOG.md >> changelog.md
 
       - id: create_pr
-        name: Create Pull Request
+        name: Create pull request
         uses: peter-evans/create-pull-request@v7
         with:
-          commit-message: "chore: update Go to ${{ matrix.go-version }} + deps"
-          title: "chore: update Go to ${{ matrix.go-version }} + deps"
+          commit-message: "chore: bump Go to ${{ matrix.go-version }} + deps"
+          title: "chore: bump Go to ${{ matrix.go-version }} + deps"
           body: |
             ## 🔧 Updates
             - Go version → `${{ matrix.go-version }}`
@@ -165,7 +165,7 @@ jobs:
             automated-update
             ${{ steps.test.outputs.tests_failed == 'true' && 'needs-review' || 'safe-update' }}
 
-      - name: Enable Auto-Merge on Passing PR
+      - name: Enable auto-merge on passing PR
         if: steps.test.outputs.tests_failed == 'false'
         uses: peter-evans/enable-pull-request-automerge@v3
         with:
@@ -174,7 +174,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - id: create_issue
-        name: Fallback Issue if AI Patch Fails
+        name: Fallback issue if AI patch fails
         if: steps.test.outputs.tests_failed == 'true'
         uses: peter-evans/create-issue-from-file@v5
         with:
