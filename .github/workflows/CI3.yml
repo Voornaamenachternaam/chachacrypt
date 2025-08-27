@@ -166,7 +166,7 @@ jobs:
             maintenance
             automated-update
             ${{ steps.test.outputs.tests_failed == 'true' && 'needs-review' || 'safe-update' }}
-
+            
       - name: Enable Auto-Merge on Passing PR
         if: steps.test.outputs.tests_failed == 'false'
         uses: peter-evans/enable-pull-request-automerge@v3
