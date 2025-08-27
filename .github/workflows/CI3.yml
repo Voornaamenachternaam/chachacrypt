@@ -4,7 +4,7 @@ on:
   schedule:
     - cron: '0 6 * * *'        # Daily at 06:00 UTC
   workflow_dispatch:          # Manual trigger
-  pull_request_target:        # For semantic‐title enforcement on PRs
+  pull_request_target:        # Semantic-title enforcement on PRs
     types: [opened, edited, reopened]
 
 permissions:
@@ -28,7 +28,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -101,7 +101,7 @@ jobs:
           } > diff-summary.md
 
       - name: AI-generated patch via OpenRouter
-        if: steps.test.outputs.tests_failed == 'true'
+        if: ${{ steps.test.outputs.tests_failed == 'true' }}
         run: |
           DIFF=$(head -n 100 code.diff)
           ERR=$(head -n 50 test_output.txt)
@@ -120,17 +120,14 @@ jobs:
             | jq -r '.choices[0].message.content' > patch.diff
 
       - name: Apply AI patch
-        if: steps.test.outputs.tests_failed == 'true'
+        if: ${{ steps.test.outputs.tests_failed == 'true' }}
         run: |
           git apply patch.diff || echo "::warning::AI patch could not be applied"
 
-      - name: Install git-cliff v2.10.0
+      - name: Install git-cliff v2.10.0 (prebuilt binary)
         run: |
-          mkdir -p $HOME/bin
-          GOBIN=$HOME/bin go install github.com/orhun/git-cliff/cmd/git-cliff@v2.10.0
-
-      - name: Add git-cliff to PATH
-        run: echo "$HOME/bin" >> $GITHUB_PATH
+          curl -sSfL https://github.com/orhun/git-cliff/releases/download/v2.10.0/git-cliff-2.10.0-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz --strip-components=1 -C /usr/local/bin git-cliff-2.10.0-x86_64-unknown-linux-gnu/git-cliff
 
       - name: Generate changelog diff with git-cliff
         run: |
@@ -169,7 +166,7 @@ jobs:
             ${{ steps.test.outputs.tests_failed == 'true' && 'needs-review' || 'safe-update' }}
 
       - name: Enable auto-merge on passing PR
-        if: steps.test.outputs.tests_failed == 'false'
+        if: ${{ steps.test.outputs.tests_failed == 'false' }}
         uses: peter-evans/enable-pull-request-automerge@v3
         with:
           pull-request-number: ${{ steps.create_pr.outputs.pull-request-number }}
@@ -178,7 +175,7 @@ jobs:
 
       - id: create_issue
         name: Fallback issue if AI patch fails
-        if: steps.test.outputs.tests_failed == 'true'
+        if: ${{ steps.test.outputs.tests_failed == 'true' }}
         uses: peter-evans/create-issue-from-file@v5.0.1
         with:
           title: "⚠️ Go update caused test failures — AI patch could not apply"
