@@ -1,0 +1,220 @@
+name: CI3
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+  pull_request_target:
+    types: [opened, edited, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  detect-go-versions:
+    name: Detect Go versions
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Install jq
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      - id: set-matrix
+        run: |
+          set -euo pipefail
+          FALLBACK='["1.25","1.24","1.23"]'
+          echo "Fetching stable Go versions..."
+          JSON=$(curl -sS 'https://go.dev/dl/?mode=json' || true)
+          if [ -z "$JSON" ]; then
+            echo "::warning::Go DL fetch failed; using fallback"
+            echo "matrix=$FALLBACK" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mapfile -t VERSIONS < <(echo "$JSON" \
+            | jq -r 'map(select(.stable==true)) | .[].version' \
+            | sed 's/^go//' \
+            | awk -F. '{print $1"."$2}' \
+            | awk '!seen[$0]++')
+          ITEMS=()
+          for i in {0..2}; do
+            [ -n "${VERSIONS[i]:-}" ] && ITEMS+=("\"${VERSIONS[i]}\"")
+          done
+          if [ ${#ITEMS[@]} -eq 0 ]; then
+            echo "::warning::No versions parsed; using fallback"
+            echo "matrix=$FALLBACK" >> "$GITHUB_OUTPUT"
+          else
+            MATRIX="[$(IFS=,; echo "${ITEMS[*]}")]"
+            echo "Detected Go versions: $MATRIX"
+            echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          fi
+
+  update-go:
+    name: Update Go, Dependecies & Auto-PR
+    runs-on: ubuntu-latest
+    needs: detect-go-versions
+    strategy:
+      matrix:
+        go-version: ${{ fromJson(needs.detect-go-versions.outputs.matrix) }}
+    env:
+      GO_CACHE_DATE: ${{ github.run_id }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go ${{ matrix.go-version }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('go.sum') }}-${{ env.GO_CACHE_DATE }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ matrix.go-version }}-
+
+      - name: Ensure go.mod uses Go ${{ matrix.go-version }}
+        run: |
+          set -euo pipefail
+          [ -f go.mod ] && sed -i "s/^go .*/go ${{ matrix.go-version }}/" go.mod || true
+
+      - name: Safe dependency upgrades
+        run: |
+          set -euo pipefail
+          mapfile -t CANDS < <(go list -m -u -json all 2>/dev/null \
+            | jq -r 'select(.Update) | "\(.Path) \(.Version // "") \(.Update.Version // "")"')
+          GV=$(go version | awk '{print $3}' | sed 's/^go//')
+          GV_NUM=$(echo "$GV" | awk -F. '{print $1*1000 + $2}')
+          NUMF() { echo $(( $(echo "$1" | awk -F. '{print $1*1000 + $2}') )); }
+          UPGRADES=()
+          for L in "${CANDS[@]}"; do
+            P=$(echo "$L" | cut -d' ' -f1); V=$(echo "$L" | cut -d' ' -f2); U=$(echo "$L" | cut -d' ' -f3)
+            [ "${V#v}" != "${U#v}" ] && continue
+            REQ=$(go list -m -json "${P}@${U}" 2>/dev/null | jq -r '.GoVersion // "1.0"')
+            [ "$(NUMF "${REQ}")" -le "$GV_NUM" ] && UPGRADES+=("${P}@${U}")
+          done
+          for u in "${UPGRADES[@]}"; do echo "go get -u $u" && go get -u "$u"; done
+          go mod tidy || true
+
+      - name: Lint & Test
+        run: |
+          set -euo pipefail
+          go fmt ./...
+          go vet ./...
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s latest
+          ./bin/golangci-lint run || echo "::warning::lint issues"
+          go test -race ./... > test_output.txt 2>&1 || true
+          if grep -q FAIL test_output.txt; then
+            echo "tests_failed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tests_failed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Summarize changes
+        run: |
+          git fetch origin main --tags || true
+          git diff origin/main...HEAD > code.diff || true
+          {
+            echo "## Diff Summary"
+            echo '```diff'
+            head -n 200 code.diff
+            echo '```'
+          } > diff-summary.md
+
+      - name: Optional AI patch
+        if: ${{ steps.test.outputs.tests_failed == 'true' }}
+        run: |
+          curl -s https://openrouter.ai/api/v1/chat/completions \
+            -H "Authorization: Bearer ${{ secrets.OPENROUTER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"qwen/qwen3-coder:free","messages":[{"role":"system","content":"You are a Go assistant."},{"role":"user","content":"Diff:\n$(head -n200 code.diff)\n\nFail:\n$(head -n50 test_output.txt)"}],"temperature":0.3,"max_tokens":512}' \
+            | jq -r '.choices[0].message.content' > patch.diff || true
+
+      - name: Apply AI patch
+        if: ${{ steps.test.outputs.tests_failed == 'true' }}
+        run: git apply patch.diff || echo "::warning::patch failed"
+
+      - name: Install git-cliff (latest)
+        run: |
+          set -euo pipefail
+          RELEASE=$(curl -s -H "Accept: application/vnd.github+json" -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/orhun/git-cliff/releases/latest)
+          URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name | test("linux.*tar.gz")) | .browser_download_url' | head -n1)
+          [ -n "$URL" ] || { echo "::error::no linux asset"; exit 1; }
+          TMP=$(mktemp -d)
+          curl -sSL "$URL" -o "$TMP/asset.tar.gz"
+          tar -xzf "$TMP/asset.tar.gz" -C "$TMP"
+          BIN=$(find "$TMP" -type f -name git-cliff -perm /111 | head -n1)
+          [ -n "$BIN" ] || { echo "::error::binary not found"; exit 1; }
+          sudo install -m 0755 "$BIN" /usr/local/bin/git-cliff
+          git-cliff --version
+
+      - name: Generate changelog
+        run: |
+          git fetch --tags || true
+          PREV=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          [ -n "$PREV" ] && git-cliff --rev-range "$PREV..HEAD" --output CHANGELOG.md || git-cliff --output CHANGELOG.md || true
+          echo "## Changelog" > changelog.md
+          cat CHANGELOG.md >> changelog.md || true
+
+      - name: Prepare PR body
+        run: |
+          set -euo pipefail
+          GO="${{ matrix.go-version }}"
+          FAIL="${{ steps.test.outputs.tests_failed }}"
+          echo "## Updates" > pr_body.md
+          echo "- Go version → $GO" >> pr_body.md
+          echo "- Safe dependency upgrades" >> pr_body.md
+          echo "" >> pr_body.md
+          echo "## Diff Summary" >> pr_body.md
+          cat diff-summary.md >> pr_body.md
+          echo "" >> pr_body.md
+          echo "## AI Patch" >> pr_body.md
+          cat patch.diff 2>/dev/null || echo "_none_" >> pr_body.md
+          echo "" >> pr_body.md
+          echo "## Changelog" >> pr_body.md
+          cat changelog.md >> pr_body.md
+          echo "" >> pr_body.md
+          echo "## Test Status" >> pr_body.md
+          [ "$FAIL" = "true" ] && echo "❌ Tests failed" >> pr_body.md || echo "✅ Tests passed" >> pr_body.md
+
+      - name: Create Pull Request
+        id: pr
+        uses: peter-evans/create-pull-request@v7.0.8
+        with:
+          commit-message: "chore: bump Go ${{ matrix.go-version }}"
+          title: "chore: bump Go ${{ matrix.go-version }}"
+          body-path: pr_body.md
+          branch: update/go-${{ matrix.go-version }}
+          labels: maintenance, automated-update, ${{ steps.test.outputs.tests_failed == 'true' && 'needs-review' || 'safe-update' }}
+
+      - name: Enable auto-merge
+        if: ${{ steps.test.outputs.tests_failed == 'false' }}
+        uses: peter-evans/enable-pull-request-automerge@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          pull-request-number: ${{ steps.pr.outputs.pull-request-number }}
+          merge-method: squash
+
+      - name: Fallback issue
+        if: ${{ steps.test.outputs.tests_failed == 'true' }}
+        uses: peter-evans/create-issue-from-file@v5.0.1
+        with:
+          title: "⚠️ Tests failed after Go bump"
+          content-filepath: test_output.txt
+          labels: bug, breaking-change, needs-manual-review
