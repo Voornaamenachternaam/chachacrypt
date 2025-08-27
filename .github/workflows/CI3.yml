@@ -33,8 +33,8 @@ jobs:
             | awk -F. '{print $1"."$2}' \
             | awk '!seen[$0]++')
 
-          ITEMS=()
           COUNT=0
+          ITEMS=()
           for v in $VERSIONS; do
             [ -n "$v" ] || continue
             ITEMS+=("\"$v\"")
@@ -46,7 +46,9 @@ jobs:
             echo "::warning::No stable versions parsed; using fallback"
             echo "matrix=$FALLBACK" >> "$GITHUB_OUTPUT"
           else
-            MATRIX_JSON="[${ITEMS[*]}]"
+            MATRIX_JSON=$(printf '[%s]\n' "$(IFS=,; echo "${ITEMS[*]}")")
+            # validate JSON
+            echo "$MATRIX_JSON" | jq . >/dev/null
             echo "Detected matrix: $MATRIX_JSON"
             echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
           fi
