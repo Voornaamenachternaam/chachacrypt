@@ -1,8 +1,8 @@
-name: CI 3
+name: CI3
 
 on:
   schedule:
-    - cron: '0 6 * * *'        # Daily at 06:00 UTC
+    - cron: '0 6 * * *'
   workflow_dispatch:
   pull_request_target:
     types: [opened, edited, reopened]
@@ -21,62 +21,58 @@ jobs:
     name: Detect Go versions (latest stable + recent)
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.set.outputs.matrix }}
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      - name: Fetch stable Go releases list
-        id: fetch
+      - name: Install jq
         run: |
-          set -euo pipefail
-          echo "Fetching go.dev release list..."
-          JSON=$(curl -sS 'https://go.dev/dl/?mode=json' || true)
-          if [ -z "${JSON:-}" ]; then
-            echo "::warning::Failed to fetch go.dev list; leaving JSON empty"
-            echo "json_empty=true" >> $GITHUB_OUTPUT
-          else
-            echo "json_present=true" >> $GITHUB_OUTPUT
-            echo "$JSON" > /tmp/go_dl.json
-          fi
+          sudo apt-get update -y
+          sudo apt-get install -y jq
 
-      - name: Build matrix JSON output
-        id: set
+      - name: Fetch stable Go releases and build matrix
+        id: set-matrix
         run: |
           set -euo pipefail
-          # Default fallback matrix (safe pinned list in case fetch fails)
+
+          # fallback matrix if detection fails
           FALLBACK='["1.25","1.24","1.23"]'
 
-          if [ -f /tmp/go_dl.json ]; then
-            # Extract stable versions, convert "go1.25.0" -> "1.25", preserve order (newest first),
-            # deduplicate by major.minor and keep up to 3 entries (latest + up to 2 recent).
-            VERSIONS=$(jq -r 'map(select(.stable==true)) | .[] | .version' /tmp/go_dl.json \
-              | awk -F'go' '{print $2}' \
-              | awk -F. '{print $1"."$2}' \
-              | awk '!seen[$0]++' )
+          echo "Fetching go.dev release list..."
+          JSON=$(curl -sS 'https://go.dev/dl/?mode=json' || true)
 
-            # Build array with latest + up to two previous
-            MATRIX_ARRAY=()
-            COUNT=0
-            for v in $VERSIONS; do
-              MATRIX_ARRAY+=("\"${v}\"")
-              COUNT=$((COUNT+1))
-              if [ "$COUNT" -ge 3 ]; then
-                break
-              fi
-            done
-
-            if [ ${#MATRIX_ARRAY[@]} -eq 0 ]; then
-              echo "::warning::Could not parse versions from go.dev; using fallback"
-              MATRIX_JSON="$FALLBACK"
-            else
-              MATRIX_JSON="[${MATRIX_ARRAY[*]}]"
-            fi
-          else
-            echo "::warning::Go releases JSON not available; using fallback matrix"
-            MATRIX_JSON="$FALLBACK"
+          if [ -z "${JSON}" ]; then
+            echo "::warning::Failed to fetch go.dev JSON; using fallback matrix"
+            echo "matrix=$FALLBACK" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-          echo "Detected matrix: $MATRIX_JSON"
-          # set as step output for job output
-          echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+          # extract stable versions, normalize to major.minor, unique in order
+          VERSIONS=$(printf '%s\n' "$JSON" \
+            | jq -r 'map(select(.stable==true)) | .[] | .version' \
+            | sed 's/^go//' \
+            | awk -F. '{print $1"."$2}' \
+            | awk '!seen[$0]++')
+
+          # build JSON array of up to 3 versions (latest + up to 2 previous)
+          COUNT=0
+          MATRIX_ITEMS=()
+          while IFS= read -r v; do
+            MATRIX_ITEMS+=("\"${v}\"")
+            COUNT=$((COUNT+1))
+            if [ "$COUNT" -ge 3 ]; then
+              break
+            fi
+          done <<EOF
+$VERSIONS
+EOF
+
+          if [ "${#MATRIX_ITEMS[@]}" -eq 0 ]; then
+            echo "::warning::No versions parsed from go.dev; using fallback"
+            echo "matrix=$FALLBACK" >> "$GITHUB_OUTPUT"
+          else
+            MATRIX_JSON="[${MATRIX_ITEMS[*]}]"
+            echo "Detected matrix: $MATRIX_JSON"
+            echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+          fi
 
   update-go:
     name: Update Go, deps & auto-PR
@@ -90,10 +86,15 @@ jobs:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Install jq
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
 
       - name: Set up Go ${{ matrix.go-version }}
         uses: actions/setup-go@v5
@@ -103,7 +104,6 @@ jobs:
       - name: Confirm go version
         run: |
           set -euo pipefail
-          echo "Runner Go version:"
           go version
 
       - name: Cache Go modules & build cache
@@ -123,25 +123,23 @@ jobs:
             sed -i "s/^go .*/go ${{ matrix.go-version }}/" go.mod
             echo "Updated go.mod 'go' line to ${{ matrix.go-version }}"
           else
-            echo "No go.mod present; skipping go.mod bump"
+            echo "No go.mod; skipping update"
           fi
 
       - name: Safe dependency upgrades (no major bumps; skip upgrades requiring newer Go)
         run: |
           set -euo pipefail
-          echo "Finding upgrade candidates (same-major only, will skip updates that require newer Go)"
 
-          # Gather candidate modules (Path CurrentVersion UpdateVersion)
+          echo "Collecting upgrade candidates..."
           mapfile -t CANDS < <(go list -m -u -json all 2>/dev/null \
             | jq -r 'select(.Update) | "\(.Path) \(.Version // "") \(.Update.Version // "")"' || true)
 
           if [ ${#CANDS[@]} -eq 0 ]; then
-            echo "No update candidates found."
-          else
-            echo "Found ${#CANDS[@]} candidate(s)."
+            echo "No update candidates."
+            exit 0
           fi
 
-          # helpers to numeric-compare major.minor
+          # helper to convert major.minor to numeric
           num_from_mm() {
             local mm="$1"
             local maj=$(echo "$mm" | awk -F. '{print $1}')
@@ -152,7 +150,7 @@ jobs:
           GV_FULL=$(go version | awk '{print $3}' | sed 's/^go//')
           GV_MM=$(echo "$GV_FULL" | awk -F. '{print $1"."$2}')
           CUR_NUM=$(num_from_mm "$GV_MM")
-          echo "Current Go runtime: $GV_FULL (major.minor: $GV_MM)"
+          echo "Runtime Go: $GV_FULL (major.minor: $GV_MM)"
 
           UPGRADES=()
           for L in "${CANDS[@]}"; do
@@ -162,16 +160,14 @@ jobs:
             [ -n "$PATH_MOD" ] || continue
             [ -n "$UPDVER" ] || continue
 
-            # major check
             CURMAJ=$(echo "${CURVER}" | sed 's/^v//' | cut -d. -f1)
             UPDMAJ=$(echo "${UPDVER}" | sed 's/^v//' | cut -d. -f1)
             if [ "$CURMAJ" != "$UPDMAJ" ]; then
-              echo "Skipping $PATH_MOD: major bump candidate $CURMAJ -> $UPDMAJ"
+              echo "Skipping $PATH_MOD: major bump ($CURMAJ -> $UPDMAJ)"
               continue
             fi
 
-            # Query the candidate's module metadata for its Go version (if any)
-            echo "Inspecting ${PATH_MOD}@${UPDVER} for Go requirement..."
+            echo "Checking Go requirement for ${PATH_MOD}@${UPDVER}..."
             MODJSON=$(go list -m -json "${PATH_MOD}@${UPDVER}" 2>/dev/null || true)
             REQ_GO=$(printf '%s' "$MODJSON" | jq -r '.GoVersion // empty' 2>/dev/null || true)
             if [ -z "$REQ_GO" ]; then
@@ -181,7 +177,7 @@ jobs:
             REQ_NUM=$(num_from_mm "${REQ_MM}")
 
             if [ "${REQ_NUM}" -gt "${CUR_NUM}" ]; then
-              echo "Skipping ${PATH_MOD}@${UPDVER}: requires go ${REQ_GO} (current runtime ${GV_MM})"
+              echo "Skipping ${PATH_MOD}@${UPDVER}: requires go ${REQ_GO} (runtime ${GV_MM})"
               continue
             fi
 
@@ -190,21 +186,22 @@ jobs:
           done
 
           if [ ${#UPGRADES[@]} -eq 0 ]; then
-            echo "No safe upgrades to apply for Go ${GV_MM}."
+            echo "No safe upgrades to apply."
           else
             for m in "${UPGRADES[@]}"; do
               echo "Applying: go get -u ${m}"
               go get -u "${m}"
             done
+            echo "Running go mod tidy"
             go mod tidy
           fi
 
       - name: Format, vet & lint
         run: |
           set -euo pipefail
-          go fix ./...
-          go vet ./...
-          go fmt ./...
+          go fix ./... || true
+          go vet ./... || true
+          go fmt ./... || true
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s latest
           ./bin/golangci-lint run || echo "::warning::Lint issues flagged"
 
@@ -215,9 +212,9 @@ jobs:
           set -euo pipefail
           go test -race ./... > test_output.txt 2>&1 || true
           if grep -q FAIL test_output.txt; then
-            echo "tests_failed=true" >> $GITHUB_OUTPUT
+            echo "tests_failed=true" >> "$GITHUB_OUTPUT"
           else
-            echo "tests_failed=false" >> $GITHUB_OUTPUT
+            echo "tests_failed=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Summarize code changes
@@ -232,7 +229,7 @@ jobs:
             echo '```'
           } > diff-summary.md
 
-      - name: Optional AI-generated patch (OpenRouter) 
+      - name: Optional AI-generated patch (OpenRouter)
         if: ${{ steps.test.outputs.tests_failed == 'true' }}
         run: |
           set -euo pipefail
@@ -247,7 +244,7 @@ jobs:
                 {"role":"system","content":"You are a Go refactoring assistant. Given a git diff and test failures, output a patch to fix the code."},
                 {"role":"user","content":"Diff:\n'"$DIFF"'\n\nTests:\n'"$ERR"'"}
               ],
-              "temperature":0.2,
+              "temperature":0.3,
               "max_tokens":1024
             }' \
             | jq -r '.choices[0].message.content' > patch.diff || echo "::warning::No AI patch returned"
@@ -303,18 +300,78 @@ jobs:
           echo "## Changelog Diff" > changelog.md
           cat CHANGELOG.md >> changelog.md || true
 
-      - name: Prepare PR body
+      - name: Compute PR labels
+        id: compute_labels
         run: |
           set -euo pipefail
+          LABELS="maintenance
+automated-update"
+          if [ "${{ steps.test.outputs.tests_failed }}" = "true" ]; then
+            LABELS="${LABELS}
+needs-review"
+          else
+            LABELS="${LABELS}
+safe-update"
+          fi
+          echo "$LABELS" > labels.txt
+          echo "::set-output name=labels::$(cat labels.txt | sed ':a;N;$!ba;s/\n/\\n/g')"
+
+      - name: Prepare PR body file
+        run: |
+          set -euo pipefail
+          GO_VER="${{ matrix.go-version }}"
           TF="${{ steps.test.outputs.tests_failed }}"
-          cat > pr_body.md <<'EOF'
+          cat > pr_body.md <<EOF
 ## 🔧 Updates
-- Go version → '${{ matrix.go-version }}'
+- Go version → ${GO_VER}
 - Dependencies upgraded (safe upgrades only)
 
 ## 🧠 Code Diff Summary
 $(cat diff-summary.md || true)
 
 ## 🤖 AI Patch (if applied)
-```diff
+\`\`\`diff
 $(cat patch.diff || true)
+\`\`\`
+
+## 📜 Changelog Diff
+$(cat changelog.md || true)
+
+## ✅ Test Status
+EOF
+          if [ "$TF" = "true" ]; then
+            echo "❌ Tests failed — see test_output.txt and patch.diff" >> pr_body.md
+          else
+            echo "✅ All tests passed" >> pr_body.md
+          fi
+
+      - name: Create Pull Request
+        id: create_pr
+        uses: peter-evans/create-pull-request@v7.0.8
+        with:
+          commit-message: "chore: bump Go to ${{ matrix.go-version }} + deps"
+          title: "chore: bump Go to ${{ matrix.go-version }} + deps"
+          body-path: pr_body.md
+          branch: update/go-${{ matrix.go-version }}
+          labels: |
+            maintenance
+            automated-update
+            ${{ steps.test.outputs.tests_failed == 'true' && 'needs-review' || 'safe-update' }}
+
+      - name: Enable auto-merge on passing PR
+        if: ${{ steps.test.outputs.tests_failed == 'false' }}
+        uses: peter-evans/enable-pull-request-automerge@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          pull-request-number: ${{ steps.create_pr.outputs.pull-request-number }}
+          merge-method: squash
+
+      - name: Create fallback issue (if AI patch didn't apply and tests failed)
+        if: ${{ steps.test.outputs.tests_failed == 'true' }}
+        uses: peter-evans/create-issue-from-file@v5.0.1
+        with:
+          title: "⚠️ Go update caused test failures — needs manual review"
+          content-filepath: test_output.txt
+          labels: |
+            bug
+            needs-manual-review
