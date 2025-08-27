@@ -150,7 +150,7 @@ jobs:
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ secrets.GH_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }} # ✅ fixed missing token error
           commit-message: "chore: update Go ${{ matrix.go-version }} and dependencies"
           branch: "update/go-${{ matrix.go-version }}"
           title: "Update Go ${{ matrix.go-version }} and dependencies"
