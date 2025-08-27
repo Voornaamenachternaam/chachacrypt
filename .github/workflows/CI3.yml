@@ -28,7 +28,7 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -64,7 +64,7 @@ jobs:
             | jq -r 'select(.Update)
                 | select((.Version | test("^v[0-9]+")))
                 | select((.Update.Version | test("^v[0-9]+")))
-                | select((.Update.Version | split(".")[0]) == (.Version | split(".")[0]))
+                | select((.Update.Version | split(".")[0]) == (.Version|split(".")[0]))
                 | .Path' \
             | xargs -r -n1 go get -u
           go mod tidy
@@ -110,12 +110,12 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{
               "model": "qwen/qwen3-coder:free",
-              "messages": [
+              "messages":[
                 {"role":"system","content":"You are a Go refactoring assistant. Given a git diff and test failures, output a patch to fix the code."},
                 {"role":"user","content":"Diff:\n'"$DIFF"'\n\nTests:\n'"$ERR"'"}
               ],
-              "temperature": 0.3,
-              "max_tokens": 512
+              "temperature":0.3,
+              "max_tokens":512
             }' \
             | jq -r '.choices[0].message.content' > patch.diff
 
