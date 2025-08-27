@@ -4,7 +4,7 @@ on:
   schedule:
     - cron: '0 6 * * *'        # Daily at 06:00 UTC
   workflow_dispatch:          # Manual trigger
-  pull_request_target:        # Semantic title check on PR events
+  pull_request_target:        # For semantic‐title enforcement on PRs
     types: [opened, edited, reopened]
 
 permissions:
@@ -28,7 +28,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -55,7 +55,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-${{ matrix.go-version }}-
 
-      - name: Bump go.mod to ${{ matrix.go-version }}
+      - name: Bump go.mod to Go ${{ matrix.go-version }}
         run: sed -i "s/^go .*/go ${{ matrix.go-version }}/" go.mod
 
       - name: Upgrade dependencies (no major bumps)
@@ -78,7 +78,7 @@ jobs:
             | sh -s latest
           ./bin/golangci-lint run || echo "::warning::Lint issues flagged"
 
-      - name: Run tests (race detector)
+      - name: Run tests with race detector
         id: test
         continue-on-error: true
         run: |
@@ -124,22 +124,25 @@ jobs:
         run: |
           git apply patch.diff || echo "::warning::AI patch could not be applied"
 
-      - name: Install git-chglog v0.15.4
+      - name: Install git-cliff v2.10.0
         run: |
           mkdir -p $HOME/bin
-          GOBIN=$HOME/bin go install github.com/git-chglog/git-chglog/cmd/git-chglog@v0.15.4
+          GOBIN=$HOME/bin go install github.com/orhun/git-cliff/cmd/git-cliff@v2.10.0
 
-      - name: Generate changelog diff
+      - name: Add git-cliff to PATH
+        run: echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Generate changelog diff with git-cliff
         run: |
           git fetch --tags
           PREV_TAG=$(git describe --tags --abbrev=0)
-          $HOME/bin/git-chglog $PREV_TAG..HEAD -o CHANGELOG.md
+          git-cliff --rev-range $PREV_TAG..HEAD --output CHANGELOG.md
           echo "## Changelog Diff" > changelog.md
           cat CHANGELOG.md >> changelog.md
 
       - id: create_pr
         name: Create pull request
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v7.0.8
         with:
           commit-message: "chore: bump Go to ${{ matrix.go-version }} + deps"
           title: "chore: bump Go to ${{ matrix.go-version }} + deps"
@@ -176,7 +179,7 @@ jobs:
       - id: create_issue
         name: Fallback issue if AI patch fails
         if: steps.test.outputs.tests_failed == 'true'
-        uses: peter-evans/create-issue-from-file@v5
+        uses: peter-evans/create-issue-from-file@v5.0.1
         with:
           title: "⚠️ Go update caused test failures — AI patch could not apply"
           content-filepath: test_output.txt
