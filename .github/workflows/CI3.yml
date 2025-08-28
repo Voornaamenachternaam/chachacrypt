@@ -1,4 +1,4 @@
-name: CI
+name: "CI auto"
 
 on:
   workflow_dispatch:
@@ -130,4 +130,4 @@ jobs:
           branch: "update/go-${{ steps.go-version.outputs.version }}"
           title: "Update Go ${{ steps.go-version.outputs.version }} and dependencies"
           body-path: pr_body.md
-          delete-branch: true
+          delete-branch: true 
