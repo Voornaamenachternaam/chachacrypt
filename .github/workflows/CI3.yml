@@ -76,13 +76,16 @@ jobs:
             exit 1
           fi
 
-      - name: Install git-cliff
-        uses: orhun/git-cliff-action@v4.5.1
-        with:
-          version: "v2.10.0"
-
-      - name: Generate changelog
-        run: git-cliff --unreleased --output changelog.md
+      - name: Install and use git-cliff
+        run: |
+          set -euo pipefail
+          # Download and install git-cliff
+          curl -fsSL https://github.com/orhun/git-cliff/releases/download/v2.10.0/git-cliff-2.10.0-x86_64-unknown-linux-gnu.tar.gz -o git-cliff.tar.gz
+          tar xzf git-cliff.tar.gz
+          sudo install -m 0755 git-cliff-2.10.0-x86_64-unknown-linux-gnu/git-cliff /usr/local/bin/git-cliff
+          
+          # Generate changelog
+          git-cliff --unreleased --output changelog.md
 
       - name: Prepare PR body
         run: |
@@ -90,7 +93,7 @@ jobs:
           GO_VER="${{ steps.go-version.outputs.version }}"
           TF="${{ steps.test.outputs.tests_failed }}"
           
-          # Create PR body with proper EOF handling
+          # Create PR body
           {
             echo "## 🔧 Updates"
             echo "- Go version → ${GO_VER}"
@@ -108,7 +111,6 @@ jobs:
             if [ "${TF}" = "true" ]; then
               echo "❌ Tests failed — see test output below"
               echo '```'
-              # Ensure test output exists before trying to cat it
               if [ -f test_output.txt ]; then
                 cat test_output.txt
               else
