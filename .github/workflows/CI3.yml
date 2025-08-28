@@ -1,4 +1,4 @@
-name: "CI auto"
+name: CI
 
 on:
   workflow_dispatch:
@@ -82,7 +82,23 @@ jobs:
           # Download and install git-cliff
           curl -fsSL https://github.com/orhun/git-cliff/releases/download/v2.10.0/git-cliff-2.10.0-x86_64-unknown-linux-gnu.tar.gz -o git-cliff.tar.gz
           tar xzf git-cliff.tar.gz
-          sudo install -m 0755 git-cliff-2.10.0-x86_64-unknown-linux-gnu/git-cliff /usr/local/bin/git-cliff
+          
+          # For version 2.10.0, the binary is directly in the root of the tar
+          # Check if the binary exists in the expected location
+          if [ -f "git-cliff" ]; then
+            sudo install -m 0755 git-cliff /usr/local/bin/git-cliff
+          else
+            # Try to find the binary anywhere in the extracted files
+            BINARY_PATH=$(find . -name "git-cliff" -type f | head -n 1)
+            if [ -n "$BINARY_PATH" ]; then
+              sudo install -m 0755 "$BINARY_PATH" /usr/local/bin/git-cliff
+            else
+              echo "::error::Could not find git-cliff binary in the extracted archive"
+              echo "Contents of the extracted archive:"
+              find . -type f
+              exit 1
+            fi
+          fi
           
           # Generate changelog
           git-cliff --unreleased --output changelog.md
@@ -130,4 +146,4 @@ jobs:
           branch: "update/go-${{ steps.go-version.outputs.version }}"
           title: "Update Go ${{ steps.go-version.outputs.version }} and dependencies"
           body-path: pr_body.md
-          delete-branch: true 
+          delete-branch: true
