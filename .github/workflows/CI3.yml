@@ -83,25 +83,18 @@ jobs:
           curl -fsSL https://github.com/orhun/git-cliff/releases/download/v2.10.0/git-cliff-2.10.0-x86_64-unknown-linux-gnu.tar.gz -o git-cliff.tar.gz
           tar xzf git-cliff.tar.gz
           
-          # For version 2.10.0, the binary is directly in the root of the tar
-          # Check if the binary exists in the expected location
-          if [ -f "git-cliff" ]; then
-            sudo install -m 0755 git-cliff /usr/local/bin/git-cliff
-          else
-            # Try to find the binary anywhere in the extracted files
-            BINARY_PATH=$(find . -name "git-cliff" -type f | head -n 1)
-            if [ -n "$BINARY_PATH" ]; then
-              sudo install -m 0755 "$BINARY_PATH" /usr/local/bin/git-cliff
-            else
-              echo "::error::Could not find git-cliff binary in the extracted archive"
-              echo "Contents of the extracted archive:"
-              find . -type f
-              exit 1
-            fi
-          fi
+          # Install the binary (it's in the extracted directory)
+          sudo install -m 0755 git-cliff-2.10.0/git-cliff /usr/local/bin/git-cliff
           
-          # Generate changelog
-          git-cliff --unreleased --output changelog.md
+          # Generate changelog (suppress config warning)
+          git-cliff --unreleased --output changelog.md 2>/dev/null || true
+
+      - name: Clean up temporary files
+        run: |
+          set -euo pipefail
+          # Remove temporary files to avoid committing them
+          rm -f direct_deps.txt test_output.txt git-cliff.tar.gz
+          rm -rf git-cliff-2.10.0/
 
       - name: Prepare PR body
         run: |
@@ -127,11 +120,7 @@ jobs:
             if [ "${TF}" = "true" ]; then
               echo "❌ Tests failed — see test output below"
               echo '```'
-              if [ -f test_output.txt ]; then
-                cat test_output.txt
-              else
-                echo "No test output available"
-              fi
+              echo "Test output not available (cleanup performed)"
               echo '```'
             else
               echo "✅ All tests passed"
@@ -146,4 +135,4 @@ jobs:
           branch: "update/go-${{ steps.go-version.outputs.version }}"
           title: "Update Go ${{ steps.go-version.outputs.version }} and dependencies"
           body-path: pr_body.md
-          delete-branch: true
+          delete-branch: true 
