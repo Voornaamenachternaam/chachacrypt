@@ -3,122 +3,83 @@ name: CI
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 6 * * *" # weekly Monday run
+    - cron: "0 6 * * *"  # Daily at 6:00 UTC
 
 jobs:
-  detect-go:
-    name: Detect latest Go versions
+  update-go:
+    name: Update to Latest Go Version
     runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      - name: Fetch latest Go releases
-        id: set-matrix
+      - uses: actions/checkout@v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Get Latest Go Version
+        id: go-version
         run: |
           set -euo pipefail
-          FALLBACK='["1.25","1.24","1.23"]'
-
-          echo "Fetching Go release list..."
-          JSON=$(curl -sS https://go.dev/dl/?mode=json || true)
-
-          if [ -z "$JSON" ]; then
-            echo "::warning::Failed to fetch go.dev JSON; using fallback"
-            echo "matrix=$FALLBACK" >> "$GITHUB_OUTPUT"
-            exit 0
+          echo "Fetching latest Go release..."
+          JSON=$(curl -fLsS https://go.dev/dl/?mode=json)
+          
+          LATEST_VERSION=$(echo "$JSON" | \
+            jq -r 'map(select(.stable==true)) | first | .version' | \
+            sed 's/^go//')
+          
+          if [ -z "$LATEST_VERSION" ]; then
+            echo "::error::Failed to determine latest Go version"
+            exit 1
           fi
+          
+          echo "version=$LATEST_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Using Go version: $LATEST_VERSION"
 
-          VERSIONS=$(printf '%s' "$JSON" \
-            | jq -r 'map(select(.stable==true)) | .[].version' \
-            | sed 's/^go//' \
-            | awk -F. '{print $1"."$2}' \
-            | awk '!seen[$0]++')
-
-          COUNT=0
-          ITEMS=()
-          for v in $VERSIONS; do
-            [ -n "$v" ] || continue
-            ITEMS+=("\"$v\"")
-            COUNT=$((COUNT+1))
-            [ "$COUNT" -ge 3 ] && break
-          done
-
-          if [ "${#ITEMS[@]}" -eq 0 ]; then
-            echo "::warning::No stable versions parsed; using fallback"
-            echo "matrix=$FALLBACK" >> "$GITHUB_OUTPUT"
-          else
-            MATRIX_JSON=$(printf '[%s]\n' "$(IFS=,; echo "${ITEMS[*]}")")
-            # validate JSON
-            echo "$MATRIX_JSON" | jq . >/dev/null
-            echo "Detected matrix: $MATRIX_JSON"
-            echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
-          fi
-
-  update-go:
-    name: Update Go Modules
-    runs-on: ubuntu-latest
-    needs: detect-go
-    strategy:
-      fail-fast: false
-      matrix:
-        go-version: ${{ fromJson(needs.detect-go.outputs.matrix) }}
-
-    steps:
-      - uses: actions/checkout@v5.0.0 
-
-      - name: Set up Go ${{ matrix.go-version }}
-        uses: actions/setup-go@v5.5.0 
+      - name: Set up Go ${{ steps.go-version.outputs.version }}
+        uses: actions/setup-go@v5.5.0
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: ${{ steps.go-version.outputs.version }}
 
       - name: Verify go.mod version
         run: |
           set -euo pipefail
-          sed -i "s/^go .*/go ${{ matrix.go-version }}/" go.mod
+          sed -i "s/^go .*/go ${{ steps.go-version.outputs.version }}/" go.mod
           go mod tidy
 
-      - name: Upgrade dependencies (safe updates)
+      - name: Upgrade dependencies
         run: |
           set -euo pipefail
-          go list -m -u -json all \
-            | jq -r '
-              select(.Update) 
-              | select((.Version|test("^v[0-9]+"))) 
-              | select((.Update.Version|test("^v[0-9]+"))) 
-              | select((.Update.Version|split(".")[0]) == (.Version|split(".")[0])) 
-              | .Path' \
-            | xargs -r -n1 go get -u
+          # Get all direct dependencies
+          go list -m -f '{{if not (or .Indirect .Main)}}{{.Path}}{{end}}' all > direct_deps.txt
+          
+          # Update direct dependencies within same major version
+          while read -r dep; do
+            if [ -n "$dep" ]; then
+              current_version=$(go list -m -f '{{.Version}}' "$dep")
+              latest_version=$(go list -m -f '{{.Version}}' "$dep@latest")
+              
+              # Only update if major version matches
+              if [ "${current_version%%.*}" = "${latest_version%%.*}" ]; then
+                go get "$dep@latest"
+              fi
+            fi
+          done < direct_deps.txt
+          
           go mod tidy
 
       - name: Run tests
         id: test
         run: |
           set -euo pipefail
-          if ! go test ./... > test_output.txt 2>&1; then
+          if go test ./... -v 2>&1 | tee test_output.txt; then
+            echo "tests_failed=false" >> "$GITHUB_OUTPUT"
+          else
             echo "tests_failed=true" >> "$GITHUB_OUTPUT"
             exit 1
           fi
-          echo "tests_failed=false" >> "$GITHUB_OUTPUT"
 
-      - name: Install git-cliff (latest x86_64 Linux release)
-        run: |
-          set -euo pipefail
-          RELEASE=$(curl -s https://api.github.com/repos/orhun/git-cliff/releases/latest)
-          URL=$(echo "$RELEASE" \
-            | jq -r '.assets[] 
-              | select(.name | test("x86_64-unknown-linux-gnu.tar.gz$")) 
-              | .browser_download_url' \
-            | head -n1)
-          [ -n "$URL" ] || { echo "::error::No suitable Linux x86_64 asset found"; exit 1; }
-
-          TMP=$(mktemp -d)
-          curl -sSL "$URL" -o "$TMP/asset.tar.gz"
-          tar -xzf "$TMP/asset.tar.gz" -C "$TMP"
-
-          BIN=$(find "$TMP" -type f -name git-cliff -perm /111 | head -n1)
-          [ -n "$BIN" ] || { echo "::error::git-cliff binary not found"; exit 1; }
-
-          sudo install -m 0755 "$BIN" /usr/local/bin/git-cliff
-          git-cliff --version
+      - name: Install git-cliff
+        uses: orhun/git-cliff-action@v3
+        with:
+          version: "2.2.0"
 
       - name: Generate changelog
         run: git-cliff --unreleased --output changelog.md
@@ -126,32 +87,45 @@ jobs:
       - name: Prepare PR body
         run: |
           set -euo pipefail
-          GO_VER="${{ matrix.go-version }}"
+          GO_VER="${{ steps.go-version.outputs.version }}"
           TF="${{ steps.test.outputs.tests_failed }}"
-
-          : > pr_body.md
-          printf '%s\n' "## 🔧 Updates" "- Go version → ${GO_VER}" "- Dependencies upgraded (safe upgrades only)" "" >> pr_body.md
-
-          printf '%s\n' "## 📜 Changelog Diff" >> pr_body.md
-          if [ -f changelog.md ]; then
-            cat changelog.md >> pr_body.md
-          else
-            printf '%s\n' "_No changelog generated._" >> pr_body.md
-          fi
-          printf '\n' >> pr_body.md
-
-          printf '%s\n' "## ✅ Test Status" >> pr_body.md
-          if [ "${TF:-false}" = "true" ]; then
-            printf '%s\n' "❌ Tests failed — see test_output.txt" >> pr_body.md
-          else
-            printf '%s\n' "✅ All tests passed" >> pr_body.md
-          fi
+          
+          # Create PR body with proper EOF handling
+          {
+            echo "## 🔧 Updates"
+            echo "- Go version → ${GO_VER}"
+            echo "- Dependencies upgraded (safe upgrades only)"
+            echo ""
+            echo "## 📜 Changelog Diff"
+            
+            if [ -f changelog.md ]; then
+              cat changelog.md
+            else
+              echo "_No changelog generated._"
+            fi
+            
+            echo -e "\n## ✅ Test Status"
+            if [ "${TF}" = "true" ]; then
+              echo "❌ Tests failed — see test output below"
+              echo '```'
+              # Ensure test output exists before trying to cat it
+              if [ -f test_output.txt ]; then
+                cat test_output.txt
+              else
+                echo "No test output available"
+              fi
+              echo '```'
+            else
+              echo "✅ All tests passed"
+            fi
+          } > pr_body.md
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v7.0.8
         with:
-          token: ${{ secrets.GH_TOKEN }} # PAT with repo access
-          commit-message: "chore: update Go ${{ matrix.go-version }} and dependencies"
-          branch: "update/go-${{ matrix.go-version }}"
-          title: "Update Go ${{ matrix.go-version }} and dependencies"
+          token: ${{ secrets.GH_TOKEN }}
+          commit-message: "chore: update Go ${{ steps.go-version.outputs.version }} and dependencies"
+          branch: "update/go-${{ steps.go-version.outputs.version }}"
+          title: "Update Go ${{ steps.go-version.outputs.version }} and dependencies"
           body-path: pr_body.md
+          delete-branch: true
