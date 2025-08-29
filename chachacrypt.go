@@ -103,11 +103,19 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		fmt.Println("Generated password:", password)
+		if isTerminal(os.Stdout.Fd()) {
+			fmt.Println("Generated password:", password)
+		} else {
+			fmt.Println("WARNING: Generated password output not shown because stdout is not a terminal (potential log exposure).")
+		}
 
 	default:
 		showHelp()
 	}
+}
+
+func isTerminal(fd uintptr) bool {
+	return term.IsTerminal(int(fd))
 }
 
 func showHelp() {
