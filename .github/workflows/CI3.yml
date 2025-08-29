@@ -56,6 +56,10 @@ jobs:
         run: |
           go mod verify
 
+      - name: Run unit tests
+        run: |
+          go test ./... -timeout 5m | tee test-output.txt
+
       - name: Run security scan (gosec)
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@latest
