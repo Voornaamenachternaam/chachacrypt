@@ -187,7 +187,7 @@ func TestValidateFilePath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := validateFilePath(tt.path)
-			if (err != null) != tt.expectError {
+			if (err != nil) != tt.expectError { // Fixed: changed "null" to "nil"
 				t.Errorf("validateFilePath(%s) error = %v, expectError %v", tt.path, err, tt.expectError)
 			}
 		})
