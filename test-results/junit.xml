@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="0" failures="0" errors="0" time="0.625204">
+	<testsuite tests="0" failures="0" time="0.625000" name="chachacrypt" timestamp="2025-08-29T10:07:54Z">
+		<properties>
+			<property name="go.version" value="go1.25.0 linux/amd64"></property>
+		</properties>
+	</testsuite>
+</testsuites>

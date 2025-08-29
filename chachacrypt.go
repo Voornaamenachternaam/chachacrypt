@@ -19,11 +19,11 @@ import (
 )
 
 const (
-	defaultSaltSize   = 32
-	defaultKeySize    = 32
-	defaultKeyTime    = uint32(5)
-	defaultKeyMemory  = uint32(1024 * 64)
-	defaultChunkSize  = 1024 * 32
+	defaultSaltSize  = 32
+	defaultKeySize   = 32
+	defaultKeyTime   = uint32(5)
+	defaultKeyMemory = uint32(1024 * 64)
+	defaultChunkSize = 1024 * 32
 )
 
 // Config holds cryptographic parameters.
