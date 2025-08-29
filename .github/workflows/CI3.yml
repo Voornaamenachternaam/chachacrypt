@@ -1,5 +1,9 @@
 name: CI3
 
+permissions:
+  contents: write
+  pull-requests: write
+
 on:
   workflow_dispatch:
   schedule:
@@ -7,7 +11,7 @@ on:
 
 jobs:
   update-and-test:
-    name: Update Go & Dependencies, Run Tests, Auto-Fix
+    name: Update Go & Deps, Run Tests, Auto-Fix
     runs-on: ubuntu-latest
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -27,23 +31,20 @@ jobs:
             | jq -r 'map(select(.stable==true)) | first | .version' \
             | sed 's/^go//')
           echo "LATEST=$LATEST" >> $GITHUB_ENV
-          echo "Latest Go version: $LATEST"
+          echo "→ Go $LATEST"
 
       - name: Set up Go ${{ env.LATEST }}
         uses: actions/setup-go@v5.5.0
         with:
           go-version: ${{ env.LATEST }}
 
-      - name: Ensure go.mod uses Go ${{ env.LATEST }}
+      - name: Bump go.mod to Go ${{ env.LATEST }}
         run: |
           sed -i "s/^go .*/go ${{ env.LATEST }}/" go.mod
 
-      - name: Tidy modules
+      - name: Tidy & upgrade dependencies
         run: |
           go mod tidy
-
-      - name: Upgrade all dependencies
-        run: |
           go get -u ./...
           go mod tidy
 
@@ -60,7 +61,7 @@ jobs:
         run: |
           go test ./... -timeout 5m | tee test-output.txt
 
-      - name: Run security scan (gosec)
+      - name: Security scan with gosec
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@latest
           gosec ./... | tee gosec-output.txt
@@ -79,66 +80,59 @@ jobs:
       - name: AI analysis & automatic fixes
         if: env.OPENROUTER_API_KEY != ''
         run: |
-          echo "Calling DeepSeek for code analysis & fixes…"
-          curl -s \
-            -X POST "https://openrouter.ai/api/v1/chat/completions" \
+          echo "Building AI request payload"
+          jq -n \
+            --arg model "deepseek/deepseek-r1:free" \
+            --arg sys "You are a senior Go developer & security expert. Identify any compilation errors, test failures, or dependency issues with Go ${{ env.LATEST }}. Produce one unified patch (diff) that fixes imports, replaces or adjusts incompatible dependencies, corrects code, and passes all tests and security scans." \
+            --arg user "$(jq -Rs . < ai-context.txt)" \
+            --argjson temp 0.1 \
+            '{model:$model, messages:[{role:"system",content:$sys},{role:"user",content:$user}],temperature:$temp}' \
+            > ai-request.json
+
+          echo "Calling DeepSeek API"
+          curl -s -X POST "https://openrouter.ai/api/v1/chat/completions" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $OPENROUTER_API_KEY" \
-            -d @- << 'EOF' > ai-response.json
-          {
-            "model": "deepseek/deepseek-r1:free",
-            "messages": [
-              {
-                "role": "system",
-                "content": "You are a senior Go developer and security expert. Identify any compilation errors, test failures, or dependency compatibility issues with Go ${{ env.LATEST }}. Produce a single unified patch in diff format that fixes imports, adjusts or replaces incompatible dependencies, corrects code errors, and passes all tests and security scans."
-              },
-              {
-                "role": "user",
-                "content": "$(jq -Rs . < ai-context.txt)"
-              }
-            ],
-            "temperature": 0.1
-          }
-          EOF
+            -d @ai-request.json \
+            > ai-response.json
 
-          # Extract only the diff block between ```diff fences```
+          echo "Extracting diff from AI response"
           jq -r '.choices[0].message.content' ai-response.json \
             | sed -n -e '/^```diff/,/^```/!d' -e '1d' -e '$d' \
             > fixes.diff || true
 
           if [ ! -s fixes.diff ]; then
-            echo "::notice ::No diff found in AI response; skipping patch."
+            echo "::notice ::No diff found; skipping patch."
             exit 0
           fi
 
-          echo "Validating AI-generated patch…"
+          echo "Validating AI patch"
           if git apply --check fixes.diff; then
-            echo "Patch is valid; applying…"
+            echo "Applying patch"
             git apply --whitespace=fix fixes.diff
           else
-            echo "::warning ::Patch failed git apply --check; leaving fixes.diff for review."
-            ls -l fixes.diff
+            echo "::warning ::Patch failed validation; fixes.diff retained."
           fi
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v7.0.8
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_TOKEN }}
           branch: ci/auto-update/go-${{ env.LATEST }}
           commit-message: |
             chore(ci): bump Go to ${{ env.LATEST }}, refresh deps & apply AI fixes
-          title: "CI: Update to Go ${{ env.LATEST }} + auto-fix deps & code"
+          title: "CI: update to Go ${{ env.LATEST }} + auto-fix deps & code"
           body: |
-            **Automated updates:**
-            - Go toolchain bumped to **${{ env.LATEST }}**
-            - Dependencies upgraded via `go get -u ./...`
-            - `go fmt`, `go vet`, `go mod tidy` & `go mod verify` passed
-            - Unit tests and `gosec` security scan passed
-            - AI-generated patch (if applicable) applied to fix any compatibility or code errors
+            **Automated updates**  
+            - Go bumped to **${{ env.LATEST }}**  
+            - Dependencies upgraded (`go get -u ./…`)  
+            - `go fmt` / `go vet` / `go mod tidy` & `go mod verify` passed  
+            - Unit tests and `gosec` scan passed  
+            - AI-generated patch (if any) applied  
           labels: automated
           draft: false
 
-      - name: Skip AI fixes (no API key)
+      - name: Skip AI (no API key)
         if: env.OPENROUTER_API_KEY == ''
         run: |
-          echo "::warning ::OPENROUTER_API_KEY is not set; skipping AI analysis and patching."
+          echo "::warning ::OPENROUTER_API_KEY not set; AI analysis skipped."
