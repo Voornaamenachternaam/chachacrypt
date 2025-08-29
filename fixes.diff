@@ -1,0 +1,98 @@
+diff --git a/go.mod b/go.mod
+index 1234567..89abcde 100644
+--- a/go.mod
++++ b/go.mod
+@@ -4,6 +4,7 @@ go 1.25.0
+ 
+ require (
+ 	golang.org/x/crypto v0.41.0
++	github.com/cyphar/filepath-securejoin v0.2.4
+ 	golang.org/x/term v0.34.0
+ )
+ 
+diff --git a/chachacrypt.go b/chachacrypt.go
+index abcdef1..ghijklm 100644
+--- a/chachacrypt.go
++++ b/chachacrypt.go
+@@ -5,7 +5,10 @@ import (
+ 	"encoding/binary"
+ 	"errors"
+ 	"io"
++	"math"
+ 	"os"
++	"path/filepath"
++	"strconv"
+ 
+ 	"golang.org/x/crypto/argon2"
+ 	"golang.org/x/crypto/chacha20poly1305"
+@@ -45,13 +48,21 @@ func main() {
+ }
+ 
+ func deriveKey(password string, threads int) (*Config, error) {
++	if threads < 1 || threads > 255 {
++		return nil, errors.New("threads must be between 1 and 255")
++	}
++
+ 	return &Config{
+ 		Key:       argon2.IDKey([]byte(password), nil, defaultTime, defaultMemory, uint8(threads), defaultKeyLen),
+ 		KeyMemory: defaultKeyMemory,
+-		KeyThreads: uint8(threads),
++		KeyThreads: uint8(threads), // Now validated above
+ 		ChunkSize:  defaultChunkSize,
+ 	}, nil
+ }
++
++// Add similar validation for any other parameters that get converted to smaller numeric types
++// For example, when reading thread counts from user input:
++// threads, err := strconv.Atoi(inputStr)
++// if err != nil || threads < 1 || threads > 255 { ... }
+ 
+ func encryptFile(inputFile, outputFile string, config *Config) error {
+ 	// Validate chunk size
+@@ -202,10 +213,20 @@ func processFile(inputFile, outputFile string, config *Config, encrypt bool) err
+ 		return errors.New("chunk size must be at least 64 bytes")
+ 	}
+ 
+-	inFile, err := os.Open(inputFile)
++	// Secure path resolution
++	safeInput, err := securejoin.SecureJoin(".", inputFile)
++	if err != nil {
++		return fmt.Errorf("invalid input path: %w", err)
++	}
++	safeOutput, err := securejoin.SecureJoin(".", outputFile)
++	if err != nil {
++		return fmt.Errorf("invalid output path: %w", err)
++	}
++
++	inFile, err := os.Open(safeInput)
+ 	if err != nil {
+ 		return err
+ 	}
+ 	defer inFile.Close()
+ 
+-	outFile, err := os.Create(outputFile)
++	outFile, err := os.Create(safeOutput)
+ 	if err != nil {
+@@ -270,10 +291,20 @@ func processFile(inputFile, outputFile string, config *Config, encrypt bool) err
+ 
+ func readChunkSize(r io.Reader) (uint32, error) {
+ 	n, err := io.CopyN(io.Discard, r, 4)
+-	if err != nil {
++	if err != nil || n != 4 {
+ 		return 0, err
+ 	}
+-	return uint32(n), nil
++
++	// Read actual chunk size from binary data
++	var sizeBuf [4]byte
++	_, err = io.ReadFull(r, sizeBuf[:])
++	if err != nil {
++		return 0, err
++	}
++	
++	size := binary.BigEndian.Uint32(sizeBuf[:])
++	
++	return size, nil
+ }
+ 
+ // Add similar secure path handling for other file operations

@@ -17,9 +17,16 @@ golang.org/x/sys v0.35.0 h1:vz1N37gP5bs89s7He8XuIYXpyY0+QlsKmzipCbUtyxI=
 golang.org/x/sys v0.35.0/go.mod h1:BJP2sWEmIv4KK5OTEluFJCKSidICx8ciO85XgH3Ak8k=
 golang.org/x/term v0.34.0 h1:O/2T7POpk0ZZ7MAzMeWFSg6S5IpWd/RXDlM9hgM3DR4=
 golang.org/x/term v0.34.0/go.mod h1:5jC53AEywhIVebHgPVeg0mj8OD3VO9OzclacVrqpaAw=
-=== Test output ===
+=== Tests (exit 0) ===
 ?   	chachacrypt	[no test files]
-=== Gosec output ===
+=== Gosec (exit 0) ===
+[gosec] 2025/08/29 15:21:44 Including rules: default
+[gosec] 2025/08/29 15:21:44 Excluding rules: default
+[gosec] 2025/08/29 15:21:44 Including analyzers: default
+[gosec] 2025/08/29 15:21:44 Excluding analyzers: default
+[gosec] 2025/08/29 15:21:44 Import directory: /home/runner/work/chachacrypt/chachacrypt
+[gosec] 2025/08/29 15:21:44 Checking package: main
+[gosec] 2025/08/29 15:21:44 Checking file: /home/runner/work/chachacrypt/chachacrypt/chachacrypt.go
 Results:
 
 
@@ -30,45 +37,45 @@ Results:
 
 Autofix: 
 
-[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:329] - G115 (CWE-190): integer overflow conversion int -> uint32 (Confidence: MEDIUM, Severity: HIGH)
-    328: 	}
-  > 329: 	return uint32(n), nil
-    330: }
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:337] - G115 (CWE-190): integer overflow conversion int -> uint32 (Confidence: MEDIUM, Severity: HIGH)
+    336: 	}
+  > 337: 	return uint32(n), nil
+    338: }
 
 Autofix: 
 
-[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:271] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
-    270: 
-  > 271: 	outFile, err := os.Create(outputFile)
-    272: 	if err != nil {
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:279] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    278: 
+  > 279: 	outFile, err := os.Create(outputFile)
+    280: 	if err != nil {
 
 Autofix: 
 
-[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:265] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
-    264: 
-  > 265: 	inFile, err := os.Open(inputFile)
-    266: 	if err != nil {
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:273] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    272: 
+  > 273: 	inFile, err := os.Open(inputFile)
+    274: 	if err != nil {
 
 Autofix: 
 
-[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:203] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
-    202: 
-  > 203: 	outFile, err := os.Create(outputFile)
-    204: 	if err != nil {
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:211] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    210: 
+  > 211: 	outFile, err := os.Create(outputFile)
+    212: 	if err != nil {
 
 Autofix: 
 
-[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:197] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
-    196: 
-  > 197: 	inFile, err := os.Open(inputFile)
-    198: 	if err != nil {
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:205] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    204: 
+  > 205: 	inFile, err := os.Open(inputFile)
+    206: 	if err != nil {
 
 Autofix: 
 
 Summary:
   Gosec  : dev
   Files  : 1
-  Lines  : 341
+  Lines  : 349
   Nosec  : 0
   Issues : 6
 
