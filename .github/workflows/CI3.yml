@@ -46,60 +46,6 @@ jobs:
           sed -i "s/^go .*/go ${{ steps.go-version.outputs.version }}/" go.mod
           go mod tidy
 
-      - name: Fix dependency versions
-        run: |
-          set -euo pipefail
-          # Force correct version of golang.org/x/sys to avoid compatibility issues
-          go get golang.org/x/sys@v0.34.0
-          go mod tidy
-
-      - name: Upgrade dependencies safely
-        run: |
-          set -euo pipefail
-          # Create backup of current state
-          cp go.mod go.mod.backup
-          cp go.sum go.sum.backup 2>/dev/null || true
-          
-          # Get all direct dependencies
-          go list -m -f '{{if not (or .Indirect .Main)}}{{.Path}}{{end}}' all > direct_deps.txt
-          
-          # Update direct dependencies with safe version validation
-          while read -r dep; do
-            if [ -n "$dep" ]; then
-              echo "Processing dependency: $dep"
-              
-              # Get current version
-              current_version=$(go list -m -f '{{.Version}}' "$dep" 2>/dev/null || echo "")
-              
-              if [ -z "$current_version" ]; then
-                echo "Skipping $dep (could not get current version)"
-                continue
-              fi
-              
-              # Get latest version safely
-              latest_version=$(go list -m -f '{{.Version}}' "$dep@latest" 2>/dev/null || echo "")
-              
-              if [ -z "$latest_version" ]; then
-                echo "Skipping $dep (could not get latest version)"
-                continue
-              fi
-              
-              # Extract major version for comparison
-              current_major=$(echo "$current_version" | cut -d'.' -f1 | sed 's/v//')
-              latest_major=$(echo "$latest_version" | cut -d'.' -f1 | sed 's/v//')
-              
-              # Only update if major version matches
-              if [ "$current_major" = "$latest_major" ] && [ "$current_version" != "$latest_version" ]; then
-                echo "Updating $dep from $current_version to $latest_version"
-                go get "$dep@latest"
-              else
-                echo "Keeping $dep at $current_version (major version change or same version)"
-              fi
-            fi
-          done < direct_deps.txt
-          
-          go mod tidy
-
       - name: Apply automatic fixes & formatting
         run: |
           set -euo pipefail
@@ -117,7 +63,7 @@ jobs:
         run: |
           set -euo pipefail
           # Install gosec
-          go install github.com/securego/gosec/v2/cmd/gosec@master
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
           gosec ./...
 
       - name: Run tests
