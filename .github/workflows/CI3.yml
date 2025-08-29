@@ -18,42 +18,40 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5.0.0
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Fetch latest Go stable version
         id: find-go
         run: |
-          echo "Fetching latest Go release…"
           JSON=$(curl -fsSL https://go.dev/dl/?mode=json)
           LATEST=$(echo "$JSON" |
             jq -r 'map(select(.stable==true)) | first | .version' |
             sed 's/^go//')
           echo "LATEST=$LATEST" >> $GITHUB_ENV
-          echo "→ Go $LATEST"
 
-      - name: Set up Go ${{ env.LATEST }}
+      - name: Set up Go
         uses: actions/setup-go@v5.5.0
         with:
           go-version: ${{ env.LATEST }}
 
-      - name: Bump go.mod to Go ${{ env.LATEST }}
+      - name: Bump go.mod
         run: sed -i "s|^go .*|go ${{ env.LATEST }}|" go.mod
 
-      - name: Tidy & upgrade dependencies
+      - name: Upgrade dependencies
         run: |
           go mod tidy
           go get -u ./...
           go mod tidy
 
-      - name: Format, Vet & Verify
+      - name: Format, vet & verify
         run: |
           go fmt ./...
           go vet ./...
           go mod verify
 
-      - name: Run unit tests
+      - name: Run tests
         id: tests
         run: |
           set +e
@@ -61,7 +59,7 @@ jobs:
           echo "TEST_FAILED=$?" >> $GITHUB_ENV
           set -e
 
-      - name: Security scan with gosec
+      - name: Security scan
         id: secscan
         run: |
           set +e
@@ -70,69 +68,75 @@ jobs:
           echo "GOLINT_FAILED=$?" >> $GITHUB_ENV
           set -e
 
-      - name: Aggregate context for AI
+      - name: Build AI context
         run: |
           {
             echo "Go version: ${{ env.LATEST }}"
             echo "=== go.mod ==="; cat go.mod
-            echo "=== go.sum ==="; cat go.sum 2>/dev/null || echo "<no go.sum>"
-            echo "=== Tests (exit ${{ env.TEST_FAILED }}) ==="; cat test-output.txt
-            echo "=== Gosec (exit ${{ env.GOLINT_FAILED }}) ==="; cat gosec-output.txt
+            echo "=== Tests (${{ env.TEST_FAILED }}) ==="; cat test-output.txt
+            echo "=== Gosec (${{ env.GOLINT_FAILED }}) ==="; cat gosec-output.txt
           } > ai-context.txt
 
-      - name: AI analysis & automatic fixes
+      - name: AI analysis & auto-fix
         if: env.OPENROUTER_API_KEY != ''
         run: |
-          SYSTEM_MSG='You are a senior Go developer & security expert. Analyze for compilation errors, test failures, security issues, and dependency incompatibilities with Go $LATEST. Return one unified patch (diff) that updates or replaces incompatible dependencies, corrects code errors, and ensures "go test" and "gosec" exit zero.'
-          jq -n \
+          SYSTEM_MSG='You are a senior Go developer and security expert. Look at code, test and gosec output, then return a single git-style diff that:
+            - replaces any deps incompatible with Go $LATEST,
+            - corrects compilation or logic errors,
+            - ensures go test and gosec exit zero.'
+
+          # build request
+          jq -nc \
             --arg model "deepseek/deepseek-r1:free" \
             --arg system "$SYSTEM_MSG" \
             --arg user "$(jq -Rs . < ai-context.txt)" \
             '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$user}],temperature:0.1}' \
             > ai-request.json
 
-          curl -s -X POST "https://openrouter.ai/api/v1/chat/completions" \
+          # call AI
+          curl -s -X POST https://openrouter.ai/api/v1/chat/completions \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $OPENROUTER_API_KEY" \
-            -d @ai-request.json \
-            > ai-response.json
+            -d @ai-request.json > ai-response.json
 
+          # strip CRs & extract git-style patch
           jq -r '.choices[0].message.content' ai-response.json \
-            | sed -n '/^```diff$/,/^```$/p' | sed '1d;$d' \
+            | tr -d '\r' \
+            | sed -n '/^diff --git a\//,/^$/p' \
             > fixes.diff || true
 
           if [ ! -s fixes.diff ]; then
-            echo "::notice ::No diff returned; skipping patch."
+            echo "::notice ::No valid diff returned; skipping automated patch."
             exit 0
           fi
 
+          echo "Validating patch..."
           if git apply --check fixes.diff; then
             git apply --whitespace=fix fixes.diff
           else
             echo "::warning ::Patch failed validation; fixes.diff retained for review."
           fi
 
-      - name: Stage only code changes
-        run: git add -u
-
-      - name: Commit & open Pull Request
+      - name: Commit & PR
         uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ secrets.GH_TOKEN }}
           branch: ci/auto-update/go-${{ env.LATEST }}
-          commit-message: "chore(ci): bump Go to ${{ env.LATEST }}, refresh deps & apply AI fixes"
-          title: "CI: Update to Go ${{ env.LATEST }} + auto‐fix deps & code"
+          commit-message: "chore(ci): bump Go to ${{ env.LATEST }}, update deps & apply AI fixes"
+          title: "CI: Update to Go ${{ env.LATEST }} + auto-fix deps & code"
           body: |
-            **Automated updates:**
-            - Go toolchain bumped to **${{ env.LATEST }}**
-            - Dependencies upgraded via `go get -u ./...`
-            - `go fmt`, `go vet`, `go mod tidy` & `go mod verify` passed
-            - Unit tests exit code: ${{ env.TEST_FAILED }}
+            **Automated updates**
+            - Go bumped to **${{ env.LATEST }}**
+            - Dependencies upgraded (`go get -u ./...`)
+            - `go fmt` / `go vet` / `go mod tidy` / `go mod verify` passed
+            - Tests exit code: ${{ env.TEST_FAILED }}
             - Gosec exit code: ${{ env.GOLINT_FAILED }}
-            - AI‐generated patch applied (if available)
+            - AI-generated patch (if any) applied
           labels: automated
           draft: false
 
-      - name: Clean up intermediates
+      - name: Clean up
         if: always()
-        run: rm -f ai-context.txt ai-request.json ai-response.json fixes.diff test-output.txt gosec-output.txt
+        run: |
+          rm -f ai-context.txt ai-request.json ai-response.json fixes.diff \
+                test-output.txt gosec-output.txt
