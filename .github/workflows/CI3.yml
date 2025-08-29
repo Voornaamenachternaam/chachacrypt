@@ -46,6 +46,13 @@ jobs:
           sed -i "s/^go .*/go ${{ steps.go-version.outputs.version }}/" go.mod
           go mod tidy
 
+      - name: Fix dependency versions
+        run: |
+          set -euo pipefail
+          # Force correct version of golang.org/x/sys to avoid compatibility issues
+          go get golang.org/x/sys@v0.34.0
+          go mod tidy
+
       - name: Upgrade dependencies safely
         run: |
           set -euo pipefail
@@ -105,6 +112,13 @@ jobs:
           go mod tidy
           go vet ./...
           go mod verify
+
+      - name: Run security scanner (gosec)
+        run: |
+          set -euo pipefail
+          # Install gosec
+          go install github.com/securego/gosec/v2/cmd/gosec@master
+          gosec ./...
 
       - name: Run tests
         id: test
@@ -262,6 +276,7 @@ jobs:
             echo "- ✅ go mod tidy executed"
             echo "- ✅ go vet passed"
             echo "- ✅ go mod verified"
+            echo "- ✅ gosec security scan performed"
             
             echo -e "\n## 🤖 AI Code Analysis"
             if [ -f "ai-analysis/recommendations.md" ]; then
@@ -279,4 +294,4 @@ jobs:
           branch: "update/go-${{ steps.go-version.outputs.version }}"
           title: "Update Go ${{ steps.go-version.outputs.version }} and dependencies with AI Analysis"
           body-path: pr_body.md
-          delete-branch: true 
+          delete-branch: true
