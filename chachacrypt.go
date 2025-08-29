@@ -99,11 +99,15 @@ func main() {
 			log.Fatalf("Decryption failed: %v", err)
 		}
 		fmt.Println("Decryption successful.")
-
-	case "pw":
-		_ = pw.Parse(os.Args[2:])
-		fmt.Println("Generated password:", generatePassword(*pwSizeFlag))
-
+		
+		case "pw":
+    		_ = pw.Parse(os.Args[2:])
+    		password, err := generatePassword(*pwSizeFlag)
+    		if err != nil {
+        		log.Fatal(err)
+    		}
+    		fmt.Println("Generated password:", password)
+		
 	default:
 		showHelp()
 	}
