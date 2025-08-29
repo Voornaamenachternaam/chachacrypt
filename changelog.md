@@ -11,3 +11,4 @@
 - Bump Go to v1.25.0
 - Update Go 1.25.0 and dependencies
 - Update Go 1.25.0 and dependencies
+- Update Go 1.25.0 and dependencies with comprehensive testing
