@@ -1,0 +1,52 @@
+Results:
+
+
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:51] - G115 (CWE-190): integer overflow conversion int -> uint8 (Confidence: MEDIUM, Severity: HIGH)
+    50: 		KeyMemory:  defaultKeyMemory,
+  > 51: 		KeyThreads: uint8(threads),
+    52: 		ChunkSize:  defaultChunkSize,
+
+Autofix: 
+
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:329] - G115 (CWE-190): integer overflow conversion int -> uint32 (Confidence: MEDIUM, Severity: HIGH)
+    328: 	}
+  > 329: 	return uint32(n), nil
+    330: }
+
+Autofix: 
+
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:271] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    270: 
+  > 271: 	outFile, err := os.Create(outputFile)
+    272: 	if err != nil {
+
+Autofix: 
+
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:265] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    264: 
+  > 265: 	inFile, err := os.Open(inputFile)
+    266: 	if err != nil {
+
+Autofix: 
+
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:203] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    202: 
+  > 203: 	outFile, err := os.Create(outputFile)
+    204: 	if err != nil {
+
+Autofix: 
+
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:197] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    196: 
+  > 197: 	inFile, err := os.Open(inputFile)
+    198: 	if err != nil {
+
+Autofix: 
+
+Summary:
+  Gosec  : dev
+  Files  : 1
+  Lines  : 341
+  Nosec  : 0
+  Issues : 6
+

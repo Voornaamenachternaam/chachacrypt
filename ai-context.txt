@@ -1,0 +1,74 @@
+Go version: 1.25.0
+=== go.mod ===
+module chachacrypt
+
+go 1.25.0
+
+require (
+	golang.org/x/crypto v0.41.0
+	golang.org/x/term v0.34.0
+)
+
+require golang.org/x/sys v0.35.0 // indirect
+=== go.sum ===
+golang.org/x/crypto v0.41.0 h1:WKYxWedPGCTVVl5+WHSSrOBT0O8lx32+zxmHxijgXp4=
+golang.org/x/crypto v0.41.0/go.mod h1:pO5AFd7FA68rFak7rOAGVuygIISepHftHnr8dr6+sUc=
+golang.org/x/sys v0.35.0 h1:vz1N37gP5bs89s7He8XuIYXpyY0+QlsKmzipCbUtyxI=
+golang.org/x/sys v0.35.0/go.mod h1:BJP2sWEmIv4KK5OTEluFJCKSidICx8ciO85XgH3Ak8k=
+golang.org/x/term v0.34.0 h1:O/2T7POpk0ZZ7MAzMeWFSg6S5IpWd/RXDlM9hgM3DR4=
+golang.org/x/term v0.34.0/go.mod h1:5jC53AEywhIVebHgPVeg0mj8OD3VO9OzclacVrqpaAw=
+=== Test output ===
+?   	chachacrypt	[no test files]
+=== Gosec output ===
+Results:
+
+
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:51] - G115 (CWE-190): integer overflow conversion int -> uint8 (Confidence: MEDIUM, Severity: HIGH)
+    50: 		KeyMemory:  defaultKeyMemory,
+  > 51: 		KeyThreads: uint8(threads),
+    52: 		ChunkSize:  defaultChunkSize,
+
+Autofix: 
+
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:329] - G115 (CWE-190): integer overflow conversion int -> uint32 (Confidence: MEDIUM, Severity: HIGH)
+    328: 	}
+  > 329: 	return uint32(n), nil
+    330: }
+
+Autofix: 
+
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:271] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    270: 
+  > 271: 	outFile, err := os.Create(outputFile)
+    272: 	if err != nil {
+
+Autofix: 
+
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:265] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    264: 
+  > 265: 	inFile, err := os.Open(inputFile)
+    266: 	if err != nil {
+
+Autofix: 
+
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:203] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    202: 
+  > 203: 	outFile, err := os.Create(outputFile)
+    204: 	if err != nil {
+
+Autofix: 
+
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:197] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    196: 
+  > 197: 	inFile, err := os.Open(inputFile)
+    198: 	if err != nil {
+
+Autofix: 
+
+Summary:
+  Gosec  : dev
+  Files  : 1
+  Lines  : 341
+  Nosec  : 0
+  Issues : 6
+
