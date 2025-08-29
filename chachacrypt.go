@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,7 +12,6 @@ import (
 	"os"
 	"runtime"
 	"strings"
-	"sync"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
@@ -45,7 +45,7 @@ func init() {
 		KeySize:    defaultKeySize,
 		KeyTime:    defaultKeyTime,
 		KeyMemory:  defaultKeyMemory,
-		KeyThreads: uint8(runtime.NumCPU()), // Fixed issue with constant uint8 conversion
+		KeyThreads: uint8(runtime.NumCPU()),
 		ChunkSize:  defaultChunkSize,
 	}
 }
@@ -75,18 +75,24 @@ func main() {
 		if err := validateFileInput(*encInput, *encOutput); err != nil {
 			log.Fatalf("Input validation error: %v", err)
 		}
-		if err := encryptFile(*encInput, *encOutput); err != nil {
+		fmt.Println("Enter a strong password:")
+		password := readPassword()
+		if err := encryptFile(*encInput, *encOutput, password); err != nil {
 			log.Fatalf("Encryption failed: %v", err)
 		}
+		fmt.Println("Encryption successful.")
 
 	case "dec":
 		_ = dec.Parse(os.Args[2:])
 		if err := validateFileInput(*decInput, *decOutput); err != nil {
 			log.Fatalf("Input validation error: %v", err)
 		}
-		if err := decryptFile(*decInput, *decOutput); err != nil {
+		fmt.Println("Enter the password:")
+		password := readPassword()
+		if err := decryptFile(*decInput, *decOutput, password); err != nil {
 			log.Fatalf("Decryption failed: %v", err)
 		}
+		fmt.Println("Decryption successful.")
 
 	case "pw":
 		_ = pw.Parse(os.Args[2:])
@@ -139,10 +145,7 @@ func validateFileInput(inputFile, outputFile string) error {
 	return nil
 }
 
-func encryptFile(inputFile, outputFile string) error {
-	fmt.Println("Enter a strong password:")
-	password := readPassword()
-
+func encryptFile(inputFile, outputFile, password string) error {
 	salt := make([]byte, config.SaltSize)
 	if _, err := rand.Read(salt); err != nil {
 		return fmt.Errorf("error generating salt: %w", err)
@@ -162,45 +165,58 @@ func encryptFile(inputFile, outputFile string) error {
 	}
 	defer out.Close()
 
+	// Write salt
 	if _, err := out.Write(salt); err != nil {
 		return fmt.Errorf("error writing salt: %w", err)
 	}
 
-	aead, _ := chacha20poly1305.NewX(key)
-
-	var wg sync.WaitGroup
-	buf := make([]byte, config.ChunkSize)
-
-	for {
-		n, err := in.Read(buf)
-		if n == 0 {
-			if err == io.EOF {
-				break
-			}
-			return fmt.Errorf("error reading input file: %w", err)
-		}
-
-		chunk := buf[:n]
-		nonce := make([]byte, aead.NonceSize())
-		rand.Read(nonce)
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			encrypted := aead.Seal(nil, nonce, chunk, nil)
-			out.Write(nonce)
-			out.Write(encrypted)
-		}()
+	aead, err := chacha20poly1305.NewX(key)
+	if err != nil {
+		return fmt.Errorf("error creating AEAD: %w", err)
 	}
 
-	wg.Wait()
+	nonceSize := aead.NonceSize()
+	chunk := make([]byte, config.ChunkSize)
+	for {
+		n, err := in.Read(chunk)
+		if n > 0 {
+			// Generate nonce
+			nonce := make([]byte, nonceSize)
+			if _, err := rand.Read(nonce); err != nil {
+				return fmt.Errorf("error generating nonce: %w", err)
+			}
+
+			// Encrypt chunk
+			encrypted := aead.Seal(nil, nonce, chunk[:n], nil)
+
+			// Write nonce
+			if _, err := out.Write(nonce); err != nil {
+				return fmt.Errorf("error writing nonce: %w", err)
+			}
+
+			// Write encrypted data length
+			encryptedLen := uint32(len(encrypted))
+			if err := binary.Write(out, binary.LittleEndian, encryptedLen); err != nil {
+				return fmt.Errorf("error writing encrypted length: %w", err)
+			}
+
+			// Write encrypted data
+			if _, err := out.Write(encrypted); err != nil {
+				return fmt.Errorf("error writing encrypted data: %w", err)
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("error reading input file: %w", err)
+		}
+	}
+
 	return nil
 }
 
-func decryptFile(inputFile, outputFile string) error {
-	fmt.Println("Enter the password:")
-	password := readPassword()
-
+func decryptFile(inputFile, outputFile, password string) error {
 	in, err := os.Open(inputFile)
 	if err != nil {
 		return fmt.Errorf("error opening input file: %w", err)
@@ -213,30 +229,55 @@ func decryptFile(inputFile, outputFile string) error {
 	}
 	defer out.Close()
 
+	// Read salt
 	salt := make([]byte, config.SaltSize)
 	if _, err := in.Read(salt); err != nil {
 		return fmt.Errorf("error reading salt: %w", err)
 	}
 
 	key := argon2.IDKey([]byte(password), salt, config.KeyTime, config.KeyMemory, config.KeyThreads, uint32(config.KeySize))
-	aead, _ := chacha20poly1305.NewX(key)
+	aead, err := chacha20poly1305.NewX(key)
+	if err != nil {
+		return fmt.Errorf("error creating AEAD: %w", err)
+	}
 
 	nonceSize := aead.NonceSize()
-	buf := make([]byte, config.ChunkSize+nonceSize)
-
 	for {
-		n, err := in.Read(buf)
-		if n == 0 && err == io.EOF {
+		// Read nonce
+		nonce := make([]byte, nonceSize)
+		_, err := io.ReadFull(in, nonce)
+		if err == io.EOF {
 			break
 		}
-		nonce := buf[:nonceSize]
-		ciphertext := buf[nonceSize:n]
+		if err != nil {
+			return fmt.Errorf("error reading nonce: %w", err)
+		}
 
-		plaintext, err := aead.Open(nil, nonce, ciphertext, nil)
+		// Read encrypted data length
+		var encryptedLen uint32
+		if err := binary.Read(in, binary.LittleEndian, &encryptedLen); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("error reading encrypted length: %w", err)
+		}
+
+		// Read encrypted data
+		encrypted := make([]byte, encryptedLen)
+		if _, err := io.ReadFull(in, encrypted); err != nil {
+			return fmt.Errorf("error reading encrypted data: %w", err)
+		}
+
+		// Decrypt
+		plaintext, err := aead.Open(nil, nonce, encrypted, nil)
 		if err != nil {
 			return fmt.Errorf("decryption failed: %w", err)
 		}
-		out.Write(plaintext)
+
+		// Write decrypted data
+		if _, err := out.Write(plaintext); err != nil {
+			return fmt.Errorf("error writing decrypted data: %w", err)
+		}
 	}
 
 	return nil
