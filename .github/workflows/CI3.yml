@@ -1,4 +1,4 @@
-name: "CI 3"
+name: CI
 
 on:
   workflow_dispatch:
@@ -38,6 +38,12 @@ jobs:
         with:
           go-version: ${{ steps.go-version.outputs.version }}
 
+      - name: Install gotestsum
+        run: |
+          set -euo pipefail
+          # Install gotestsum for better test reporting
+          go install gotest.tools/gotestsum@latest
+
       - name: Verify go.mod version
         run: |
           set -euo pipefail
@@ -76,7 +82,6 @@ jobs:
           set -euo pipefail
           go mod tidy
           go vet ./...
-          # Additional static analysis
           go mod verify
 
       - name: Run comprehensive tests
@@ -86,18 +91,16 @@ jobs:
           # Create test output directory
           mkdir -p test-results
           
-          # Run tests with coverage, timeout, and JUnit output
-          gotestsum --junitfile test-results/junit.xml --format standard-verbose -- \
+          # Run tests with coverage and timeout - use absolute path to gotestsum
+          $(go env GOPATH)/bin/gotestsum --junitfile test-results/junit.xml --format standard-verbose -- \
             -timeout=5m \
             -coverprofile=test-results/coverage.out \
             -covermode=atomic \
             ./...
           
-          # Generate coverage report
-          go tool cover -html=test-results/coverage.out -o test-results/coverage.html
-          
-          # Check if tests passed
+          # Generate coverage report if tests passed
           if [ $? -eq 0 ]; then
+            go tool cover -html=test-results/coverage.out -o test-results/coverage.html 2>/dev/null || true
             echo "tests_failed=false" >> "$GITHUB_OUTPUT"
           else
             echo "tests_failed=true" >> "$GITHUB_OUTPUT"
