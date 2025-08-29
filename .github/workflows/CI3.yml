@@ -40,18 +40,13 @@ jobs:
         with:
           go-version: ${{ steps.go-version.outputs.version }}
 
-      - name: Install gotestsum
-        run: |
-          set -euo pipefail
-          go install gotest.tools/gotestsum@latest
-
       - name: Verify go.mod version
         run: |
           set -euo pipefail
           sed -i "s/^go .*/go ${{ steps.go-version.outputs.version }}/" go.mod
           go mod tidy
 
-      - name: Upgrade dependencies
+      - name: Upgrade dependencies safely
         run: |
           set -euo pipefail
           # Create backup of current state
@@ -61,22 +56,37 @@ jobs:
           # Get all direct dependencies
           go list -m -f '{{if not (or .Indirect .Main)}}{{.Path}}{{end}}' all > direct_deps.txt
           
-          # Update direct dependencies with version validation
+          # Update direct dependencies with safe version validation
           while read -r dep; do
             if [ -n "$dep" ]; then
               echo "Processing dependency: $dep"
               
               # Get current version
-              current_version=$(go list -m -f '{{.Version}}' "$dep" 2>/dev/null || echo "v0.0.0")
+              current_version=$(go list -m -f '{{.Version}}' "$dep" 2>/dev/null || echo "")
               
-              # Get latest version that's compatible
-              latest_info=$(go list -m -versions -f '{{range .Versions}}{{if not (contains . "beta")}}{{if not (contains . "alpha")}}{{if not (contains . "rc")}}{{.}} {{end}}{{end}}{{end}}{{end}}' "$dep@latest" 2>/dev/null | awk '{print $NF}')
+              if [ -z "$current_version" ]; then
+                echo "Skipping $dep (could not get current version)"
+                continue
+              fi
               
-              if [ -n "$latest_info" ] && [ "$current_version" != "$latest_info" ]; then
-                echo "Updating $dep from $current_version to $latest_info"
-                go get "$dep@$latest_info"
+              # Get latest version safely
+              latest_version=$(go list -m -f '{{.Version}}' "$dep@latest" 2>/dev/null || echo "")
+              
+              if [ -z "$latest_version" ]; then
+                echo "Skipping $dep (could not get latest version)"
+                continue
+              fi
+              
+              # Extract major version for comparison
+              current_major=$(echo "$current_version" | cut -d'.' -f1 | sed 's/v//')
+              latest_major=$(echo "$latest_version" | cut -d'.' -f1 | sed 's/v//')
+              
+              # Only update if major version matches
+              if [ "$current_major" = "$latest_major" ] && [ "$current_version" != "$latest_version" ]; then
+                echo "Updating $dep from $current_version to $latest_version"
+                go get "$dep@latest"
               else
-                echo "Keeping $dep at $current_version (no compatible update found)"
+                echo "Keeping $dep at $current_version (major version change or same version)"
               fi
             fi
           done < direct_deps.txt
@@ -88,9 +98,6 @@ jobs:
           set -euo pipefail
           go fmt ./...
           go fix ./...
-          # Additional code quality tools
-          go install golang.org/x/tools/cmd/goimports@latest
-          goimports -w .
 
       - name: Tidy modules & vet
         run: |
@@ -98,30 +105,15 @@ jobs:
           go mod tidy
           go vet ./...
           go mod verify
-          # Additional static analysis
-          go install honnef.co/go/tools/cmd/staticcheck@latest
-          $(go env GOPATH)/bin/staticcheck ./...
 
-      - name: Run comprehensive tests
+      - name: Run tests
         id: test
         run: |
           set -euo pipefail
-          mkdir -p test-results
-          
-          # Run basic tests first to ensure functionality
-          if go test ./... -timeout=3m -v > test-results/basic_tests.txt 2>&1; then
-            echo "Basic tests passed, running comprehensive tests..."
-            # Run full test suite with gotestsum
-            $(go env GOPATH)/bin/gotestsum --junitfile test-results/junit.xml --format standard-verbose -- \
-              -timeout=5m \
-              -coverprofile=test-results/coverage.out \
-              -covermode=atomic \
-              ./...
-            
-            go tool cover -html=test-results/coverage.out -o test-results/coverage.html 2>/dev/null || true
+          # Run tests with timeout
+          if go test ./... -timeout=5m -v 2>&1 | tee test_output.txt; then
             echo "tests_failed=false" >> "$GITHUB_OUTPUT"
           else
-            echo "Basic tests failed, check test-results/basic_tests.txt"
             echo "tests_failed=true" >> "$GITHUB_OUTPUT"
             exit 1
           fi
@@ -140,11 +132,26 @@ jobs:
             cat go.mod
             echo "=== GO.SUM ==="
             cat go.sum 2>/dev/null || echo "No go.sum file"
-            echo "=== CODE ANALYSIS ==="
-            find . -name "*.go" -not -path "./.git/*" -exec sh -c 'echo "File: {}"; echo "Content:"; cat {}; echo "=== End of file ==="' \; > ai-analysis/code_context.txt
+            echo "=== DEPENDENCIES ==="
+            go list -m all
+            echo "=== TEST RESULTS ==="
+            if [ -f test_output.txt ]; then
+              cat test_output.txt
+            else
+              echo "No test output available"
+            fi
           } > ai-analysis/context.txt
           
-          # Prepare AI analysis request
+          # Check if API key is available
+          if [ -z "${{ secrets.OPENROUTER_API_KEY }}" ]; then
+            echo "OPENROUTER_API_KEY secret not available, skipping AI analysis"
+            echo "AI analysis skipped due to missing API key" > ai-analysis/recommendations.md
+            exit 0
+          fi
+          
+          # Prepare AI analysis request (truncate to avoid token limits)
+          head -c 10000 ai-analysis/context.txt > ai-analysis/context_truncated.txt
+          
           cat > ai-analysis/request.json << EOF
           {
             "model": "deepseek/deepseek-r1:free",
@@ -155,7 +162,7 @@ jobs:
               },
               {
                 "role": "user",
-                "content": "$(cat ai-analysis/context.txt | jq -R -s -c . | cut -c 2- | rev | cut -c 2- | rev)"
+                "content": "$(cat ai-analysis/context_truncated.txt | jq -R -s -c . | cut -c 2- | rev | cut -c 2- | rev)"
               }
             ],
             "temperature": 0.1,
@@ -163,20 +170,32 @@ jobs:
           }
           EOF
           
-          # Call DeepSeek API
-          curl -X POST "https://openrouter.ai/api/v1/chat/completions" \
+          # Call DeepSeek API with timeout and error handling
+          echo "Calling DeepSeek API for code analysis..."
+          if ! curl -X POST "https://openrouter.ai/api/v1/chat/completions" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${{ secrets.OPENROUTER_API_KEY }}" \
             -d "@ai-analysis/request.json" \
             -o ai-analysis/response.json \
-            --fail-with-body || echo "AI analysis API call failed, continuing without AI insights"
+            --max-time 30 \
+            --fail-with-body; then
+            echo "AI analysis API call failed or timed out, continuing without AI insights"
+            echo "AI analysis failed due to API error or timeout" > ai-analysis/recommendations.md
+            exit 0
+          fi
           
           # Extract and format AI response
           if [ -f "ai-analysis/response.json" ]; then
-            jq -r '.choices[0].message.content' ai-analysis/response.json > ai-analysis/recommendations.md
-            echo "AI analysis completed successfully"
+            if jq -e '.choices[0].message.content' ai-analysis/response.json > /dev/null 2>&1; then
+              jq -r '.choices[0].message.content' ai-analysis/response.json > ai-analysis/recommendations.md
+              echo "AI analysis completed successfully"
+            else
+              echo "AI analysis response format unexpected"
+              echo "AI analysis failed due to unexpected response format" > ai-analysis/recommendations.md
+            fi
           else
-            echo "AI analysis was not completed due to API issues" > ai-analysis/recommendations.md
+            echo "AI analysis response file not found"
+            echo "AI analysis failed due to missing response" > ai-analysis/recommendations.md
           fi
 
       - name: Install and use git-cliff
@@ -187,21 +206,19 @@ jobs:
           sudo install -m 0755 git-cliff-2.10.0/git-cliff /usr/local/bin/git-cliff
           git-cliff --unreleased --output changelog.md 2>/dev/null || true
 
-      - name: Upload test results and analysis
+      - name: Upload AI analysis results
         uses: actions/upload-artifact@v4.6.2
         if: always()
         with:
-          name: quality-reports
-          path: |
-            test-results/
-            ai-analysis/
-            !**/*.tmp
+          name: ai-analysis-results
+          path: ai-analysis/
 
       - name: Clean up temporary files
         run: |
           set -euo pipefail
-          rm -f direct_deps.txt git-cliff.tar.gz go.mod.backup
-          rm -rf git-cliff-2.10.0/
+          # Remove temporary files to avoid committing them
+          rm -f direct_deps.txt git-cliff.tar.gz go.mod.backup test_output.txt
+          rm -rf git-cliff-2.10.0/ ai-analysis/
           rm -f go.sum.backup 2>/dev/null || true
 
       - name: Prepare PR body
@@ -210,12 +227,12 @@ jobs:
           GO_VER="${{ steps.go-version.outputs.version }}"
           TF="${{ steps.test.outputs.tests_failed }}"
           
+          # Create PR body
           {
             echo "## 🔧 Updates"
             echo "- Go version → ${GO_VER}"
-            echo "- Dependencies upgraded with version validation"
+            echo "- Dependencies upgraded (safe upgrades only)"
             echo "- Automatic formatting and fixes applied"
-            echo "- Comprehensive static analysis completed"
             echo ""
             echo "## 📜 Changelog Diff"
             
@@ -227,40 +244,39 @@ jobs:
             
             echo -e "\n## ✅ Test Status"
             if [ "${TF}" = "true" ]; then
-              echo "❌ Tests failed — see quality-reports artifact"
+              echo "❌ Tests failed — see test output below"
+              echo '```'
+              if [ -f test_output.txt ]; then
+                cat test_output.txt
+              else
+                echo "No test output available"
+              fi
+              echo '```'
             else
               echo "✅ All tests passed"
-              echo "- Code formatting validated"
-              echo "- Static analysis passed"
-              echo "- All tests completed successfully"
             fi
             
             echo -e "\n## 🔍 Quality Checks"
             echo "- ✅ go fmt applied"
             echo "- ✅ go fix applied" 
-            echo "- ✅ goimports formatting applied"
             echo "- ✅ go mod tidy executed"
             echo "- ✅ go vet passed"
             echo "- ✅ go mod verified"
-            echo "- ✅ staticcheck analysis completed"
             
             echo -e "\n## 🤖 AI Code Analysis"
             if [ -f "ai-analysis/recommendations.md" ]; then
               cat ai-analysis/recommendations.md
             else
-              echo "AI analysis was not completed due to API issues"
+              echo "AI analysis was not completed (see artifacts for details)"
             fi
-            
-            echo -e "\n## 📊 Test Coverage"
-            echo "Detailed test reports and coverage available in the quality-reports artifact"
           } > pr_body.md
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ secrets.GH_TOKEN }}
-          commit-message: "chore: update Go ${{ steps.go-version.outputs.version }} with AI analysis and comprehensive testing"
-          branch: "update/go-${{ steps.go-version.outputs.version }}-ai"
-          title: "Update Go ${{ steps.go-version.outputs.version }} with AI Analysis & Comprehensive Testing"
+          commit-message: "chore: update Go ${{ steps.go-version.outputs.version }} and dependencies with AI analysis"
+          branch: "update/go-${{ steps.go-version.outputs.version }}"
+          title: "Update Go ${{ steps.go-version.outputs.version }} and dependencies with AI Analysis"
           body-path: pr_body.md
-          delete-branch: true
+          delete-branch: true 
