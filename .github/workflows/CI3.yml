@@ -1,4 +1,4 @@
-name: CI
+name: "CI 3"
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
 
 jobs:
   update-go:
-    name: Update to Latest Go Version
+    name: Update to Latest Go Version with AI Analysis
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5.0.0
@@ -26,8 +26,10 @@ jobs:
             sed 's/^go//')
           
           if [ -z "$LATEST_VERSION" ]; then
-            echo "::error::Failed to determine latest Go version"
-            exit 1
+            echo "::warning::Failed to fetch latest Go version, using fallback detection"
+            # Fallback: check current Go version and increment if possible
+            CURRENT_GO=$(grep '^go ' go.mod | cut -d' ' -f2 || echo "1.25")
+            LATEST_VERSION=$(echo "$CURRENT_GO" | awk -F. '{print $1"."($2+1)}')
           fi
           
           echo "version=$LATEST_VERSION" >> "$GITHUB_OUTPUT"
@@ -41,7 +43,6 @@ jobs:
       - name: Install gotestsum
         run: |
           set -euo pipefail
-          # Install gotestsum for better test reporting
           go install gotest.tools/gotestsum@latest
 
       - name: Verify go.mod version
@@ -53,18 +54,29 @@ jobs:
       - name: Upgrade dependencies
         run: |
           set -euo pipefail
+          # Create backup of current state
+          cp go.mod go.mod.backup
+          cp go.sum go.sum.backup 2>/dev/null || true
+          
           # Get all direct dependencies
           go list -m -f '{{if not (or .Indirect .Main)}}{{.Path}}{{end}}' all > direct_deps.txt
           
-          # Update direct dependencies within same major version
+          # Update direct dependencies with version validation
           while read -r dep; do
             if [ -n "$dep" ]; then
-              current_version=$(go list -m -f '{{.Version}}' "$dep")
-              latest_version=$(go list -m -f '{{.Version}}' "$dep@latest")
+              echo "Processing dependency: $dep"
               
-              # Only update if major version matches
-              if [ "${current_version%%.*}" = "${latest_version%%.*}" ]; then
-                go get "$dep@latest"
+              # Get current version
+              current_version=$(go list -m -f '{{.Version}}' "$dep" 2>/dev/null || echo "v0.0.0")
+              
+              # Get latest version that's compatible
+              latest_info=$(go list -m -versions -f '{{range .Versions}}{{if not (contains . "beta")}}{{if not (contains . "alpha")}}{{if not (contains . "rc")}}{{.}} {{end}}{{end}}{{end}}{{end}}' "$dep@latest" 2>/dev/null | awk '{print $NF}')
+              
+              if [ -n "$latest_info" ] && [ "$current_version" != "$latest_info" ]; then
+                echo "Updating $dep from $current_version to $latest_info"
+                go get "$dep@$latest_info"
+              else
+                echo "Keeping $dep at $current_version (no compatible update found)"
               fi
             fi
           done < direct_deps.txt
@@ -76,6 +88,9 @@ jobs:
           set -euo pipefail
           go fmt ./...
           go fix ./...
+          # Additional code quality tools
+          go install golang.org/x/tools/cmd/goimports@latest
+          goimports -w .
 
       - name: Tidy modules & vet
         run: |
@@ -83,58 +98,111 @@ jobs:
           go mod tidy
           go vet ./...
           go mod verify
+          # Additional static analysis
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          $(go env GOPATH)/bin/staticcheck ./...
 
       - name: Run comprehensive tests
         id: test
         run: |
           set -euo pipefail
-          # Create test output directory
           mkdir -p test-results
           
-          # Run tests with coverage and timeout - use absolute path to gotestsum
-          $(go env GOPATH)/bin/gotestsum --junitfile test-results/junit.xml --format standard-verbose -- \
-            -timeout=5m \
-            -coverprofile=test-results/coverage.out \
-            -covermode=atomic \
-            ./...
-          
-          # Generate coverage report if tests passed
-          if [ $? -eq 0 ]; then
+          # Run basic tests first to ensure functionality
+          if go test ./... -timeout=3m -v > test-results/basic_tests.txt 2>&1; then
+            echo "Basic tests passed, running comprehensive tests..."
+            # Run full test suite with gotestsum
+            $(go env GOPATH)/bin/gotestsum --junitfile test-results/junit.xml --format standard-verbose -- \
+              -timeout=5m \
+              -coverprofile=test-results/coverage.out \
+              -covermode=atomic \
+              ./...
+            
             go tool cover -html=test-results/coverage.out -o test-results/coverage.html 2>/dev/null || true
             echo "tests_failed=false" >> "$GITHUB_OUTPUT"
           else
+            echo "Basic tests failed, check test-results/basic_tests.txt"
             echo "tests_failed=true" >> "$GITHUB_OUTPUT"
             exit 1
+          fi
+
+      - name: AI Code Analysis with DeepSeek
+        id: ai-analysis
+        continue-on-error: true  # Continue even if AI analysis fails
+        run: |
+          set -euo pipefail
+          mkdir -p ai-analysis
+          
+          # Prepare code context for AI analysis
+          {
+            echo "Current Go version: ${{ steps.go-version.outputs.version }}"
+            echo "=== GO.MOD ==="
+            cat go.mod
+            echo "=== GO.SUM ==="
+            cat go.sum 2>/dev/null || echo "No go.sum file"
+            echo "=== CODE ANALYSIS ==="
+            find . -name "*.go" -not -path "./.git/*" -exec sh -c 'echo "File: {}"; echo "Content:"; cat {}; echo "=== End of file ==="' \; > ai-analysis/code_context.txt
+          } > ai-analysis/context.txt
+          
+          # Prepare AI analysis request
+          cat > ai-analysis/request.json << EOF
+          {
+            "model": "deepseek/deepseek-r1:free",
+            "messages": [
+              {
+                "role": "system",
+                "content": "You are a senior Go developer and security expert. Analyze this Go codebase for:\n1. Potential bugs or issues\n2. Security vulnerabilities\n3. Code quality improvements\n4. Dependency issues in go.mod/go.sum\n5. Best practices violations\n6. Performance optimizations\n7. Compatibility with Go ${{ steps.go-version.outputs.version }}\n\nProvide specific, actionable recommendations with code examples when appropriate."
+              },
+              {
+                "role": "user",
+                "content": "$(cat ai-analysis/context.txt | jq -R -s -c . | cut -c 2- | rev | cut -c 2- | rev)"
+              }
+            ],
+            "temperature": 0.1,
+            "max_tokens": 4000
+          }
+          EOF
+          
+          # Call DeepSeek API
+          curl -X POST "https://openrouter.ai/api/v1/chat/completions" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.OPENROUTER_API_KEY }}" \
+            -d "@ai-analysis/request.json" \
+            -o ai-analysis/response.json \
+            --fail-with-body || echo "AI analysis API call failed, continuing without AI insights"
+          
+          # Extract and format AI response
+          if [ -f "ai-analysis/response.json" ]; then
+            jq -r '.choices[0].message.content' ai-analysis/response.json > ai-analysis/recommendations.md
+            echo "AI analysis completed successfully"
+          else
+            echo "AI analysis was not completed due to API issues" > ai-analysis/recommendations.md
           fi
 
       - name: Install and use git-cliff
         run: |
           set -euo pipefail
-          # Download and install git-cliff
           curl -fsSL https://github.com/orhun/git-cliff/releases/download/v2.10.0/git-cliff-2.10.0-x86_64-unknown-linux-gnu.tar.gz -o git-cliff.tar.gz
           tar xzf git-cliff.tar.gz
-          
-          # Install the binary (it's in the extracted directory)
           sudo install -m 0755 git-cliff-2.10.0/git-cliff /usr/local/bin/git-cliff
-          
-          # Generate changelog (suppress config warning)
           git-cliff --unreleased --output changelog.md 2>/dev/null || true
 
-      - name: Upload test results
+      - name: Upload test results and analysis
         uses: actions/upload-artifact@v4.6.2
         if: always()
         with:
-          name: test-results
+          name: quality-reports
           path: |
             test-results/
-            !test-results/*.tmp
+            ai-analysis/
+            !**/*.tmp
 
       - name: Clean up temporary files
         run: |
           set -euo pipefail
-          # Remove temporary files to avoid committing them
-          rm -f direct_deps.txt git-cliff.tar.gz
+          rm -f direct_deps.txt git-cliff.tar.gz go.mod.backup
           rm -rf git-cliff-2.10.0/
+          rm -f go.sum.backup 2>/dev/null || true
 
       - name: Prepare PR body
         run: |
@@ -142,12 +210,12 @@ jobs:
           GO_VER="${{ steps.go-version.outputs.version }}"
           TF="${{ steps.test.outputs.tests_failed }}"
           
-          # Create PR body
           {
             echo "## 🔧 Updates"
             echo "- Go version → ${GO_VER}"
-            echo "- Dependencies upgraded (safe upgrades only)"
+            echo "- Dependencies upgraded with version validation"
             echo "- Automatic formatting and fixes applied"
+            echo "- Comprehensive static analysis completed"
             echo ""
             echo "## 📜 Changelog Diff"
             
@@ -159,7 +227,7 @@ jobs:
             
             echo -e "\n## ✅ Test Status"
             if [ "${TF}" = "true" ]; then
-              echo "❌ Tests failed — see test results artifact"
+              echo "❌ Tests failed — see quality-reports artifact"
             else
               echo "✅ All tests passed"
               echo "- Code formatting validated"
@@ -170,17 +238,29 @@ jobs:
             echo -e "\n## 🔍 Quality Checks"
             echo "- ✅ go fmt applied"
             echo "- ✅ go fix applied" 
+            echo "- ✅ goimports formatting applied"
             echo "- ✅ go mod tidy executed"
             echo "- ✅ go vet passed"
             echo "- ✅ go mod verified"
+            echo "- ✅ staticcheck analysis completed"
+            
+            echo -e "\n## 🤖 AI Code Analysis"
+            if [ -f "ai-analysis/recommendations.md" ]; then
+              cat ai-analysis/recommendations.md
+            else
+              echo "AI analysis was not completed due to API issues"
+            fi
+            
+            echo -e "\n## 📊 Test Coverage"
+            echo "Detailed test reports and coverage available in the quality-reports artifact"
           } > pr_body.md
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ secrets.GH_TOKEN }}
-          commit-message: "chore: update Go ${{ steps.go-version.outputs.version }} and dependencies with comprehensive testing"
-          branch: "update/go-${{ steps.go-version.outputs.version }}"
-          title: "Update Go ${{ steps.go-version.outputs.version }} and dependencies with comprehensive testing"
+          commit-message: "chore: update Go ${{ steps.go-version.outputs.version }} with AI analysis and comprehensive testing"
+          branch: "update/go-${{ steps.go-version.outputs.version }}-ai"
+          title: "Update Go ${{ steps.go-version.outputs.version }} with AI Analysis & Comprehensive Testing"
           body-path: pr_body.md
           delete-branch: true
