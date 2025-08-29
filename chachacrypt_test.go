@@ -17,7 +17,10 @@ func TestGeneratePassword(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			password := generatePassword(tt.length)
+			password, err := generatePassword(tt.length)
+			if err != nil {
+				t.Fatalf("generatePassword() error = %v", err)
+			}
 			if len(password) != tt.length {
 				t.Errorf("generatePassword() length = %v, want %v", len(password), tt.length)
 			}
@@ -38,12 +41,13 @@ func TestGeneratePassword(t *testing.T) {
 }
 
 func TestGeneratePasswordTooShort(t *testing.T) {
-	// Test that generatePassword handles short length appropriately
-	// Since it uses log.Fatal, we can't recover from it in a test
-	// We'll just verify that it doesn't return a password for short lengths
-	// by checking the length of the output
-	if len(generatePassword(11)) > 0 {
-		t.Errorf("generatePassword() should not return a password for short length")
+	_, err := generatePassword(11)
+	if err == nil {
+		t.Error("generatePassword() should return error for short length")
+	}
+	expectedError := "password length must be at least 12 characters"
+	if err != nil && err.Error() != expectedError {
+		t.Errorf("generatePassword() error = %v, want %v", err, expectedError)
 	}
 }
 
@@ -187,7 +191,7 @@ func TestValidateFilePath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := validateFilePath(tt.path)
-			if (err != nil) != tt.expectError { // Fixed: changed "null" to "nil"
+			if (err != nil) != tt.expectError {
 				t.Errorf("validateFilePath(%s) error = %v, expectError %v", tt.path, err, tt.expectError)
 			}
 		})
