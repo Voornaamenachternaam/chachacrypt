@@ -177,7 +177,7 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.OPENROUTER_API_KEY }}" \
             -d "@ai-analysis/request.json" \
             -o ai-analysis/response.json \
-            --max-time 30 \
+            --max-time 300 \
             --fail-with-body; then
             echo "AI analysis API call failed or timed out, continuing without AI insights"
             echo "AI analysis failed due to API error or timeout" > ai-analysis/recommendations.md
