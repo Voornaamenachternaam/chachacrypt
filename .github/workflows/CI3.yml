@@ -118,7 +118,7 @@ jobs:
       - name: Commit & open Pull Request
         uses: peter-evans/create-pull-request@v7.0.8
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_TOKEN }}
           branch: ci/auto-update/go-${{ env.LATEST }}
           commit-message: "chore(ci): bump Go to ${{ env.LATEST }}, refresh deps & apply AI fixes"
           title: "CI: Update to Go ${{ env.LATEST }} + auto‐fix deps & code"
