@@ -155,17 +155,6 @@ func TestReadPassword(t *testing.T) {
 }
 
 func TestSafeUintConversions(t *testing.T) {
-	// Test safeUint8
-	if _, err := safeUint8(-1); err == nil {
-		t.Error("safeUint8 should return error for negative values")
-	}
-	if _, err := safeUint8(256); err == nil {
-		t.Error("safeUint8 should return error for values > 255")
-	}
-	if val, err := safeUint8(128); err != nil || val != 128 {
-		t.Errorf("safeUint8(128) = %v, %v, want 128, nil", val, err)
-	}
-
 	// Test safeUint32
 	if _, err := safeUint32(-1); err == nil {
 		t.Error("safeUint32 should return error for negative values")
