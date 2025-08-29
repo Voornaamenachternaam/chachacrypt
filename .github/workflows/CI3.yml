@@ -7,11 +7,11 @@ permissions:
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 6 * * *'   # Daily at 06:00 UTC
+    - cron: '0 6 * * *'   # daily at 06:00 UTC
 
 jobs:
   update-and-test:
-    name: Update Go & Deps, Run Tests, Auto-Fix
+    name: Update Go & Deps, Run Tests & Auto‐Fix
     runs-on: ubuntu-latest
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -27,9 +27,9 @@ jobs:
         run: |
           echo "Fetching latest Go release…"
           JSON=$(curl -fsSL https://go.dev/dl/?mode=json)
-          LATEST=$(echo "$JSON" \
-            | jq -r 'map(select(.stable==true)) | first | .version' \
-            | sed 's/^go//')
+          LATEST=$(echo "$JSON" |
+            jq -r 'map(select(.stable==true)) | first | .version' |
+            sed 's/^go//')
           echo "LATEST=$LATEST" >> $GITHUB_ENV
           echo "→ Go $LATEST"
 
@@ -39,8 +39,7 @@ jobs:
           go-version: ${{ env.LATEST }}
 
       - name: Bump go.mod to Go ${{ env.LATEST }}
-        run: |
-          sed -i "s/^go .*/go ${{ env.LATEST }}/" go.mod
+        run: sed -i "s|^go .*|go ${{ env.LATEST }}|" go.mod
 
       - name: Tidy & upgrade dependencies
         run: |
@@ -48,91 +47,92 @@ jobs:
           go get -u ./...
           go mod tidy
 
-      - name: Format & Vet
+      - name: Format, Vet & Verify
         run: |
           go fmt ./...
           go vet ./...
-
-      - name: Verify module checksums
-        run: |
           go mod verify
 
       - name: Run unit tests
+        id: tests
         run: |
-          go test ./... -timeout 5m | tee test-output.txt
+          set +e
+          go test ./... -timeout 5m 2>&1 | tee test-output.txt
+          echo "TEST_FAILED=$?" >> $GITHUB_ENV
+          set -e
 
       - name: Security scan with gosec
+        id: secscan
         run: |
+          set +e
           go install github.com/securego/gosec/v2/cmd/gosec@latest
-          gosec ./... | tee gosec-output.txt
-        continue-on-error: true
+          gosec ./... 2>&1 | tee gosec-output.txt
+          echo "GOLINT_FAILED=$?" >> $GITHUB_ENV
+          set -e
 
       - name: Aggregate context for AI
         run: |
           {
             echo "Go version: ${{ env.LATEST }}"
-            echo "=== go.mod ===";   cat go.mod
-            echo "=== go.sum ===";   cat go.sum 2>/dev/null || echo "<no go.sum>"
-            echo "=== Test output ===";    cat test-output.txt
-            echo "=== Gosec output ===";   cat gosec-output.txt
+            echo "=== go.mod ==="; cat go.mod
+            echo "=== go.sum ==="; cat go.sum 2>/dev/null || echo "<no go.sum>"
+            echo "=== Tests (exit ${{ env.TEST_FAILED }}) ==="; cat test-output.txt
+            echo "=== Gosec (exit ${{ env.GOLINT_FAILED }}) ==="; cat gosec-output.txt
           } > ai-context.txt
 
       - name: AI analysis & automatic fixes
         if: env.OPENROUTER_API_KEY != ''
         run: |
-          echo "Building AI request payload"
+          SYSTEM_MSG='You are a senior Go developer & security expert. Analyze for compilation errors, test failures, security issues, and dependency incompatibilities with Go $LATEST. Return one unified patch (diff) that updates or replaces incompatible dependencies, corrects code errors, and ensures "go test" and "gosec" exit zero.'
           jq -n \
             --arg model "deepseek/deepseek-r1:free" \
-            --arg sys "You are a senior Go developer & security expert. Identify any compilation errors, test failures, or dependency issues with Go ${{ env.LATEST }}. Produce one unified patch (diff) that fixes imports, replaces or adjusts incompatible dependencies, corrects code, and passes all tests and security scans." \
+            --arg system "$SYSTEM_MSG" \
             --arg user "$(jq -Rs . < ai-context.txt)" \
-            --argjson temp 0.1 \
-            '{model:$model, messages:[{role:"system",content:$sys},{role:"user",content:$user}],temperature:$temp}' \
+            '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$user}],temperature:0.1}' \
             > ai-request.json
 
-          echo "Calling DeepSeek API"
           curl -s -X POST "https://openrouter.ai/api/v1/chat/completions" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $OPENROUTER_API_KEY" \
             -d @ai-request.json \
             > ai-response.json
 
-          echo "Extracting diff from AI response"
           jq -r '.choices[0].message.content' ai-response.json \
-            | sed -n -e '/^```diff/,/^```/!d' -e '1d' -e '$d' \
+            | sed -n '/^```diff$/,/^```$/p' | sed '1d;$d' \
             > fixes.diff || true
 
           if [ ! -s fixes.diff ]; then
-            echo "::notice ::No diff found; skipping patch."
+            echo "::notice ::No diff returned; skipping patch."
             exit 0
           fi
 
-          echo "Validating AI patch"
           if git apply --check fixes.diff; then
-            echo "Applying patch"
             git apply --whitespace=fix fixes.diff
           else
-            echo "::warning ::Patch failed validation; fixes.diff retained."
+            echo "::warning ::Patch failed validation; fixes.diff retained for review."
           fi
 
-      - name: Create Pull Request
+      - name: Stage only code changes
+        run: git add -u
+
+      - name: Commit & open Pull Request
         uses: peter-evans/create-pull-request@v7.0.8
         with:
-          token: ${{ secrets.GH_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           branch: ci/auto-update/go-${{ env.LATEST }}
-          commit-message: |
-            chore(ci): bump Go to ${{ env.LATEST }}, refresh deps & apply AI fixes
-          title: "CI: update to Go ${{ env.LATEST }} + auto-fix deps & code"
+          commit-message: "chore(ci): bump Go to ${{ env.LATEST }}, refresh deps & apply AI fixes"
+          title: "CI: Update to Go ${{ env.LATEST }} + auto‐fix deps & code"
           body: |
-            **Automated updates**  
-            - Go bumped to **${{ env.LATEST }}**  
-            - Dependencies upgraded (`go get -u ./…`)  
-            - `go fmt` / `go vet` / `go mod tidy` & `go mod verify` passed  
-            - Unit tests and `gosec` scan passed  
-            - AI-generated patch (if any) applied  
+            **Automated updates:**
+            - Go toolchain bumped to **${{ env.LATEST }}**
+            - Dependencies upgraded via `go get -u ./...`
+            - `go fmt`, `go vet`, `go mod tidy` & `go mod verify` passed
+            - Unit tests exit code: ${{ env.TEST_FAILED }}
+            - Gosec exit code: ${{ env.GOLINT_FAILED }}
+            - AI‐generated patch applied (if available)
           labels: automated
           draft: false
 
-      - name: Skip AI (no API key)
-        if: env.OPENROUTER_API_KEY == ''
-        run: |
-          echo "::warning ::OPENROUTER_API_KEY not set; AI analysis skipped."
+      - name: Clean up intermediates
+        if: always()
+        run: rm -f ai-context.txt ai-request.json ai-response.json fixes.diff test-output.txt gosec-output.txt
