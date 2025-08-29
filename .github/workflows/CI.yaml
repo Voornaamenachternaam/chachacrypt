@@ -1,16 +1,7 @@
-name:+==%8)(8&5)5=5%((=='':%+-=^[<]©[™]¦]¦¶]§]<]<[^
-
-
-
-
-name: CI
+name: CIbackup
 
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 jobs:
   build:
