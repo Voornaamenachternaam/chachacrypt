@@ -1,4 +1,4 @@
-name: CI
+name: "CI 3"
 
 on:
   workflow_dispatch:
@@ -65,11 +65,39 @@ jobs:
           
           go mod tidy
 
-      - name: Run tests
+      - name: Apply automatic fixes & formatting
+        run: |
+          set -euo pipefail
+          go fmt ./...
+          go fix ./...
+
+      - name: Tidy modules & vet
+        run: |
+          set -euo pipefail
+          go mod tidy
+          go vet ./...
+          # Additional static analysis
+          go mod verify
+
+      - name: Run comprehensive tests
         id: test
         run: |
           set -euo pipefail
-          if go test ./... -v 2>&1 | tee test_output.txt; then
+          # Create test output directory
+          mkdir -p test-results
+          
+          # Run tests with coverage, timeout, and JUnit output
+          gotestsum --junitfile test-results/junit.xml --format standard-verbose -- \
+            -timeout=5m \
+            -coverprofile=test-results/coverage.out \
+            -covermode=atomic \
+            ./...
+          
+          # Generate coverage report
+          go tool cover -html=test-results/coverage.out -o test-results/coverage.html
+          
+          # Check if tests passed
+          if [ $? -eq 0 ]; then
             echo "tests_failed=false" >> "$GITHUB_OUTPUT"
           else
             echo "tests_failed=true" >> "$GITHUB_OUTPUT"
@@ -89,11 +117,20 @@ jobs:
           # Generate changelog (suppress config warning)
           git-cliff --unreleased --output changelog.md 2>/dev/null || true
 
+      - name: Upload test results
+        uses: actions/upload-artifact@v4.6.2
+        if: always()
+        with:
+          name: test-results
+          path: |
+            test-results/
+            !test-results/*.tmp
+
       - name: Clean up temporary files
         run: |
           set -euo pipefail
           # Remove temporary files to avoid committing them
-          rm -f direct_deps.txt test_output.txt git-cliff.tar.gz
+          rm -f direct_deps.txt git-cliff.tar.gz
           rm -rf git-cliff-2.10.0/
 
       - name: Prepare PR body
@@ -107,6 +144,7 @@ jobs:
             echo "## 🔧 Updates"
             echo "- Go version → ${GO_VER}"
             echo "- Dependencies upgraded (safe upgrades only)"
+            echo "- Automatic formatting and fixes applied"
             echo ""
             echo "## 📜 Changelog Diff"
             
@@ -118,21 +156,28 @@ jobs:
             
             echo -e "\n## ✅ Test Status"
             if [ "${TF}" = "true" ]; then
-              echo "❌ Tests failed — see test output below"
-              echo '```'
-              echo "Test output not available (cleanup performed)"
-              echo '```'
+              echo "❌ Tests failed — see test results artifact"
             else
               echo "✅ All tests passed"
+              echo "- Code formatting validated"
+              echo "- Static analysis passed"
+              echo "- All tests completed successfully"
             fi
+            
+            echo -e "\n## 🔍 Quality Checks"
+            echo "- ✅ go fmt applied"
+            echo "- ✅ go fix applied" 
+            echo "- ✅ go mod tidy executed"
+            echo "- ✅ go vet passed"
+            echo "- ✅ go mod verified"
           } > pr_body.md
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ secrets.GH_TOKEN }}
-          commit-message: "chore: update Go ${{ steps.go-version.outputs.version }} and dependencies"
+          commit-message: "chore: update Go ${{ steps.go-version.outputs.version }} and dependencies with comprehensive testing"
           branch: "update/go-${{ steps.go-version.outputs.version }}"
-          title: "Update Go ${{ steps.go-version.outputs.version }} and dependencies"
+          title: "Update Go ${{ steps.go-version.outputs.version }} and dependencies with comprehensive testing"
           body-path: pr_body.md
-          delete-branch: true 
+          delete-branch: true
