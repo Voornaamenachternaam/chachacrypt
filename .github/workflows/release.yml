@@ -29,7 +29,7 @@ jobs:
       - name: Build and release binaries
         uses: wangyoucao577/go-release-action@v1.53
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ secrets.GH_TOKEN }}
           goos: ${{ matrix.goos }}
           goarch: ${{ matrix.goarch }}
           # Only include goamd64 when defined (i.e. amd64)
