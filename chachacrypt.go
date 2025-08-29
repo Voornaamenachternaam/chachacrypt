@@ -10,6 +10,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -40,12 +41,17 @@ var config Config
 
 // Initialize default cryptographic settings.
 func init() {
+	threads := runtime.NumCPU()
+	if threads > 255 {
+		threads = 255
+	}
+	
 	config = Config{
 		SaltSize:   defaultSaltSize,
 		KeySize:    defaultKeySize,
 		KeyTime:    defaultKeyTime,
 		KeyMemory:  defaultKeyMemory,
-		KeyThreads: uint8(runtime.NumCPU()),
+		KeyThreads: uint8(threads),
 		ChunkSize:  defaultChunkSize,
 	}
 }
@@ -135,6 +141,23 @@ func generatePassword(length int) string {
 	return password.String()
 }
 
+func validateFilePath(path string) error {
+	// Clean the path to remove any relative components
+	cleanedPath := filepath.Clean(path)
+	
+	// Check if the path attempts to traverse directories
+	if filepath.IsAbs(cleanedPath) {
+		return errors.New("absolute paths are not allowed")
+	}
+	
+	// Check for directory traversal patterns
+	if strings.Contains(cleanedPath, "..") {
+		return errors.New("directory traversal is not allowed")
+	}
+	
+	return nil
+}
+
 func validateFileInput(inputFile, outputFile string) error {
 	if inputFile == "" || !fileExists(inputFile) {
 		return errors.New("provide a valid input file")
@@ -142,16 +165,36 @@ func validateFileInput(inputFile, outputFile string) error {
 	if outputFile == "" {
 		return errors.New("output file must be provided")
 	}
+	
+	if err := validateFilePath(inputFile); err != nil {
+		return fmt.Errorf("invalid input file path: %w", err)
+	}
+	if err := validateFilePath(outputFile); err != nil {
+		return fmt.Errorf("invalid output file path: %w", err)
+	}
+	
 	return nil
 }
 
 func encryptFile(inputFile, outputFile, password string) error {
+	if err := validateFilePath(inputFile); err != nil {
+		return fmt.Errorf("invalid input file path: %w", err)
+	}
+	if err := validateFilePath(outputFile); err != nil {
+		return fmt.Errorf("invalid output file path: %w", err)
+	}
+
 	salt := make([]byte, config.SaltSize)
 	if _, err := rand.Read(salt); err != nil {
 		return fmt.Errorf("error generating salt: %w", err)
 	}
 
-	key := argon2.IDKey([]byte(password), salt, config.KeyTime, config.KeyMemory, config.KeyThreads, uint32(config.KeySize))
+	keySize, err := safeUint32(config.KeySize)
+	if err != nil {
+		return fmt.Errorf("invalid key size: %w", err)
+	}
+
+	key := argon2.IDKey([]byte(password), salt, config.KeyTime, config.KeyMemory, config.KeyThreads, keySize)
 
 	in, err := os.Open(inputFile)
 	if err != nil {
@@ -195,7 +238,11 @@ func encryptFile(inputFile, outputFile, password string) error {
 			}
 
 			// Write encrypted data length
-			encryptedLen := uint32(len(encrypted))
+			encryptedLen, err := safeUint32(len(encrypted))
+			if err != nil {
+				return fmt.Errorf("encrypted data too large: %w", err)
+			}
+			
 			if err := binary.Write(out, binary.LittleEndian, encryptedLen); err != nil {
 				return fmt.Errorf("error writing encrypted length: %w", err)
 			}
@@ -217,6 +264,13 @@ func encryptFile(inputFile, outputFile, password string) error {
 }
 
 func decryptFile(inputFile, outputFile, password string) error {
+	if err := validateFilePath(inputFile); err != nil {
+		return fmt.Errorf("invalid input file path: %w", err)
+	}
+	if err := validateFilePath(outputFile); err != nil {
+		return fmt.Errorf("invalid output file path: %w", err)
+	}
+
 	in, err := os.Open(inputFile)
 	if err != nil {
 		return fmt.Errorf("error opening input file: %w", err)
@@ -235,7 +289,12 @@ func decryptFile(inputFile, outputFile, password string) error {
 		return fmt.Errorf("error reading salt: %w", err)
 	}
 
-	key := argon2.IDKey([]byte(password), salt, config.KeyTime, config.KeyMemory, config.KeyThreads, uint32(config.KeySize))
+	keySize, err := safeUint32(config.KeySize)
+	if err != nil {
+		return fmt.Errorf("invalid key size: %w", err)
+	}
+
+	key := argon2.IDKey([]byte(password), salt, config.KeyTime, config.KeyMemory, config.KeyThreads, keySize)
 	aead, err := chacha20poly1305.NewX(key)
 	if err != nil {
 		return fmt.Errorf("error creating AEAD: %w", err)
@@ -281,6 +340,20 @@ func decryptFile(inputFile, outputFile, password string) error {
 	}
 
 	return nil
+}
+
+func safeUint8(n int) (uint8, error) {
+	if n < 0 || n > 255 {
+		return 0, fmt.Errorf("value %d out of uint8 range", n)
+	}
+	return uint8(n), nil
+}
+
+func safeUint32(n int) (uint32, error) {
+	if n < 0 {
+		return 0, fmt.Errorf("value %d out of uint32 range", n)
+	}
+	return uint32(n), nil
 }
 
 func readPassword() string {
