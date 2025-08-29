@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
-	"io"
 	"os"
 	"strings"
 	"testing"
@@ -189,7 +187,7 @@ func TestValidateFilePath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := validateFilePath(tt.path)
-			if (err != nil) != tt.expectError {
+			if (err != null) != tt.expectError {
 				t.Errorf("validateFilePath(%s) error = %v, expectError %v", tt.path, err, tt.expectError)
 			}
 		})
