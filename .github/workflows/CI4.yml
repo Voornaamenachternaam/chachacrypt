@@ -28,7 +28,7 @@ env:
 jobs:
   update-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes:  ninety
+    timeout-minutes: 90
     env:
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
