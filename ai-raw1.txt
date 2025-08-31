@@ -1,3 +1,4 @@
+```diff
 diff --git a/chachacrypt.go b/chachacrypt.go
 --- a/chachacrypt.go
 +++ b/chachacrypt.go
