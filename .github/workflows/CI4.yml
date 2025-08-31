@@ -1,0 +1,176 @@
+name: CI3
+
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * *'
+
+jobs:
+  update-and-test:
+    runs-on: ubuntu-latest
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Fetch latest Go version
+        id: go-version
+        run: |
+          JSON=$(curl -fsSL https://go.dev/dl/?mode=json)
+          LATEST=$(echo "$JSON" | jq -r 'map(select(.stable==true))[0].version' | sed 's/^go//')
+          echo "LATEST=$LATEST" >> $GITHUB_ENV
+
+      - name: Set up Go ${{ env.LATEST }}
+        uses: actions/setup-go@v5.5.0
+        with:
+          go-version: ${{ env.LATEST }}
+
+      - name: Update go.mod version
+        run: sed -i "s/^go .*/go ${{ env.LATEST }}/" go.mod
+
+      - name: Upgrade dependencies
+        run: |
+          go mod tidy
+          go get -u ./...
+          go mod tidy
+
+      - name: Format code
+        run: go fmt ./...
+
+      - name: Run go vet
+        id: vet
+        run: |
+          set +e
+          go vet ./... 2>&1 | tee vet-output.txt
+          echo "VET_FAILED=$?" >> $GITHUB_ENV
+          set -e
+
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Run tests
+        id: tests
+        run: |
+          set +e
+          go test ./... -timeout 5m 2>&1 | tee test-output.txt
+          echo "TEST_FAILED=$?" >> $GITHUB_ENV
+          set -e
+
+      - name: Run gosec
+        id: sec
+        run: |
+          set +e
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec ./... 2>&1 | tee gosec-output.txt
+          echo "SEC_FAILED=$?" >> $GITHUB_ENV
+          set -e
+
+      - name: Truncate logs for AI context
+        run: |
+          head -n 500 vet-output.txt    > vet-trunc.txt
+          head -n 500 test-output.txt   > test-trunc.txt
+          head -n 500 gosec-output.txt  > gosec-trunc.txt
+
+      - name: Build AI context #1
+        run: |
+          {
+            echo "Go version: ${{ env.LATEST }}"
+            echo "=== vet ===";   cat vet-trunc.txt
+            echo "=== tests ==="; cat test-trunc.txt
+            echo "=== gosec ==="; cat gosec-trunc.txt
+          } > ai-context1.txt
+
+      - name: AI pass #1 – fix vet/tests/security
+        if: env.OPENROUTER_API_KEY != ''
+        run: |
+          PROMPT='You are a senior Go engineer. Fix unreachable code, vet errors, test failures, and gosec issues. Update or replace any dependencies incompatible with Go $LATEST. Return a git-style diff.'
+          jq -nc \
+            --arg model "deepseek/deepseek-r1:free" \
+            --arg system "$PROMPT" \
+            --arg user "$(jq -Rs . < ai-context1.txt)" \
+            '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$user}],temperature:0.1}' \
+            > ai-req1.json
+
+          curl -s -X POST https://openrouter.ai/api/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+            -d @ai-req1.json \
+            | jq -r '.choices[0].message.content' \
+            | tr -d '\r' \
+            | sed -n '/^diff --git a\//,/^$/p' > fixes1.diff || true
+
+          if [ -s fixes1.diff ] && git apply --check fixes1.diff; then
+            git apply --whitespace=fix fixes1.diff
+          fi
+
+      - name: Build check
+        id: build
+        run: |
+          set +e
+          go build ./... 2>&1 | tee build-output.txt
+          echo "BUILD_FAILED=$?" >> $GITHUB_ENV
+          set -e
+
+      - name: Truncate build log
+        run: head -n 200 build-output.txt > build-trunc.txt
+
+      - name: AI pass #2 – fix build errors
+        if: env.OPENROUTER_API_KEY != '' && env.BUILD_FAILED == '1'
+        run: |
+          PROMPT='Build failed. Fix remaining compilation errors so `go build ./...` succeeds. Return a git-style diff.'
+          jq -nc \
+            --arg model "deepseek/deepseek-r1:free" \
+            --arg system "$PROMPT" \
+            --arg user "$(jq -Rs . < build-trunc.txt)" \
+            '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$user}],temperature:0.1}' \
+            > ai-req2.json
+
+          curl -s -X POST https://openrouter.ai/api/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+            -d @ai-req2.json \
+            | jq -r '.choices[0].message.content' \
+            | tr -d '\r' \
+            | sed -n '/^diff --git a\//,/^$/p' > fixes2.diff || true
+
+          if [ -s fixes2.diff ] && git apply --check fixes2.diff; then
+            git apply --whitespace=fix fixes2.diff
+          fi
+
+      - name: Final build check
+        run: go build ./...
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v7.0.8
+        with:
+          token: ${{ env.GH_TOKEN }}
+          branch: ci/auto-update/go-${{ env.LATEST }}
+          commit-message: "chore(ci): bump Go to ${{ env.LATEST }}, upgrade deps & apply AI fixes"
+          title: "CI: Go ${{ env.LATEST }} + auto-fix vet, tests, build"
+          body: |
+            **Automated results**
+            - Go version: ${{ env.LATEST }}
+            - Vet exit code: ${{ env.VET_FAILED }}
+            - Test exit code: ${{ env.TEST_FAILED }}
+            - Gosec exit code: ${{ env.SEC_FAILED }}
+            - Build exit code: ${{ env.BUILD_FAILED }}
+            - AI-generated patches applied
+          labels: automated
+          draft: false
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f ai-req*.json fixes*.diff ai-context1.txt \
+                vet-output.txt test-output.txt gosec-output.txt \
+                vet-trunc.txt test-trunc.txt gosec-trunc.txt \
+                build-output.txt build-trunc.txt
