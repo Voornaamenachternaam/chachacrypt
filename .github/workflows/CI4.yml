@@ -21,6 +21,12 @@ env:
     Makefile
     .gitattributes
     .github/**
+  NEW_FILE_ALLOWLIST: |
+    Makefile
+    Dockerfile
+    README.md
+    LICENSE
+    .gitattributes
 
 jobs:
   update-and-test:
@@ -30,7 +36,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
@@ -41,7 +47,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Detect default branch
+      - name: Determine default branch
         id: default-branch
         run: |
           DEFAULT=$(curl -s -H "Authorization: token ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/${{ github.repository }}" | jq -r .default_branch)
@@ -50,7 +56,7 @@ jobs:
           fi
           echo "DEFAULT_BRANCH=$DEFAULT" >> $GITHUB_ENV
 
-      - name: Resolve latest stable Go version
+      - name: Resolve sanitized Go version
         id: resolve-go
         run: |
           JSON=$(curl -fsSL "https://go.dev/dl/?mode=json")
@@ -64,12 +70,14 @@ jobs:
           fi
           echo "SANITIZED_GO=${VER}" >> $GITHUB_ENV
 
-      - name: Setup working branch from default
+      - name: Create working branch from default
         run: |
-          SHORT=$(git rev-parse --short=8 HEAD || echo "initial")
-          WORK_BRANCH="ci/work/go-${SANITIZED_GO}-${SHORT}-${{ github.run_id }}"
-          git fetch origin "${DEFAULT_BRANCH}"
-          git checkout -b "${WORK_BRANCH}" "origin/${DEFAULT_BRANCH}"
+          set -euo pipefail
+          DEFAULT=${{ env.DEFAULT_BRANCH }}
+          git fetch origin "${DEFAULT}"
+          SHORT=$(git rev-parse --short=8 HEAD || echo "init")
+          WORK_BRANCH="ci/work/go-${{ env.SANITIZED_GO }}-${SHORT}-${{ github.run_id }}"
+          git checkout -b "${WORK_BRANCH}" "origin/${DEFAULT}"
           echo "WORK_BRANCH=${WORK_BRANCH}" >> $GITHUB_ENV
 
       - name: Setup Go
@@ -77,11 +85,6 @@ jobs:
         with:
           go-version: ${{ env.SANITIZED_GO }}
           check-latest: true
-
-      - name: Print environment
-        run: |
-          go version
-          go env
 
       - name: Update go.mod directive safely
         id: update-gomod
@@ -118,7 +121,7 @@ jobs:
           gofmt -w .
           git add -A
 
-      - name: Run go vet (capture)
+      - name: Run go vet
         id: vet
         run: |
           set +e
@@ -129,7 +132,7 @@ jobs:
       - name: Verify modules
         run: go mod verify
 
-      - name: Run tests (capture)
+      - name: Run tests
         id: tests
         run: |
           set +e
@@ -137,7 +140,7 @@ jobs:
           echo "TEST_EXIT=$?" >> $GITHUB_ENV
           set -e
 
-      - name: Run gosec (capture)
+      - name: Run gosec
         id: sec
         run: |
           set +e
@@ -146,7 +149,7 @@ jobs:
           echo "GOSEC_EXIT=$?" >> $GITHUB_ENV
           set -e
 
-      - name: Build check (capture)
+      - name: Build check
         id: build
         run: |
           set +e
@@ -154,9 +157,9 @@ jobs:
           echo "BUILD_EXIT=$?" >> $GITHUB_ENV
           set -e
 
-      - name: Truncate logs for AI
+      - name: Truncate logs
         run: |
-          head -n 500 vet-output.txt   > vet-trunc.txt || true
+          head -n 500 vet-output.txt   > vet-trunc.txt  || true
           head -n 500 test-output.txt  > test-trunc.txt || true
           head -n 500 gosec-output.txt > gosec-trunc.txt || true
           head -n 200 build-output.txt > build-trunc.txt || true
@@ -171,7 +174,7 @@ jobs:
             echo "=== build ==="; cat build-trunc.txt || true
           } > ai-context1.txt
 
-      - name: AI propose fixes (optional)
+      - name: AI propose fixes
         if: env.OPENROUTER_API_KEY != ''
         id: ai
         run: |
@@ -189,24 +192,19 @@ jobs:
           echo "$files" > ai-files.txt
           IFS=$'\n'
           for f in $files; do
+            if git ls-files --error-unmatch -- "$f" > /dev/null 2>&1; then
+              continue
+            fi
             ok=false
-            for pat in $(echo "$ALLOWED_PATTERNS"); do
-              case "$f" in
-                $pat) ok=true; break;;
-              esac
+            for pat in $(echo "${NEW_FILE_ALLOWLIST}"); do
+              if [ "$f" = "$pat" ] || [[ "$f" == ${pat%/}/* ]]; then
+                ok=true
+                break
+              fi
             done
             if [ "$ok" = "false" ]; then
-              echo "DISALLOWED_PATH=$f" >> $GITHUB_ENV
+              echo "REJECTED_NEW_FILE=$f" >> $GITHUB_ENV
               exit 1
-            fi
-            base=$(basename "$f")
-            if [[ "$base" != *.* ]]; then
-              case "$base" in
-                Dockerfile|Makefile|README|LICENSE|.gitattributes) ;;
-                *)
-                  echo "DISALLOWED_EXTENSIONLESS=$f" >> $GITHUB_ENV
-                  exit 1
-              esac
             fi
           done
           unset IFS
@@ -226,13 +224,39 @@ jobs:
           name: ai-suggested-fix
           path: fixes-unapplied.diff
 
+      - name: Safety check staged additions
+        run: |
+          set -euo pipefail
+          ADDED=$(git diff --cached --name-only --diff-filter=A || true)
+          if [ -z "$ADDED" ]; then
+            exit 0
+          fi
+          IFS=$'\n'
+          for f in $ADDED; do
+            ok=false
+            for pat in $(echo "${NEW_FILE_ALLOWLIST}"); do
+              if [ "$f" = "$pat" ] || [[ "$f" == ${pat%/}/* ]]; then
+                ok=true
+                break
+              fi
+            done
+            if [ "$ok" = "false" ]; then
+              echo "Unallowed new file staged: $f"
+              git restore --staged "$f" || true
+              git checkout -- "$f" || true
+              echo "Rejected addition: $f"
+              exit 1
+            fi
+          done
+          unset IFS
+
       - name: Final build & tests
         run: |
           set -euo pipefail
           go build ./...
           go test ./... -v
 
-      - name: Commit & push changes if any
+      - name: Commit & push changes
         id: commit
         run: |
           set -euo pipefail
@@ -248,7 +272,7 @@ jobs:
           echo "PUSHED_BRANCH=${PUSH_BRANCH}" >> $GITHUB_ENV
           echo "CHANGES_PRESENT=true" >> $GITHUB_ENV
 
-      - name: Create Pull Request for changes
+      - name: Create PR for changes
         if: env.CHANGES_PRESENT == 'true'
         uses: peter-evans/create-pull-request@v7.0.8
         with:
