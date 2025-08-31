@@ -1,4 +1,4 @@
-name: CI 4
+name: CI Auto-update (final)
 
 permissions:
   contents: write
@@ -10,17 +10,6 @@ on:
     - cron: '0 2 * * *'
 
 env:
-  ALLOWED_PATTERNS: |
-    *.go
-    go.mod
-    go.sum
-    *.yml
-    *.yaml
-    *.md
-    Dockerfile
-    Makefile
-    .gitattributes
-    .github/**
   NEW_FILE_ALLOWLIST: |
     Makefile
     Dockerfile
@@ -47,9 +36,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Determine default branch
+      - name: Detect default branch
         id: default-branch
         run: |
+          set -euo pipefail
           DEFAULT=$(curl -s -H "Authorization: token ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/${{ github.repository }}" | jq -r .default_branch)
           if [ -z "$DEFAULT" ] || [ "$DEFAULT" = "null" ]; then
             DEFAULT="main"
@@ -59,6 +49,7 @@ jobs:
       - name: Resolve sanitized Go version
         id: resolve-go
         run: |
+          set -euo pipefail
           JSON=$(curl -fsSL "https://go.dev/dl/?mode=json")
           RAW=$(echo "$JSON" | jq -r 'map(select(.stable==true))[0].version' 2>/dev/null || true)
           if [ -z "$RAW" ] || [ "$RAW" = "null" ]; then
@@ -75,9 +66,9 @@ jobs:
           set -euo pipefail
           DEFAULT=${{ env.DEFAULT_BRANCH }}
           git fetch origin "${DEFAULT}"
-          SHORT=$(git rev-parse --short=8 HEAD || echo "init")
+          SHORT=$(git rev-parse --short=8 origin/"${DEFAULT}" 2>/dev/null || echo "init")
           WORK_BRANCH="ci/work/go-${{ env.SANITIZED_GO }}-${SHORT}-${{ github.run_id }}"
-          git checkout -b "${WORK_BRANCH}" "origin/${DEFAULT}"
+          git checkout -b "${WORK_BRANCH}" origin/"${DEFAULT}"
           echo "WORK_BRANCH=${WORK_BRANCH}" >> $GITHUB_ENV
 
       - name: Setup Go
@@ -87,24 +78,18 @@ jobs:
           check-latest: true
 
       - name: Update go.mod directive safely
-        id: update-gomod
         run: |
           set -euo pipefail
           NEW="${SANITIZED_GO}"
           if [ ! -f go.mod ]; then
             printf "module chachacrypt\n\ngo %s\n" "$NEW" > go.mod
             git add go.mod
-            echo "go.mod.updated=true" >> $GITHUB_ENV
             exit 0
           fi
           awk -v v="$NEW" 'BEGIN { replaced=0 } /^go[[:space:]]+[0-9]+\.[0-9]+(\.[0-9]+)?[[:space:]]*$/ { if (!replaced) { print "go " v ; replaced=1; next } } { print } END { if (!replaced) printf("go %s\n", v) }' go.mod > go.mod.tmp
           mv go.mod.tmp go.mod
-          if ! go mod tidy; then
-            git --no-pager diff -- go.mod || true
-            exit 1
-          fi
+          go mod tidy
           git add go.mod go.sum || true
-          echo "go.mod.updated=true" >> $GITHUB_ENV
 
       - name: Upgrade dependencies (best-effort) and tidy
         run: |
@@ -121,7 +106,7 @@ jobs:
           gofmt -w .
           git add -A
 
-      - name: Run go vet
+      - name: Run go vet (capture)
         id: vet
         run: |
           set +e
@@ -132,7 +117,7 @@ jobs:
       - name: Verify modules
         run: go mod verify
 
-      - name: Run tests
+      - name: Run tests (capture)
         id: tests
         run: |
           set +e
@@ -140,7 +125,7 @@ jobs:
           echo "TEST_EXIT=$?" >> $GITHUB_ENV
           set -e
 
-      - name: Run gosec
+      - name: Run gosec (capture)
         id: sec
         run: |
           set +e
@@ -149,7 +134,7 @@ jobs:
           echo "GOSEC_EXIT=$?" >> $GITHUB_ENV
           set -e
 
-      - name: Build check
+      - name: Build check (capture)
         id: build
         run: |
           set +e
@@ -157,7 +142,7 @@ jobs:
           echo "BUILD_EXIT=$?" >> $GITHUB_ENV
           set -e
 
-      - name: Truncate logs
+      - name: Truncate logs for AI
         run: |
           head -n 500 vet-output.txt   > vet-trunc.txt  || true
           head -n 500 test-output.txt  > test-trunc.txt || true
@@ -174,7 +159,7 @@ jobs:
             echo "=== build ==="; cat build-trunc.txt || true
           } > ai-context1.txt
 
-      - name: AI propose fixes
+      - name: AI propose fixes (optional)
         if: env.OPENROUTER_API_KEY != ''
         id: ai
         run: |
@@ -190,24 +175,30 @@ jobs:
           echo "AI_DIFF_PRODUCED=true" >> $GITHUB_ENV
           files=$(sed -n 's/^+++ b\///p' fixes.diff | sed 's/\t.*$//' | sed '/^$/d' | uniq)
           echo "$files" > ai-files.txt
-          IFS=$'\n'
+          DISALLOWED_NEW=0
           for f in $files; do
             if git ls-files --error-unmatch -- "$f" > /dev/null 2>&1; then
               continue
             fi
-            ok=false
-            for pat in $(echo "${NEW_FILE_ALLOWLIST}"); do
-              if [ "$f" = "$pat" ] || [[ "$f" == ${pat%/}/* ]]; then
-                ok=true
+            MATCHED=0
+            printf '%s\n' "${NEW_FILE_ALLOWLIST}" | while IFS= read -r allowed; do
+              [ -z "$allowed" ] && continue
+              if [ "$f" = "$allowed" ]; then
+                MATCHED=1
                 break
               fi
             done
-            if [ "$ok" = "false" ]; then
-              echo "REJECTED_NEW_FILE=$f" >> $GITHUB_ENV
-              exit 1
+            if [ "$MATCHED" -eq 0 ]; then
+              DISALLOWED_NEW=1
+              echo "DISALLOWED_NEW_FILE=$f" >> $GITHUB_ENV
             fi
           done
-          unset IFS
+          if [ "$DISALLOWED_NEW" -eq 1 ]; then
+            cp fixes.diff fixes-unapplied.diff || true
+            echo "AI_DIFF_APPLIED=false" >> $GITHUB_ENV
+            echo "AI_DIFF_REJECT_REASON=new-file-not-allowed" >> $GITHUB_ENV
+            exit 0
+          fi
           if git apply --check fixes.diff; then
             git apply --whitespace=fix fixes.diff
             git add -A
@@ -215,6 +206,7 @@ jobs:
           else
             cp fixes.diff fixes-unapplied.diff || true
             echo "AI_DIFF_APPLIED=false" >> $GITHUB_ENV
+            echo "AI_DIFF_REJECT_REASON=patch-apply-failed" >> $GITHUB_ENV
           fi
 
       - name: Upload AI diff artifact if unapplied
@@ -231,24 +223,20 @@ jobs:
           if [ -z "$ADDED" ]; then
             exit 0
           fi
-          IFS=$'\n'
           for f in $ADDED; do
-            ok=false
-            for pat in $(echo "${NEW_FILE_ALLOWLIST}"); do
-              if [ "$f" = "$pat" ] || [[ "$f" == ${pat%/}/* ]]; then
-                ok=true
+            MATCHED=0
+            printf '%s\n' "${NEW_FILE_ALLOWLIST}" | while IFS= read -r allowed; do
+              [ -z "$allowed" ] && continue
+              if [ "$f" = "$allowed" ]; then
+                MATCHED=1
                 break
               fi
             done
-            if [ "$ok" = "false" ]; then
-              echo "Unallowed new file staged: $f"
+            if [ "$MATCHED" -eq 0 ]; then
               git restore --staged "$f" || true
               git checkout -- "$f" || true
-              echo "Rejected addition: $f"
-              exit 1
             fi
           done
-          unset IFS
 
       - name: Final build & tests
         run: |
@@ -256,7 +244,7 @@ jobs:
           go build ./...
           go test ./... -v
 
-      - name: Commit & push changes
+      - name: Commit & push changes if any
         id: commit
         run: |
           set -euo pipefail
@@ -264,11 +252,10 @@ jobs:
             echo "CHANGES_PRESENT=false" >> $GITHUB_ENV
             exit 0
           fi
-          SHORT=$(git rev-parse --short=8 HEAD || echo "initial")
+          SHORT=$(git rev-parse --short=8 origin/"${DEFAULT_BRANCH}" 2>/dev/null || echo "initial")
           PUSH_BRANCH="ci/auto-update/go-${SANITIZED_GO}-${SHORT}-${{ github.run_id }}"
-          git checkout -b "${PUSH_BRANCH}"
           git commit -m "chore(ci): bump Go ${SANITIZED_GO}, upgrade deps & apply automated fixes" || true
-          git push --set-upstream origin "${PUSH_BRANCH}"
+          git push --set-upstream origin HEAD:"${PUSH_BRANCH}"
           echo "PUSHED_BRANCH=${PUSH_BRANCH}" >> $GITHUB_ENV
           echo "CHANGES_PRESENT=true" >> $GITHUB_ENV
 
@@ -302,7 +289,7 @@ jobs:
           commit-message: "chore(ci): AI suggested fixes (unapplied) for manual review"
           title: "CI: AI suggested fixes (unapplied) — review required"
           body: |
-            The AI produced suggested fixes but they could not be auto-applied. The diff file is available as a workflow artifact named "ai-suggested-fix".
+            The AI produced suggested fixes but they could not be auto-applied or contained disallowed new-files. The diff file is available as a workflow artifact named "ai-suggested-fix".
           labels: automated, ai-suggestion
           draft: true
 
