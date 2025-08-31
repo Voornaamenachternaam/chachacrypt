@@ -13,13 +13,13 @@ require golang.org/x/sys v0.35.0 // indirect
 === Tests (0) ===
 ?   	chachacrypt	[no test files]
 === Gosec (0) ===
-[gosec] 2025/08/29 15:30:28 Including rules: default
-[gosec] 2025/08/29 15:30:28 Excluding rules: default
-[gosec] 2025/08/29 15:30:28 Including analyzers: default
-[gosec] 2025/08/29 15:30:28 Excluding analyzers: default
-[gosec] 2025/08/29 15:30:28 Import directory: /home/runner/work/chachacrypt/chachacrypt
-[gosec] 2025/08/29 15:30:29 Checking package: main
-[gosec] 2025/08/29 15:30:29 Checking file: /home/runner/work/chachacrypt/chachacrypt/chachacrypt.go
+[gosec] 2025/08/31 06:18:19 Including rules: default
+[gosec] 2025/08/31 06:18:19 Excluding rules: default
+[gosec] 2025/08/31 06:18:19 Including analyzers: default
+[gosec] 2025/08/31 06:18:19 Excluding analyzers: default
+[gosec] 2025/08/31 06:18:19 Import directory: /home/runner/work/chachacrypt/chachacrypt
+[gosec] 2025/08/31 06:18:19 Checking package: main
+[gosec] 2025/08/31 06:18:19 Checking file: /home/runner/work/chachacrypt/chachacrypt/chachacrypt.go
 Results:
 
 
