@@ -1,4 +1,4 @@
-name: CI Auto-update (safe)
+name: CI 4
 
 permissions:
   contents: write
@@ -41,7 +41,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Resolve default branch
+      - name: Detect default branch
         id: default-branch
         run: |
           DEFAULT=$(curl -s -H "Authorization: token ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/${{ github.repository }}" | jq -r .default_branch)
@@ -64,6 +64,14 @@ jobs:
           fi
           echo "SANITIZED_GO=${VER}" >> $GITHUB_ENV
 
+      - name: Setup working branch from default
+        run: |
+          SHORT=$(git rev-parse --short=8 HEAD || echo "initial")
+          WORK_BRANCH="ci/work/go-${SANITIZED_GO}-${SHORT}-${{ github.run_id }}"
+          git fetch origin "${DEFAULT_BRANCH}"
+          git checkout -b "${WORK_BRANCH}" "origin/${DEFAULT_BRANCH}"
+          echo "WORK_BRANCH=${WORK_BRANCH}" >> $GITHUB_ENV
+
       - name: Setup Go
         uses: actions/setup-go@v5.5.0
         with:
@@ -75,9 +83,10 @@ jobs:
           go version
           go env
 
-      - name: Update go.mod directive
+      - name: Update go.mod directive safely
         id: update-gomod
         run: |
+          set -euo pipefail
           NEW="${SANITIZED_GO}"
           if [ ! -f go.mod ]; then
             printf "module chachacrypt\n\ngo %s\n" "$NEW" > go.mod
@@ -94,8 +103,9 @@ jobs:
           git add go.mod go.sum || true
           echo "go.mod.updated=true" >> $GITHUB_ENV
 
-      - name: Upgrade dependencies
+      - name: Upgrade dependencies (best-effort) and tidy
         run: |
+          set -euo pipefail
           if ! go get -u ./... 2>&1 | tee go-get-output.txt; then
             true
           fi
@@ -104,10 +114,11 @@ jobs:
 
       - name: Format & stage
         run: |
+          set -euo pipefail
           gofmt -w .
           git add -A
 
-      - name: Run go vet
+      - name: Run go vet (capture)
         id: vet
         run: |
           set +e
@@ -118,7 +129,7 @@ jobs:
       - name: Verify modules
         run: go mod verify
 
-      - name: Run tests
+      - name: Run tests (capture)
         id: tests
         run: |
           set +e
@@ -126,7 +137,7 @@ jobs:
           echo "TEST_EXIT=$?" >> $GITHUB_ENV
           set -e
 
-      - name: Run gosec
+      - name: Run gosec (capture)
         id: sec
         run: |
           set +e
@@ -135,7 +146,7 @@ jobs:
           echo "GOSEC_EXIT=$?" >> $GITHUB_ENV
           set -e
 
-      - name: Build check
+      - name: Build check (capture)
         id: build
         run: |
           set +e
@@ -143,9 +154,9 @@ jobs:
           echo "BUILD_EXIT=$?" >> $GITHUB_ENV
           set -e
 
-      - name: Truncate logs
+      - name: Truncate logs for AI
         run: |
-          head -n 500 vet-output.txt   > vet-trunc.txt  || true
+          head -n 500 vet-output.txt   > vet-trunc.txt || true
           head -n 500 test-output.txt  > test-trunc.txt || true
           head -n 500 gosec-output.txt > gosec-trunc.txt || true
           head -n 200 build-output.txt > build-trunc.txt || true
@@ -160,10 +171,11 @@ jobs:
             echo "=== build ==="; cat build-trunc.txt || true
           } > ai-context1.txt
 
-      - name: AI propose fixes
+      - name: AI propose fixes (optional)
         if: env.OPENROUTER_API_KEY != ''
         id: ai
         run: |
+          set -euo pipefail
           jq -nc --arg model "deepseek/deepseek-r1:free" --arg system "You are a senior Go engineer. Fix vet/test/gosec/build issues shown in the context. Return a git-style unified diff only." --arg user "$(jq -Rs . < ai-context1.txt)" '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$user}],temperature:0.05}' > ai-req.json
           RESP=$(curl -s -X POST https://openrouter.ai/api/v1/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer $OPENROUTER_API_KEY" -d @ai-req.json || true)
           echo "$RESP" | jq -r '.choices[0].message.content // empty' > ai-raw.txt || true
@@ -174,6 +186,7 @@ jobs:
           fi
           echo "AI_DIFF_PRODUCED=true" >> $GITHUB_ENV
           files=$(sed -n 's/^+++ b\///p' fixes.diff | sed 's/\t.*$//' | sed '/^$/d' | uniq)
+          echo "$files" > ai-files.txt
           IFS=$'\n'
           for f in $files; do
             ok=false
@@ -183,6 +196,7 @@ jobs:
               esac
             done
             if [ "$ok" = "false" ]; then
+              echo "DISALLOWED_PATH=$f" >> $GITHUB_ENV
               exit 1
             fi
             base=$(basename "$f")
@@ -190,6 +204,7 @@ jobs:
               case "$base" in
                 Dockerfile|Makefile|README|LICENSE|.gitattributes) ;;
                 *)
+                  echo "DISALLOWED_EXTENSIONLESS=$f" >> $GITHUB_ENV
                   exit 1
               esac
             fi
@@ -204,8 +219,8 @@ jobs:
             echo "AI_DIFF_APPLIED=false" >> $GITHUB_ENV
           fi
 
-      - name: Upload AI diff if unapplied
-        if: env.OPENROUTER_API_KEY != '' && env.AI_DIFF_PRODUCED == 'true' && env.AI_DIFF_APPLIED == 'false'
+      - name: Upload AI diff artifact if unapplied
+        if: env.OPENROUTER_API_KEY != '' && env.AI_DIFF_PRODUCED == 'true' && env.AI_DIFF_APPLIED != 'true'
         uses: actions/upload-artifact@v4.6.2
         with:
           name: ai-suggested-fix
@@ -213,33 +228,27 @@ jobs:
 
       - name: Final build & tests
         run: |
+          set -euo pipefail
           go build ./...
           go test ./... -v
 
-      - name: Determine if changes staged
-        id: detect-changes
-        run: |
-          if git diff --cached --quiet; then
-            echo "CHANGES_PRESENT=false" >> $GITHUB_ENV
-          else
-            echo "CHANGES_PRESENT=true" >> $GITHUB_ENV
-          fi
-
-      - name: Commit & push
-        if: env.CHANGES_PRESENT == 'true'
+      - name: Commit & push changes if any
         id: commit
         run: |
-          DEFAULT=${DEFAULT_BRANCH}
-          SHORT=$(git rev-parse --short=8 HEAD)
-          BRANCH="ci/auto-update/go-${SANITIZED_GO}-${SHORT}-${{ github.run_id }}"
-          git fetch origin "$DEFAULT"
-          git checkout -b "$BRANCH" "origin/$DEFAULT"
+          set -euo pipefail
+          if git diff --cached --quiet; then
+            echo "CHANGES_PRESENT=false" >> $GITHUB_ENV
+            exit 0
+          fi
+          SHORT=$(git rev-parse --short=8 HEAD || echo "initial")
+          PUSH_BRANCH="ci/auto-update/go-${SANITIZED_GO}-${SHORT}-${{ github.run_id }}"
+          git checkout -b "${PUSH_BRANCH}"
           git commit -m "chore(ci): bump Go ${SANITIZED_GO}, upgrade deps & apply automated fixes" || true
-          git push --set-upstream origin "$BRANCH"
-          echo "PUSHED_BRANCH=$BRANCH" >> $GITHUB_ENV
+          git push --set-upstream origin "${PUSH_BRANCH}"
+          echo "PUSHED_BRANCH=${PUSH_BRANCH}" >> $GITHUB_ENV
           echo "CHANGES_PRESENT=true" >> $GITHUB_ENV
 
-      - name: Create Pull Request
+      - name: Create Pull Request for changes
         if: env.CHANGES_PRESENT == 'true'
         uses: peter-evans/create-pull-request@v7.0.8
         with:
@@ -259,8 +268,8 @@ jobs:
           labels: automated
           draft: false
 
-      - name: Create PR with AI suggestion artifact
-        if: env.OPENROUTER_API_KEY != '' && env.AI_DIFF_PRODUCED == 'true' && env.AI_DIFF_APPLIED == 'false'
+      - name: Create PR for AI suggestion if unapplied
+        if: env.OPENROUTER_API_KEY != '' && env.AI_DIFF_PRODUCED == 'true' && env.AI_DIFF_APPLIED != 'true'
         uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ env.GH_TOKEN }}
@@ -269,11 +278,11 @@ jobs:
           commit-message: "chore(ci): AI suggested fixes (unapplied) for manual review"
           title: "CI: AI suggested fixes (unapplied) — review required"
           body: |
-            The AI produced suggested fixes but they could not be auto-applied. The diff file is available as a workflow artifact for review.
+            The AI produced suggested fixes but they could not be auto-applied. The diff file is available as a workflow artifact named "ai-suggested-fix".
           labels: automated, ai-suggestion
           draft: true
 
-      - name: Upload artifacts
+      - name: Upload run artifacts
         if: always()
         uses: actions/upload-artifact@v4.6.2
         with:
