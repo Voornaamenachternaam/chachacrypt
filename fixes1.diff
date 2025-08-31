@@ -1,0 +1,65 @@
+diff --git a/chachacrypt.go b/chachacrypt.go
+--- a/chachacrypt.go
++++ b/chachacrypt.go
+@@ -48,6 +48,9 @@
+ 	if threads <= 0 {
+ 		threads = runtime.NumCPU()
+ 	}
++	if threads < 0 || threads > 255 {
++		return nil, fmt.Errorf("threads value %d is out of range (0-255)", threads)
++	}
+ 	return &params.Params{
+ 		KeyMemory:  defaultKeyMemory,
+ 		KeyThreads: uint8(threads),
+@@ -202,7 +205,8 @@
+ 
+ func encryptFile(inputFile, outputFile string, key []byte, params *params.Params) error {
+ 
+-	inFile, err := os.Open(inputFile)
++	cleanInput := filepath.Clean(inputFile)
++	inFile, err := os.Open(cleanInput)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -208,7 +212,8 @@
+ 	}
+ 	defer inFile.Close()
+ 
+-	outFile, err := os.Create(outputFile)
++	cleanOutput := filepath.Clean(outputFile)
++	outFile, err := os.OpenFile(cleanOutput, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -270,7 +275,8 @@
+ 
+ func decryptFile(inputFile, outputFile string, key []byte) error {
+ 
+-	inFile, err := os.Open(inputFile)
++	cleanInput := filepath.Clean(inputFile)
++	inFile, err := os.Open(cleanInput)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -277,7 +283,8 @@
+ 	defer inFile.Close()
+ 
+ 	// Create output file
+-	outFile, err := os.Create(outputFile)
++	cleanOutput := filepath.Clean(outputFile)
++	outFile, err := os.OpenFile(cleanOutput, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -334,6 +341,9 @@
+ 	if n < 0 {
+ 		return 0, errors.New("bytes read cannot be negative")
+ 	}
++	if n > math.MaxUint32 {
++		return 0, fmt.Errorf("bytes read value %d exceeds uint32 max", n)
++	}
+ 	return uint32(n), nil
+ }
+ 
+```
+
