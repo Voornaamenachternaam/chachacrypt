@@ -1,4 +1,4 @@
-name: CI 4
+name: CI Auto-update (safe)
 
 permissions:
   contents: write
@@ -36,15 +36,23 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Configure Git user
+      - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      - name: Resolve default branch
+        id: default-branch
+        run: |
+          DEFAULT=$(curl -s -H "Authorization: token ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/${{ github.repository }}" | jq -r .default_branch)
+          if [ -z "$DEFAULT" ] || [ "$DEFAULT" = "null" ]; then
+            DEFAULT="main"
+          fi
+          echo "DEFAULT_BRANCH=$DEFAULT" >> $GITHUB_ENV
+
       - name: Resolve latest stable Go version
         id: resolve-go
         run: |
-          set -euo pipefail
           JSON=$(curl -fsSL "https://go.dev/dl/?mode=json")
           RAW=$(echo "$JSON" | jq -r 'map(select(.stable==true))[0].version' 2>/dev/null || true)
           if [ -z "$RAW" ] || [ "$RAW" = "null" ]; then
@@ -55,7 +63,6 @@ jobs:
             VER="1.25.0"
           fi
           echo "SANITIZED_GO=${VER}" >> $GITHUB_ENV
-          echo "SANITIZED_GO=${VER}"
 
       - name: Setup Go
         uses: actions/setup-go@v5.5.0
@@ -63,15 +70,14 @@ jobs:
           go-version: ${{ env.SANITIZED_GO }}
           check-latest: true
 
-      - name: Print Go info
+      - name: Print environment
         run: |
           go version
           go env
 
-      - name: Update go.mod 'go' directive safely
+      - name: Update go.mod directive
         id: update-gomod
         run: |
-          set -euo pipefail
           NEW="${SANITIZED_GO}"
           if [ ! -f go.mod ]; then
             printf "module chachacrypt\n\ngo %s\n" "$NEW" > go.mod
@@ -79,14 +85,7 @@ jobs:
             echo "go.mod.updated=true" >> $GITHUB_ENV
             exit 0
           fi
-          awk -v v="$NEW" '
-            BEGIN { replaced=0 }
-            /^go[[:space:]]+[0-9]+\.[0-9]+(\.[0-9]+)?[[:space:]]*$/ {
-              if (!replaced) { print "go " v ; replaced=1; next }
-            }
-            { print }
-            END { if (!replaced) printf("go %s\n", v) }
-          ' go.mod > go.mod.tmp
+          awk -v v="$NEW" 'BEGIN { replaced=0 } /^go[[:space:]]+[0-9]+\.[0-9]+(\.[0-9]+)?[[:space:]]*$/ { if (!replaced) { print "go " v ; replaced=1; next } } { print } END { if (!replaced) printf("go %s\n", v) }' go.mod > go.mod.tmp
           mv go.mod.tmp go.mod
           if ! go mod tidy; then
             git --no-pager diff -- go.mod || true
@@ -95,18 +94,16 @@ jobs:
           git add go.mod go.sum || true
           echo "go.mod.updated=true" >> $GITHUB_ENV
 
-      - name: Upgrade dependencies and tidy
+      - name: Upgrade dependencies
         run: |
-          set -euo pipefail
           if ! go get -u ./... 2>&1 | tee go-get-output.txt; then
             true
           fi
           go mod tidy
           git add go.mod go.sum || true
 
-      - name: Format and stage
+      - name: Format & stage
         run: |
-          set -euo pipefail
           gofmt -w .
           git add -A
 
@@ -167,12 +164,7 @@ jobs:
         if: env.OPENROUTER_API_KEY != ''
         id: ai
         run: |
-          set -euo pipefail
-          PROMPT='You are a senior Go engineer. Fix vet/test/gosec/build issues shown in the context. Return a git-style unified diff (diff --git a/... b/...) only. Do not create files with no extension; prefer minimal conservative changes.'
-          jq -nc --arg model "deepseek/deepseek-r1:free" \
-            --arg system "$PROMPT" \
-            --arg user "$(jq -Rs . < ai-context1.txt)" \
-            '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$user}],temperature:0.05}' > ai-req.json
+          jq -nc --arg model "deepseek/deepseek-r1:free" --arg system "You are a senior Go engineer. Fix vet/test/gosec/build issues shown in the context. Return a git-style unified diff only." --arg user "$(jq -Rs . < ai-context1.txt)" '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$user}],temperature:0.05}' > ai-req.json
           RESP=$(curl -s -X POST https://openrouter.ai/api/v1/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer $OPENROUTER_API_KEY" -d @ai-req.json || true)
           echo "$RESP" | jq -r '.choices[0].message.content // empty' > ai-raw.txt || true
           sed -n '/^diff --git a\//,$p' ai-raw.txt > fixes.diff || true
@@ -182,7 +174,6 @@ jobs:
           fi
           echo "AI_DIFF_PRODUCED=true" >> $GITHUB_ENV
           files=$(sed -n 's/^+++ b\///p' fixes.diff | sed 's/\t.*$//' | sed '/^$/d' | uniq)
-          echo "$files" > ai-files.txt
           IFS=$'\n'
           for f in $files; do
             ok=false
@@ -192,7 +183,6 @@ jobs:
               esac
             done
             if [ "$ok" = "false" ]; then
-              echo "Disallowed path in AI diff: $f"
               exit 1
             fi
             base=$(basename "$f")
@@ -200,7 +190,6 @@ jobs:
               case "$base" in
                 Dockerfile|Makefile|README|LICENSE|.gitattributes) ;;
                 *)
-                  echo "Disallowed extensionless new file: $f"
                   exit 1
               esac
             fi
@@ -224,32 +213,39 @@ jobs:
 
       - name: Final build & tests
         run: |
-          set -euo pipefail
           go build ./...
           go test ./... -v
 
-      - name: Commit and push changes
-        id: commit
+      - name: Determine if changes staged
+        id: detect-changes
         run: |
-          set -euo pipefail
           if git diff --cached --quiet; then
             echo "CHANGES_PRESENT=false" >> $GITHUB_ENV
-            exit 0
+          else
+            echo "CHANGES_PRESENT=true" >> $GITHUB_ENV
           fi
+
+      - name: Commit & push
+        if: env.CHANGES_PRESENT == 'true'
+        id: commit
+        run: |
+          DEFAULT=${DEFAULT_BRANCH}
           SHORT=$(git rev-parse --short=8 HEAD)
           BRANCH="ci/auto-update/go-${SANITIZED_GO}-${SHORT}-${{ github.run_id }}"
-          git checkout -b "$BRANCH"
+          git fetch origin "$DEFAULT"
+          git checkout -b "$BRANCH" "origin/$DEFAULT"
           git commit -m "chore(ci): bump Go ${SANITIZED_GO}, upgrade deps & apply automated fixes" || true
           git push --set-upstream origin "$BRANCH"
           echo "PUSHED_BRANCH=$BRANCH" >> $GITHUB_ENV
           echo "CHANGES_PRESENT=true" >> $GITHUB_ENV
 
-      - name: Create pull request
+      - name: Create Pull Request
         if: env.CHANGES_PRESENT == 'true'
         uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ env.GH_TOKEN }}
           branch: ${{ env.PUSHED_BRANCH }}
+          base: ${{ env.DEFAULT_BRANCH }}
           commit-message: "chore(ci): bump Go to ${{ env.SANITIZED_GO }}, upgrade deps & apply automated fixes"
           title: "CI: Go ${{ env.SANITIZED_GO }} + automated fixes"
           body: |
@@ -269,6 +265,7 @@ jobs:
         with:
           token: ${{ env.GH_TOKEN }}
           branch: "ci/ai-suggestions/go-${{ env.SANITIZED_GO }}-${{ github.run_id }}"
+          base: ${{ env.DEFAULT_BRANCH }}
           commit-message: "chore(ci): AI suggested fixes (unapplied) for manual review"
           title: "CI: AI suggested fixes (unapplied) — review required"
           body: |
@@ -295,4 +292,4 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          rm -f ai-req.json ai-raw.txt fixes.diff fixes-unapplied.diff ai-context1.txt vet-output.txt test-output.txt gosec-output.txt build-output.txt final-build-output.txt go-get-output.txt || true
+          rm -f ai-req.json ai-raw.txt fixes.diff fixes-unapplied.diff ai-context1.txt vet-output.txt test-output.txt gosec-output.txt build-output.txt go-get-output.txt || true
