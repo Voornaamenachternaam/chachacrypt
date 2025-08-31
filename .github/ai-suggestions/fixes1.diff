@@ -1,0 +1,55 @@
+diff --git a/chachacrypt.go b/chachacrypt.go
+--- a/chachacrypt.go
++++ b/chachacrypt.go
+@@ -9,6 +9,8 @@
+ 	"log"
+ 	"os"
+ 	"path/filepath"
++	"math"
++	"fmt"
+ 	"runtime"
+ 	"strconv"
+ 	"strings"
+@@ -46,6 +48,10 @@
+ 	flag.Parse()
+ 
+ 	if encrypt && decrypt {
+ 		log.Fatal("cannot specify both -encrypt and -decrypt")
+ 	}
++	
++	if threads < 1 || threads > 255 {
++		log.Fatalf("invalid threads value: %d - must be between 1 and 255", threads)
++	}
+ 
+ 	var inputFile, outputFile string
+@@ -202,6 +208,9 @@
+ }
+ 
+ func processEncrypt(inputFile, outputFile string, config *scrypt.Config) error {
++	inputFile = filepath.Clean(inputFile)
++	outputFile = filepath.Clean(outputFile)
++
+ 	inFile, err := os.Open(inputFile)
+ 	if err != nil {
+ 		return err
+@@ -268,6 +277,9 @@
+ }
+ 
+ func processDecrypt(inputFile, outputFile string, config *scrypt.Config) error {
++	inputFile = filepath.Clean(inputFile)
++	outputFile = filepath.Clean(outputFile)
++
+ 	inFile, err := os.Open(inputFile)
+ 	if err != nil {
+ 		return err
+@@ -333,5 +345,9 @@
+ 	if err != nil {
+ 		return 0, err
+ 	}
++	
++	if n > math.MaxUint32 {
++		return 0, fmt.Errorf("bytes read exceeds uint32 maximum: %d", n)
++	}
+ 	return uint32(n), nil
+ }
+```
