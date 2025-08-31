@@ -37,7 +37,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ env.DEFAULT_BRANCH }}
@@ -46,18 +46,22 @@ jobs:
         id: go-version
         run: |
           JSON=$(curl -fsSL https://go.dev/dl/?mode=json)
-          LATEST=$(echo "$JSON" | jq -r 'map(select(.stable==true))[0].version' | sed 's/^go//')
-          echo "SANITIZED_GO=$LATEST" >> $GITHUB_ENV
+          RAW=$(echo "$JSON" | jq -r 'map(select(.stable==true))[0].version')
+          # Strip "go" prefix (e.g. go1.25.0 -> 1.25.0)
+          VERS=${RAW#go}
+          # Normalize: drop trailing ".0" if present (1.25.0 -> 1.25, but keep 1.25.1)
+          SANITIZED=$(echo "$VERS" | sed -E 's/([0-9]+\.[0-9]+)\.0$/\1/')
+          echo "SANITIZED_GO=$SANITIZED" >> $GITHUB_ENV
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v5.5.0
         with:
           go-version: ${{ env.SANITIZED_GO }}
 
       - name: Update go.mod version
         run: |
           if grep -qE '^go [0-9]+\.[0-9]+' go.mod; then
-            sed -i -E "s/^go [0-9]+\.[0-9]+/go ${{ env.SANITIZED_GO }}/" go.mod
+            sed -i -E "s/^go [0-9]+\.[0-9]+(\.[0-9]+)?/go ${{ env.SANITIZED_GO }}/" go.mod
           else
             echo "go ${{ env.SANITIZED_GO }}" >> go.mod
           fi
@@ -198,7 +202,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ env.GH_TOKEN }}
           branch: ci/auto-update/go-${{ env.SANITIZED_GO }}-${{ github.run_id }}
