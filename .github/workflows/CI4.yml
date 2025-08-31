@@ -1,4 +1,4 @@
-name: CI 4
+name: CI Auto-update (safe & robust)
 
 permissions:
   contents: write
@@ -10,8 +10,7 @@ on:
     - cron: '0 2 * * *'
 
 env:
-  # Files that AI or scripts are allowed to modify (glob-like checks are enforced in the script)
-  # You can add to this list if you expect safe files to be created by automation.
+  # Allowed file globs (space-separated). AI diffs proposing changes outside these will be rejected.
   ALLOWED_PATTERNS: |
     *.go
     go.mod
@@ -27,11 +26,12 @@ env:
 jobs:
   update-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     env:
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
     steps:
-      - name: Checkout repository (full history)
+      - name: Checkout (full)
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
@@ -42,93 +42,124 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Resolve latest stable Go version
-        id: go-version
+      - name: Resolve latest stable Go version (sanitized)
+        id: resolve-go
         run: |
-          # Get the latest stable Go version (without the "go" prefix)
+          set -euo pipefail
           JSON=$(curl -fsSL "https://go.dev/dl/?mode=json")
-          LATEST=$(echo "$JSON" | jq -r 'map(select(.stable==true))[0].version' | sed 's/^go//')
-          # Fallback if jq or curl fails (should not happen in hosted runner)
-          if [ -z "$LATEST" ] || [ "$LATEST" = "null" ]; then
-            echo "Could not determine latest Go; defaulting to 1.25.0"
-            LATEST="1.25.0"
+          RAW=$(echo "$JSON" | jq -r 'map(select(.stable==true))[0].version' 2>/dev/null || true)
+          if [ -z "$RAW" ] || [ "$RAW" = "null" ]; then
+            echo "Could not determine latest stable Go; defaulting to 1.25.0"
+            RAW="go1.25.0"
           fi
-          echo "LATEST=${LATEST}" >> $GITHUB_ENV
-          echo "Latest Go: ${LATEST}"
-      - name: Set up Go ${{ env.LATEST }}
+          # strip leading "go" if present, keep only MAJOR.MINOR.PATCH (drop any extra components)
+          VER=$(echo "$RAW" | sed -E 's/^go//; s/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          # ensure matches X.Y.Z
+          if ! echo "$VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Resolved version '$VER' is not in X.Y.Z format; falling back to 1.25.0"
+            VER="1.25.0"
+          fi
+          echo "SANITIZED_GO=${VER}" >> $GITHUB_ENV
+          echo "Sanitized Go version: ${VER}"
+      - name: Set up Go ${{ env.SANITIZED_GO }}
         uses: actions/setup-go@v5.5.0
         with:
-          go-version: ${{ env.LATEST }}
+          go-version: ${{ env.SANITIZED_GO }}
           check-latest: true
 
-      - name: Print Go info
+      - name: Print environment
         run: |
           go version
           go env
+          uname -a || true
 
-      - name: Update go.mod go directive
+      - name: Update go.mod 'go' directive (safe, atomic)
+        id: update-gomod
         run: |
-          # Replace the first "go N.N" line with the latest.
-          if grep -qE '^go [0-9]+\.[0-9]+' go.mod; then
-            sed -i -E "s/^go [0-9]+\.[0-9]+/go ${{ env.LATEST }}/" go.mod
-          else
-            echo "go ${{ env.LATEST }}" >> go.mod
+          set -euo pipefail
+          NEW="${SANITIZED_GO}"
+          if [ ! -f go.mod ]; then
+            echo "No go.mod found; creating one with 'go ${NEW}'"
+            printf "module chachacrypt\n\ngo %s\n" "$NEW" > go.mod
+            git add go.mod
+            echo "go.mod.updated=true" >> $GITHUB_ENV
+            exit 0
           fi
-          git add go.mod || true
+          # Replace only the 'go X' directive line (first occurrence), preserving rest of file.
+          awk -v v="$NEW" 'BEGIN{replaced=0}
+            /^go [0-9]+\.[0-9]+(\.[0-9]+)?$/ {
+              if (!replaced) { print "go " v ; replaced=1; next }
+            }
+            { print }
+            END { if (!replaced) printf("go %s\n", v) }' go.mod > go.mod.tmp
+          # Validate the new go.mod parses
+          mv go.mod.tmp go.mod
+          # Use `go mod tidy` to ensure it's valid before staging
+          if ! go mod tidy; then
+            echo "go mod tidy failed after updating go directive; aborting"
+            git diff -- go.mod || true
+            exit 1
+          fi
+          git add go.mod go.sum || true
+          echo "go.mod.updated=true" >> $GITHUB_ENV
 
-      - name: Upgrade dependencies & tidy
+      - name: Upgrade dependencies (best-effort) and tidy
         run: |
-          # Upgrade modules; keep as best-effort but fail early if module system has issues
-          # You can pin specific modules here if desired.
-          set -o pipefail
-          go get -u ./... || true
+          set -euo pipefail
+          # Attempt a conservative upgrade (safe): update to latest compatible versions
+          # WARNING: `go get -u ./...` can be noisy; we try but don't force it to break the workflow early
+          echo "Running go get -u ./... (best-effort)"
+          if ! go get -u ./... 2>&1 | tee go-get-output.txt; then
+            echo "go get had issues; continuing to go mod tidy to produce deterministic module files"
+          fi
+          # Always run tidy and fail if go.mod is invalid
           go mod tidy
+          git add go.mod go.sum || true
 
-      - name: Format code
+      - name: Format files and stage formatting changes
         run: |
+          set -euo pipefail
           gofmt -w .
-          # stage any formatting changes so they can be included
           git add -A
 
-      - name: Run go vet (capture output)
+      - name: Run go vet (capture)
         id: vet
         run: |
           set +e
           go vet ./... 2>&1 | tee vet-output.txt
-          echo "VET_FAILED=$?" >> $GITHUB_ENV
+          echo "VET_EXIT=$?" >> $GITHUB_ENV
           set -e
 
       - name: Verify modules
         run: go mod verify
 
-      - name: Run tests (capture output)
+      - name: Run tests (capture)
         id: tests
         run: |
           set +e
           go test ./... -v -timeout 5m 2>&1 | tee test-output.txt
-          echo "TEST_FAILED=$?" >> $GITHUB_ENV
+          echo "TEST_EXIT=$?" >> $GITHUB_ENV
           set -e
 
-      - name: Run gosec (capture output)
+      - name: Run gosec (capture)
         id: sec
         run: |
           set +e
-          # Pin gosec if you want: @2.13.0 (example)
           go install github.com/securego/gosec/v2/cmd/gosec@latest
           gosec ./... 2>&1 | tee gosec-output.txt
-          echo "SEC_FAILED=$?" >> $GITHUB_ENV
+          echo "GOSEC_EXIT=$?" >> $GITHUB_ENV
           set -e
 
-      - name: Truncate logs for AI context
+      - name: Truncate logs for AI (if used)
         run: |
-          head -n 500 vet-output.txt    > vet-trunc.txt || true
-          head -n 500 test-output.txt   > test-trunc.txt || true
-          head -n 500 gosec-output.txt  > gosec-trunc.txt || true
+          head -n 500 vet-output.txt   > vet-trunc.txt || true
+          head -n 500 test-output.txt  > test-trunc.txt || true
+          head -n 500 gosec-output.txt > gosec-trunc.txt || true
 
-      - name: Build AI context #1
+      - name: Build AI context
         run: |
           {
-            echo "Go version: ${{ env.LATEST }}"
+            echo "Go: ${SANITIZED_GO}"
             echo "=== vet ===";   cat vet-trunc.txt || true
             echo "=== tests ==="; cat test-trunc.txt || true
             echo "=== gosec ==="; cat gosec-trunc.txt || true
@@ -137,81 +168,65 @@ jobs:
       - name: AI pass #1 – propose fixes (optional)
         if: env.OPENROUTER_API_KEY != ''
         run: |
-          # This step asks the AI for diffs that fix vet/tests/gosec.
-          # We treat the AI output as untrusted and validate it thoroughly before applying.
-          PROMPT='You are a senior Go engineer. Fix vet errors, failing tests, and gosec issues shown in the user context. Return a git-style unified diff where file paths are exact (e.g. diff --git a/path/to/file.go b/path/to/file.go).'
+          set -euo pipefail
+          PROMPT='You are a senior Go engineer. Fix vet errors, failing tests, and gosec issues shown in the context. Return a git-style unified diff (diff --git a/... b/...). Only modify files related to Go code, go.mod, go.sum, CI files, or docs.'
           jq -nc --arg model "deepseek/deepseek-r1:free" \
             --arg system "$PROMPT" \
             --arg user "$(jq -Rs . < ai-context1.txt)" \
-            '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$user}],temperature:0.1}' \
+            '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$user}],temperature:0.05}' \
             > ai-req1.json
 
-          # Send to AI
           RESP=$(curl -s -X POST https://openrouter.ai/api/v1/chat/completions \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $OPENROUTER_API_KEY" \
             -d @ai-req1.json || true)
 
           echo "$RESP" | jq -r '.choices[0].message.content // empty' > ai-raw1.txt || true
-
-          # Extract only the first git-style diff block(s)
-          # This greedy sed extracts from first "diff --git a/" to end of file.
+          # Extract the git diff block(s)
           sed -n '/^diff --git a\//,$p' ai-raw1.txt > fixes1.diff || true
 
-          # If diff non-empty, validate candidate files before applying
           if [ -s fixes1.diff ]; then
-            echo "AI produced a diff; validating changed file paths..."
-            # Extract target file paths (+++ b/...)
-            files=$(sed -n 's/^+++ b\///p' fixes1.diff | sed 's/\t.*$//g' | sed '/^$/d' | uniq)
-            echo "Files proposed by AI:"
+            echo "AI produced a diff; validating files..."
+            files=$(sed -n 's/^+++ b\///p' fixes1.diff | sed 's/\t.*$//' | sed '/^$/d' | uniq)
             echo "$files"
 
-            # Allowed patterns (from env.ALLOWED_PATTERNS)
+            # Validate each file against ALLOWED_PATTERNS
             IFS=$'\n'
             for f in $files; do
               ok=false
               for pat in $(echo "$ALLOWED_PATTERNS"); do
-                # Convert pattern to shell glob and check
                 case "$f" in
                   $pat) ok=true; break;;
                 esac
               done
               if [ "$ok" = "false" ]; then
-                echo "ERROR: Proposed change touches disallowed path: $f"
-                echo "Allowed patterns are:"
-                echo "$ALLOWED_PATTERNS"
+                echo "ERROR: AI wants to change disallowed path: $f"
                 exit 1
               fi
-            done
-            unset IFS
-
-            # Basic safety: disallow creation of files that have no extension unless explicitly allowed
-            for f in $files; do
+              # Disallow extensionless arbitrary new files except known safe names
               base=$(basename "$f")
               if [[ "$base" != *.* ]]; then
-                # allow certain extensionless filenames explicitly
                 case "$base" in
-                  Dockerfile|Makefile|README|README.md|LICENSE|.gitattributes) ;;
+                  Dockerfile|Makefile|README|LICENSE|.gitattributes) ;;
                   *)
-                    echo "ERROR: Proposed change would create/modify extensionless file not on allowlist: $f"
+                    echo "ERROR: Disallowed creation/modification of extensionless file: $f"
                     exit 1
                 esac
               fi
             done
+            unset IFS
 
-            # Do a dry-run apply check
+            # Dry-run apply check
             if git apply --check fixes1.diff; then
-              echo "git apply --check ok. Applying diff..."
               git apply --whitespace=fix fixes1.diff
-              # Stage changes
               git add -A
             else
-              echo "git apply --check failed; aborting."
+              echo "git apply --check failed for fixes1.diff"
               sed -n '1,200p' fixes1.diff || true
               exit 1
             fi
           else
-            echo "No AI diff produced (or empty diff)."
+            echo "No AI diff produced."
           fi
 
       - name: Build check (capture)
@@ -219,20 +234,21 @@ jobs:
         run: |
           set +e
           go build ./... 2>&1 | tee build-output.txt
-          echo "BUILD_FAILED=$?" >> $GITHUB_ENV
+          echo "BUILD_EXIT=$?" >> $GITHUB_ENV
           set -e
 
       - name: Truncate build log
         run: head -n 200 build-output.txt > build-trunc.txt || true
 
       - name: AI pass #2 – fix build errors (optional)
-        if: env.OPENROUTER_API_KEY != '' && env.BUILD_FAILED == '1'
+        if: env.OPENROUTER_API_KEY != '' && env.BUILD_EXIT == '1'
         run: |
+          set -euo pipefail
           PROMPT='Build failed. Fix remaining compilation errors so `go build ./...` succeeds. Return a git-style unified diff.'
           jq -nc --arg model "deepseek/deepseek-r1:free" \
             --arg system "$PROMPT" \
             --arg user "$(jq -Rs . < build-trunc.txt)" \
-            '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$user}],temperature:0.1}' \
+            '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$user}],temperature:0.05}' \
             > ai-req2.json
 
           RESP=$(curl -s -X POST https://openrouter.ai/api/v1/chat/completions \
@@ -244,10 +260,7 @@ jobs:
           sed -n '/^diff --git a\//,$p' ai-raw2.txt > fixes2.diff || true
 
           if [ -s fixes2.diff ]; then
-            echo "Validating AI build-fix diff files..."
-            files=$(sed -n 's/^+++ b\///p' fixes2.diff | sed 's/\t.*$//g' | sed '/^$/d' | uniq)
-            echo "$files"
-
+            files=$(sed -n 's/^+++ b\///p' fixes2.diff | sed 's/\t.*$//' | sed '/^$/d' | uniq)
             IFS=$'\n'
             for f in $files; do
               ok=false
@@ -257,7 +270,7 @@ jobs:
                 esac
               done
               if [ "$ok" = "false" ]; then
-                echo "ERROR: Proposed change touches disallowed path: $f"
+                echo "ERROR: AI build-fix touches disallowed path: $f"
                 exit 1
               fi
             done
@@ -267,7 +280,7 @@ jobs:
               git apply --whitespace=fix fixes2.diff
               git add -A
             else
-              echo "git apply --check failed for build-fix; aborting."
+              echo "git apply --check failed for fixes2.diff"
               sed -n '1,200p' fixes2.diff || true
               exit 1
             fi
@@ -275,55 +288,51 @@ jobs:
             echo "No AI build-fix diff produced."
           fi
 
-      - name: Final build & tests (ensure success before PR)
+      - name: Final build & tests (must succeed before PR)
         run: |
+          set -euo pipefail
           go build ./...
           go test ./... -v
 
-      - name: Commit & push changes (if any)
+      - name: Commit & push (if changes)
         id: commit
         run: |
-          # Only commit if there are staged changes
+          set -euo pipefail
           if git diff --cached --quiet; then
-            echo "No changes to commit."
+            echo "No staged changes to commit."
             echo "CHANGES_PRESENT=false" >> $GITHUB_ENV
-          else
-            # Create unique branch name
-            SHORT=$(git rev-parse --short=8 HEAD)
-            BRANCH="ci/auto-update/go-${{ env.LATEST }}-${SHORT}-${{ github.run_id }}"
-            git checkout -b "$BRANCH"
-            # Commit staged changes
-            git commit -m "chore(ci): bump Go ${{ env.LATEST }}, upgrade deps & apply automated fixes" || true
-            # Push branch
-            git push --set-upstream origin "$BRANCH"
-            echo "PUSHED_BRANCH=$BRANCH" >> $GITHUB_ENV
-            echo "CHANGES_PRESENT=true" >> $GITHUB_ENV
+            exit 0
           fi
+          SHORT=$(git rev-parse --short=8 HEAD)
+          BRANCH="ci/auto-update/go-${SANITIZED_GO}-${SHORT}-${{ github.run_id }}"
+          git checkout -b "$BRANCH"
+          git commit -m "chore(ci): bump Go ${SANITIZED_GO}, upgrade deps & apply automated fixes" || true
+          git push --set-upstream origin "$BRANCH"
+          echo "PUSHED_BRANCH=$BRANCH" >> $GITHUB_ENV
+          echo "CHANGES_PRESENT=true" >> $GITHUB_ENV
 
-      - name: Create Pull Request (only if changes present)
+      - name: Create Pull Request (only if changes)
         if: env.CHANGES_PRESENT == 'true'
         uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ env.GH_TOKEN }}
-          commit-message: "chore(ci): bump Go to ${{ env.LATEST }}, upgrade deps & apply automated fixes"
           branch: ${{ env.PUSHED_BRANCH }}
-          title: "CI: Go ${{ env.LATEST }} + auto-fix vet/tests/build"
+          commit-message: "chore(ci): bump Go to ${{ env.SANITIZED_GO }}, upgrade deps & apply automated fixes"
+          title: "CI: Go ${{ env.SANITIZED_GO }} + automated fixes"
           body: |
-            **Automated results**
-            - Go version: ${{ env.LATEST }}
-            - Vet exit code: ${{ env.VET_FAILED }}
-            - Test exit code: ${{ env.TEST_FAILED }}
-            - Gosec exit code: ${{ env.SEC_FAILED }}
-            - Build exit code: ${{ env.BUILD_FAILED }}
-            - AI-generated patches applied (if any)
+            Automated update:
+            - Go: ${{ env.SANITIZED_GO }}
+            - Vet exit: ${{ env.VET_EXIT }}
+            - Test exit: ${{ env.TEST_EXIT }}
+            - Gosec exit: ${{ env.GOSEC_EXIT }}
+            - Build exit: ${{ env.BUILD_EXIT }}
           labels: automated
           draft: false
 
-      - name: Cleanup temp files
+      - name: Cleanup (always)
         if: always()
         run: |
           rm -f ai-req*.json ai-raw*.txt fixes*.diff ai-context1.txt \
                 vet-output.txt test-output.txt gosec-output.txt \
                 vet-trunc.txt test-trunc.txt gosec-trunc.txt \
-                build-output.txt build-trunc.txt
-
+                build-output.txt build-trunc.txt go-get-output.txt || true
