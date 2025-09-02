@@ -1,3 +1,8 @@
+Go version: 1.25
+=== vet ===
+=== tests ===
+?   	chachacrypt	[no test files]
+=== gosec ===
 [gosec] 2025/09/02 03:01:42 Including rules: default
 [gosec] 2025/09/02 03:01:42 Excluding rules: default
 [gosec] 2025/09/02 03:01:42 Including analyzers: default
@@ -57,3 +62,4 @@ Summary:
   Nosec  : 0
   Issues : 6
 
+=== build ===
