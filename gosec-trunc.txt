@@ -1,10 +1,10 @@
-[gosec] 2025/09/04 22:53:30 Including rules: default
-[gosec] 2025/09/04 22:53:30 Excluding rules: default
-[gosec] 2025/09/04 22:53:30 Including analyzers: default
-[gosec] 2025/09/04 22:53:30 Excluding analyzers: default
-[gosec] 2025/09/04 22:53:30 Import directory: /home/runner/work/chachacrypt/chachacrypt
-[gosec] 2025/09/04 22:53:30 Checking package: main
-[gosec] 2025/09/04 22:53:30 Checking file: /home/runner/work/chachacrypt/chachacrypt/chachacrypt.go
+[gosec] 2025/09/05 02:53:51 Including rules: default
+[gosec] 2025/09/05 02:53:51 Excluding rules: default
+[gosec] 2025/09/05 02:53:51 Including analyzers: default
+[gosec] 2025/09/05 02:53:51 Excluding analyzers: default
+[gosec] 2025/09/05 02:53:51 Import directory: /home/runner/work/chachacrypt/chachacrypt
+[gosec] 2025/09/05 02:53:51 Checking package: main
+[gosec] 2025/09/05 02:53:51 Checking file: /home/runner/work/chachacrypt/chachacrypt/chachacrypt.go
 Results:
 
 
