@@ -54,7 +54,7 @@ jobs:
           echo "SANITIZED_GO=$SANITIZED" >> $GITHUB_ENV
 
       - name: Set up Go
-        uses: actions/setup-go@v5.5.0
+        uses: actions/setup-go@v6.0.0
         with:
           go-version: ${{ env.SANITIZED_GO }}
 
