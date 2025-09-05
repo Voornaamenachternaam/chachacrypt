@@ -30,7 +30,7 @@ jobs:
           echo "LATEST=$LATEST" >> $GITHUB_ENV
 
       - name: Set up Go
-        uses: actions/setup-go@v5.5.0
+        uses: actions/setup-go@v6.0.0
         with:
           go-version: ${{ env.LATEST }}
 
