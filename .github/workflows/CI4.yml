@@ -228,41 +228,70 @@ jobs:
           echo "NEW_TEST_EXIT=$NEW_TEST_EXIT" >> "$GITHUB_ENV"
           set -e
 
-      - name: Optionally run AI-assisted repair (last resort)
-        if: env.TEST_EXIT != '0' && env.NEW_TEST_EXIT == ''
-        run: |
-          set -euo pipefail
-          if [ -z "${OPENROUTER_API_KEY:-}" ]; then
-            echo "::notice::No AI token; skipping AI-assisted repair"
-            exit 0
-          fi
-          # Prepare a concise diff + failing test output (kept in workspace, not committed unless patch applies)
-          git fetch origin ${{ env.DEFAULT_BRANCH }} --depth=1 || true
-          git diff origin/${{ env.DEFAULT_BRANCH }}...HEAD > repair.diff || true
-          head -n 200 test-output.txt > fail-sample.txt || true
-          # Call OpenRouter / Chat completion (example). The response should be a unified patch.
-          AI_RESPONSE=$(curl -sS https://openrouter.ai/api/v1/chat/completions \
-            -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d @- <<'JSON' || true
-{"model":"qwen/qwen3-coder:free","messages":[{"role":"system","content":"You are a Go refactoring assistant. Given a small repo diff and failing tests, output a patch (unified diff) that is safe to apply."},{"role":"user","content":"Diff:\nREPLACE_DIFF\n\nFailing tests (first 200 lines):\nREPLACE_FAIL"}],"temperature":0.0,"max_tokens":1024}
-JSON
-          # Substitute payload: (we avoided embedding large texts directly to keep shell-safe; this step is conservative)
-          echo "$AI_RESPONSE" > ai-response.txt || true
-          # Try to extract a patch and apply if valid
-          PATCH=$(sed -n '/^diff --git /,$p' ai-response.txt || true)
-          if [ -n "$PATCH" ]; then
-            echo "$PATCH" > ai.patch
-            if git apply --check ai.patch 2>/dev/null; then
-              git apply ai.patch
-              git add -A
-              git commit -m "chore(ci): apply AI-assisted test fixes" || true
-            else
-              echo "::warning::AI patch not applicable"
-            fi
-          else
-            echo "::notice::No patch found in AI response"
-          fi
+            - name: Optionally run AI-assisted repair (last resort)
+              if: env.TEST_EXIT != '0' && env.NEW_TEST_EXIT == ''
+            env:
+              OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+            run: |
+              set -euo pipefail
+
+              if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+                echo "::notice::No AI token; skipping AI-assisted repair"
+                exit 0
+              fi
+
+              sudo apt-get update -y
+              sudo apt-get install -y jq
+
+              git fetch origin ${{ env.DEFAULT_BRANCH }} --depth=1 || true
+
+              # prepare small context snippets (safe defaults if files missing)
+              DIFF=""
+              if [ -f repair.diff ]; then
+                DIFF=$(sed -n '1,1000p' repair.diff || true)
+              fi
+              FAIL=""
+              if [ -f test-output.txt ]; then
+                FAIL=$(sed -n '1,1000p' test-output.txt || true)
+              fi
+
+              # Build JSON payload using jq to avoid any shell quoting issues
+              jq -n \
+                --arg model "qwen/qwen3-coder:free" \
+                --arg system "You are a Go refactoring assistant. Given a small repo diff and failing tests, output a patch (unified diff) that is safe to apply." \
+                --arg diff "$DIFF" \
+                --arg fail "$FAIL" \
+                '{
+                  model: $model,
+                  messages: [
+                    {role: "system", content: $system},
+                    {role: "user", content: ("Diff:\n" + $diff + "\n\nFailing tests (first lines):\n" + $fail)}
+                  ],
+                  temperature: 0.0,
+                  max_tokens: 1024
+                }' > /tmp/payload.json
+
+              # Send request and capture AI response (if any)
+              curl -sS https://openrouter.ai/api/v1/chat/completions \
+                -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
+                -H "Content-Type: application/json" \
+                -d @/tmp/payload.json \
+                | jq -r '.choices[0].message.content' > ai-response.txt || true
+
+              # Try to extract a unified diff from the response and apply if valid
+              PATCH=$(sed -n '/^diff --git /,$p' ai-response.txt || true)
+              if [ -n "$PATCH" ]; then
+                printf '%s\n' "$PATCH" > ai.patch
+                if git apply --check ai.patch 2>/dev/null; then
+                  git apply ai.patch
+                  git add -A
+                  git commit -m "chore(ci): apply AI-assisted test fixes" || true
+                else
+                  echo "::warning::AI patch exists but is not applicable"
+                fi
+              else
+                echo "::notice::No patch found in AI response"
+              fi
 
       - name: Upload CI logs (artifacts)
         if: always()
