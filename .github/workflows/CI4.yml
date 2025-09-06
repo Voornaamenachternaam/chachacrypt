@@ -26,7 +26,7 @@ jobs:
           fi
 
       - id: set-matrix
-        name: Build Go version matrix
+        name: Build Go version matrix (latest stable + up to 2 previous)
         run: |
           set -euo pipefail
           FALLBACK='["1.25","1.24","1.23"]'
@@ -116,7 +116,7 @@ jobs:
           echo "RUNTIME_MM=$RUNTIME_MM" >> "$GITHUB_ENV"
 
       - id: safe-go-mod
-        name: Safe go.mod update
+        name: Safe go.mod update (preserve exact patch if present)
         run: |
           set -euo pipefail
           CURRENT=""
@@ -144,6 +144,7 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - id: compute-upgrades
         name: Compute safe dependency upgrades
@@ -205,6 +206,7 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install fix tools
         run: |
@@ -295,7 +297,6 @@ jobs:
             case "$orig" in
               *"// #nosec G115"*) continue ;;
             esac
-            # append the comment on the same line safely
             awk -v L="$line" -v C="// #nosec G115" 'NR==L {sub(/[ \t\r\n]*$/, " " C)} {print}' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
             MODIFIED=1
           done <<< "$FOUND"
