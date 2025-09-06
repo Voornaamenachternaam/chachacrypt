@@ -3,7 +3,7 @@ name: CI
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '0 6 * * 1'
 
 permissions:
   contents: write
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   detect-go:
-    name: Detect stable Go versions (latest + up to 2 previous)
+    name: Detect stable Go versions
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
@@ -64,21 +64,26 @@ jobs:
     name: Update Go, deps, test & conditional PR
     needs: detect-go
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         go-version: ${{ fromJson(needs.detect-go.outputs.matrix) }}
     env:
-      PR_TOKEN: ${{ secrets.GH_TOKEN != '' && secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
       DEFAULT_BRANCH: main
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-    timeout-minutes: 120
+
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ env.DEFAULT_BRANCH }}
+
+      - name: Install jq
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
 
       - name: Setup Go ${{ matrix.go-version }}
         uses: actions/setup-go@v6.0.0
@@ -96,7 +101,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-${{ matrix.go-version }}-
 
-      - name: Determine runtime Go versions
+      - name: Initialize CI state variables
+        run: |
+          echo "TEST_EXIT=" >> "$GITHUB_ENV"
+          echo "NEW_TEST_EXIT=" >> "$GITHUB_ENV"
+          echo "GOSEC_EXIT=" >> "$GITHUB_ENV"
+          echo "NO_CHANGES=true" >> "$GITHUB_ENV"
+
+      - name: Determine runtime Go info
         id: go-info
         run: |
           set -euo pipefail
@@ -105,7 +117,7 @@ jobs:
           echo "RUNTIME_FULL=$RUNTIME_FULL" >> "$GITHUB_ENV"
           echo "RUNTIME_MM=$RUNTIME_MM" >> "$GITHUB_ENV"
 
-      - name: Safe go.mod update (preserve exact patch if already present)
+      - name: Safe go.mod update (preserve exact patch if present)
         run: |
           set -euo pipefail
           CURRENT=""
@@ -117,34 +129,32 @@ jobs:
           if [ -z "$CURRENT" ]; then
             echo "go $RUNTIME_MM" >> go.mod
             git add go.mod
-            echo "::notice::Added go directive as $RUNTIME_MM"
+            echo "NO_CHANGES=false" >> "$GITHUB_ENV"
           else
             CURRENT_MM=$(printf '%s' "$CURRENT" | awk -F. '{print $1"."$2}')
             if [ "$CURRENT" = "$RUNTIME_FULL" ]; then
-              echo "::notice::go.mod already matches runtime exact ($CURRENT); no change"
+              :
             elif [ "$CURRENT_MM" = "$RUNTIME_MM" ]; then
-              echo "::notice::go.mod major.minor matches runtime ($CURRENT); preserving exact string ($CURRENT)"
+              :
             else
               sed -i -E "s/^go [0-9]+\.[0-9]+(\.[0-9]+)?/go $RUNTIME_MM/" go.mod
               git add go.mod
-              echo "::notice::Updated go.mod go directive to $RUNTIME_MM"
+              echo "NO_CHANGES=false" >> "$GITHUB_ENV"
             fi
           fi
 
       - name: Compute safe dependency upgrades
-        id: upgrades
         run: |
           set -euo pipefail
           mapfile -t CAND < <(go list -m -u -json all 2>/dev/null | jq -r 'select(.Update) | "\(.Path) \(.Version // "") \(.Update.Version // "")"' || true)
           RUNTIME_MM="${RUNTIME_MM:-$(go version | awk '{print $3}' | sed 's/^go//' | awk -F. '{print $1"."$2}')}"
-          # Convert major.minor to numeric for comparison
           num_from_mm() {
             maj=$(echo "$1" | awk -F. '{print $1}')
             min=$(echo "$1" | awk -F. '{print $2+0}')
             echo $((maj * 1000 + min))
           }
           CUR_NUM=$(num_from_mm "$RUNTIME_MM")
-          UPGRADES=()
+          > upgrades.txt
           for L in "${CAND[@]}"; do
             PATH_MOD=$(echo "$L" | awk '{print $1}')
             CURVER=$(echo "$L" | awk '{print $2}')
@@ -154,7 +164,6 @@ jobs:
             CURMAJ=$(echo "${CURVER}" | sed 's/^v//' | cut -d. -f1)
             UPDMAJ=$(echo "${UPDVER}" | sed 's/^v//' | cut -d. -f1)
             if [ "$CURMAJ" != "$UPDMAJ" ]; then
-              echo "Skipping $PATH_MOD: major bump ($CURMAJ -> $UPDMAJ)"
               continue
             fi
             MODJSON=$(go list -m -json "${PATH_MOD}@${UPDVER}" 2>/dev/null || true)
@@ -165,35 +174,31 @@ jobs:
             REQ_MM=$(echo "${REQ_GO}" | awk -F. '{print $1"."$2}')
             REQ_NUM=$(num_from_mm "${REQ_MM}")
             if [ "${REQ_NUM}" -gt "${CUR_NUM}" ]; then
-              echo "Skipping ${PATH_MOD}@${UPDVER}: requires go ${REQ_GO} (runtime ${RUNTIME_MM})"
               continue
             fi
-            UPGRADES+=("${PATH_MOD}@${UPDVER}")
+            echo "${PATH_MOD}@${UPDVER}" >> upgrades.txt
           done
-          printf '%s\n' "${UPGRADES[@]}" > upgrades.txt || true
-          echo "::set-output name=upgrades::$(wc -l < upgrades.txt || true)"
 
       - name: Apply safe upgrades
         run: |
           set -euo pipefail
-          if [ -f upgrades.txt ] && [ -s upgrades.txt ]; then
+          if [ -s upgrades.txt ]; then
             while IFS= read -r m; do
               [ -n "$m" ] || continue
               go get -u "$m" || echo "::warning::go get failed for $m"
             done < upgrades.txt
             go mod tidy
             git add go.mod go.sum || true
-          else
-            echo "::notice::No safe upgrades available"
+            echo "NO_CHANGES=false" >> "$GITHUB_ENV"
           fi
 
-      - name: Format & basic fixes
+      - name: Format & vet
         run: |
           set -euo pipefail
           go fmt ./...
           go vet ./... || true
 
-      - name: Run tests (capture outputs)
+      - name: Run tests (capture output)
         id: run-tests
         run: |
           set -euo pipefail
@@ -213,87 +218,66 @@ jobs:
           echo "GOSEC_EXIT=$GOSEC_EXIT" >> "$GITHUB_ENV"
           set -e
 
-      - name: Attempt auto-fixes when tests failed
-        if: env.TEST_EXIT != '0'
+      - name: Attempt conservative auto-fixes when tests failed
+        if: ${{ env.TEST_EXIT != '' && env.TEST_EXIT != '0' }}
         run: |
           set -euo pipefail
-          # Attempt conservative automated fixes that do not add new persistent files:
-          # 1) tidy, 2) go mod vendor (optional), 3) reformat
           go mod tidy || true
           go fmt ./... || true
-          # Re-run tests once
           set +e
           go test ./... -timeout 5m 2>&1 | tee test-output-after-fix.txt
           NEW_TEST_EXIT=${PIPESTATUS[0]}
           echo "NEW_TEST_EXIT=$NEW_TEST_EXIT" >> "$GITHUB_ENV"
           set -e
+          if [ "$NEW_TEST_EXIT" -eq 0 ]; then
+            echo "NO_CHANGES=false" >> "$GITHUB_ENV"
+          fi
 
-            - name: Optionally run AI-assisted repair (last resort)
-              if: env.TEST_EXIT != '0' && env.NEW_TEST_EXIT == ''
-            env:
-              OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-            run: |
-              set -euo pipefail
+      - name: Optionally run AI-assisted repair (last resort)
+        if: ${{ env.TEST_EXIT != '' && env.TEST_EXIT != '0' && env.NEW_TEST_EXIT == '' }}
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+            exit 0
+          fi
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+          git fetch origin ${{ env.DEFAULT_BRANCH }} --depth=1 || true
+          git diff origin/${{ env.DEFAULT_BRANCH }}...HEAD > repair.diff || true
+          head -n 200 test-output.txt > fail-sample.txt || true
+          jq -n \
+            --arg model "qwen/qwen3-coder:free" \
+            --arg system "You are a Go refactoring assistant. Given a small repo diff and failing tests, output a patch (unified diff) that is safe to apply." \
+            --arg diff "$(sed -n '1,200p' repair.diff 2>/dev/null || true)" \
+            --arg fail "$(sed -n '1,200p' fail-sample.txt 2>/dev/null || true)" \
+            '{
+              model: $model,
+              messages: [
+                {role: "system", content: $system},
+                {role: "user", content: ("Diff:\n" + $diff + "\n\nFailing tests (first lines):\n" + $fail)}
+              ],
+              temperature: 0.0,
+              max_tokens: 1024
+            }' > /tmp/payload.json
+          curl -sS https://openrouter.ai/api/v1/chat/completions \
+            -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/payload.json \
+            | jq -r '.choices[0].message.content' > ai-response.txt || true
+          PATCH=$(sed -n '/^diff --git /,$p' ai-response.txt || true)
+          if [ -n "$PATCH" ]; then
+            printf '%s\n' "$PATCH" > ai.patch
+            if git apply --check ai.patch 2>/dev/null; then
+              git apply ai.patch
+              git add -A
+              git commit -m "chore(ci): apply AI-assisted test fixes" || true
+              echo "NO_CHANGES=false" >> "$GITHUB_ENV"
+            fi
+          fi
 
-              if [ -z "${OPENROUTER_API_KEY:-}" ]; then
-                echo "::notice::No AI token; skipping AI-assisted repair"
-                exit 0
-              fi
-
-              sudo apt-get update -y
-              sudo apt-get install -y jq
-
-              git fetch origin ${{ env.DEFAULT_BRANCH }} --depth=1 || true
-
-              # prepare small context snippets (safe defaults if files missing)
-              DIFF=""
-              if [ -f repair.diff ]; then
-                DIFF=$(sed -n '1,1000p' repair.diff || true)
-              fi
-              FAIL=""
-              if [ -f test-output.txt ]; then
-                FAIL=$(sed -n '1,1000p' test-output.txt || true)
-              fi
-
-              # Build JSON payload using jq to avoid any shell quoting issues
-              jq -n \
-                --arg model "qwen/qwen3-coder:free" \
-                --arg system "You are a Go refactoring assistant. Given a small repo diff and failing tests, output a patch (unified diff) that is safe to apply." \
-                --arg diff "$DIFF" \
-                --arg fail "$FAIL" \
-                '{
-                  model: $model,
-                  messages: [
-                    {role: "system", content: $system},
-                    {role: "user", content: ("Diff:\n" + $diff + "\n\nFailing tests (first lines):\n" + $fail)}
-                  ],
-                  temperature: 0.0,
-                  max_tokens: 1024
-                }' > /tmp/payload.json
-
-              # Send request and capture AI response (if any)
-              curl -sS https://openrouter.ai/api/v1/chat/completions \
-                -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
-                -H "Content-Type: application/json" \
-                -d @/tmp/payload.json \
-                | jq -r '.choices[0].message.content' > ai-response.txt || true
-
-              # Try to extract a unified diff from the response and apply if valid
-              PATCH=$(sed -n '/^diff --git /,$p' ai-response.txt || true)
-              if [ -n "$PATCH" ]; then
-                printf '%s\n' "$PATCH" > ai.patch
-                if git apply --check ai.patch 2>/dev/null; then
-                  git apply ai.patch
-                  git add -A
-                  git commit -m "chore(ci): apply AI-assisted test fixes" || true
-                else
-                  echo "::warning::AI patch exists but is not applicable"
-                fi
-              else
-                echo "::notice::No patch found in AI response"
-              fi
-
-      - name: Upload CI logs (artifacts)
+      - name: Upload CI logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -303,25 +287,23 @@ jobs:
             test-output-after-fix.txt
             gosec-output.txt
 
-      - name: Commit changes (only go.mod/go.sum or intentional fixes)
+      - name: Commit changes (only intended files)
         id: commit-changes
         run: |
           set -euo pipefail
           if git diff --quiet; then
             echo "NO_CHANGES=true" >> "$GITHUB_ENV"
-            echo "::notice::No changes to commit"
             exit 0
           fi
-          # Commit only tracked files or intended updates (avoid committing temporary logs)
           git add -A
           git commit -m "chore(ci): bump Go/deps for ${{ matrix.go-version }}" || true
           echo "NO_CHANGES=false" >> "$GITHUB_ENV"
 
       - name: Create Pull Request (only when repo changes present)
-        if: env.NO_CHANGES == 'false'
+        if: ${{ env.NO_CHANGES == 'false' }}
         uses: peter-evans/create-pull-request@v7.0.8
         with:
-          token: ${{ env.PR_TOKEN }}
+          token: ${{ secrets.GH_TOKEN }}
           commit-message: "chore(ci): bump Go to ${{ matrix.go-version }} + deps"
           branch: "ci/auto-update/go-${{ matrix.go-version }}-${{ github.run_id }}"
           base: ${{ env.DEFAULT_BRANCH }}
@@ -337,7 +319,7 @@ jobs:
 
       - name: Final status
         run: |
-          if [ "${{ env.NO_CHANGES:-true }}" = "true" ]; then
+          if [ "${NO_CHANGES:-true}" = "true" ]; then
             echo "No PR created; no persistent changes required."
           else
             echo "Pull request created/updated."
