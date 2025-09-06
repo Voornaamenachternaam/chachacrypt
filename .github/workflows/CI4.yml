@@ -3,7 +3,7 @@ name: CI
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 6 * * 1'
+    - cron: '0 6 * * *'
 
 permissions:
   contents: write
@@ -11,7 +11,6 @@ permissions:
 
 jobs:
   detect-go:
-    name: Detect stable Go versions
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
@@ -20,20 +19,15 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq
-
       - id: set-matrix
-        name: Build Go version matrix
         run: |
           set -euo pipefail
           FALLBACK='["1.25","1.24","1.23"]'
-
           JSON=$(curl -sS 'https://go.dev/dl/?mode=json' || true)
           if [ -z "$JSON" ]; then
-            echo "::warning::Failed to fetch go.dev; using fallback matrix"
             echo "matrix=$FALLBACK" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
           mapfile -t VERSIONS < <(
             printf '%s\n' "$JSON" \
               | jq -r 'map(select(.stable==true)) | .[].version' \
@@ -41,7 +35,6 @@ jobs:
               | awk -F. '{print $1"."$2}' \
               | awk '!seen[$0]++'
           )
-
           ITEMS=()
           for i in 0 1 2; do
             v="${VERSIONS[i]:-}"
@@ -49,19 +42,15 @@ jobs:
               ITEMS+=("\"$v\"")
             fi
           done
-
           if [ ${#ITEMS[@]} -eq 0 ]; then
-            echo "::warning::No stable Go versions parsed; using fallback"
             echo "matrix=$FALLBACK" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
           MATRIX_JSON="$(printf '[%s]\n' "$(IFS=,; echo "${ITEMS[*]}")")"
           echo "$MATRIX_JSON" | jq . >/dev/null
           echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
 
   update-go:
-    name: Update Go, deps, test & conditional PR
     needs: detect-go
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -72,25 +61,21 @@ jobs:
     env:
       DEFAULT_BRANCH: main
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ env.DEFAULT_BRANCH }}
-
       - name: Install jq
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq
-
-      - name: Setup Go ${{ matrix.go-version }}
+      - name: Setup Go
         uses: actions/setup-go@v6.0.0
         with:
           go-version: ${{ matrix.go-version }}
           check-latest: true
-
       - name: Cache Go modules & build cache
         uses: actions/cache@v4
         with:
@@ -100,14 +85,11 @@ jobs:
           key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-go-${{ matrix.go-version }}-
-
-      - name: Initialize CI state variables
+      - name: Initialize state
         run: |
           echo "TEST_EXIT=" >> "$GITHUB_ENV"
           echo "NEW_TEST_EXIT=" >> "$GITHUB_ENV"
           echo "GOSEC_EXIT=" >> "$GITHUB_ENV"
-          echo "NO_CHANGES=true" >> "$GITHUB_ENV"
-
       - name: Determine runtime Go info
         id: go-info
         run: |
@@ -116,8 +98,7 @@ jobs:
           RUNTIME_MM=$(printf '%s' "$RUNTIME_FULL" | awk -F. '{print $1"."$2}')
           echo "RUNTIME_FULL=$RUNTIME_FULL" >> "$GITHUB_ENV"
           echo "RUNTIME_MM=$RUNTIME_MM" >> "$GITHUB_ENV"
-
-      - name: Safe go.mod update (preserve exact patch if present)
+      - name: Safe go.mod update
         run: |
           set -euo pipefail
           CURRENT=""
@@ -129,7 +110,7 @@ jobs:
           if [ -z "$CURRENT" ]; then
             echo "go $RUNTIME_MM" >> go.mod
             git add go.mod
-            echo "NO_CHANGES=false" >> "$GITHUB_ENV"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             CURRENT_MM=$(printf '%s' "$CURRENT" | awk -F. '{print $1"."$2}')
             if [ "$CURRENT" = "$RUNTIME_FULL" ]; then
@@ -139,10 +120,9 @@ jobs:
             else
               sed -i -E "s/^go [0-9]+\.[0-9]+(\.[0-9]+)?/go $RUNTIME_MM/" go.mod
               git add go.mod
-              echo "NO_CHANGES=false" >> "$GITHUB_ENV"
+              echo "changed=true" >> "$GITHUB_OUTPUT"
             fi
           fi
-
       - name: Compute safe dependency upgrades
         run: |
           set -euo pipefail
@@ -178,7 +158,6 @@ jobs:
             fi
             echo "${PATH_MOD}@${UPDVER}" >> upgrades.txt
           done
-
       - name: Apply safe upgrades
         run: |
           set -euo pipefail
@@ -189,16 +168,14 @@ jobs:
             done < upgrades.txt
             go mod tidy
             git add go.mod go.sum || true
-            echo "NO_CHANGES=false" >> "$GITHUB_ENV"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
-
       - name: Format & vet
         run: |
           set -euo pipefail
           go fmt ./...
           go vet ./... || true
-
-      - name: Run tests (capture output)
+      - name: Run tests
         id: run-tests
         run: |
           set -euo pipefail
@@ -207,8 +184,7 @@ jobs:
           TEST_EXIT=${PIPESTATUS[0]}
           echo "TEST_EXIT=$TEST_EXIT" >> "$GITHUB_ENV"
           set -e
-
-      - name: Run gosec (security scan)
+      - name: Run gosec
         run: |
           set -euo pipefail
           set +e
@@ -217,7 +193,6 @@ jobs:
           GOSEC_EXIT=${PIPESTATUS[0]}
           echo "GOSEC_EXIT=$GOSEC_EXIT" >> "$GITHUB_ENV"
           set -e
-
       - name: Attempt conservative auto-fixes when tests failed
         if: ${{ env.TEST_EXIT != '' && env.TEST_EXIT != '0' }}
         run: |
@@ -229,11 +204,10 @@ jobs:
           NEW_TEST_EXIT=${PIPESTATUS[0]}
           echo "NEW_TEST_EXIT=$NEW_TEST_EXIT" >> "$GITHUB_ENV"
           set -e
-          if [ "$NEW_TEST_EXIT" -eq 0 ]; then
-            echo "NO_CHANGES=false" >> "$GITHUB_ENV"
+          if [ "${NEW_TEST_EXIT:-}" = "0" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Optionally run AI-assisted repair (last resort)
+      - name: Optionally run AI-assisted repair
         if: ${{ env.TEST_EXIT != '' && env.TEST_EXIT != '0' && env.NEW_TEST_EXIT == '' }}
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -273,34 +247,31 @@ jobs:
               git apply ai.patch
               git add -A
               git commit -m "chore(ci): apply AI-assisted test fixes" || true
-              echo "NO_CHANGES=false" >> "$GITHUB_ENV"
+              echo "changed=true" >> "$GITHUB_OUTPUT"
             fi
           fi
-
       - name: Upload CI logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: ci-logs-${{ matrix.go-version }}
           path: |
             test-output.txt
             test-output-after-fix.txt
             gosec-output.txt
-
-      - name: Commit changes (only intended files)
-        id: commit-changes
+      - id: commit-changes
+        name: Commit changes
         run: |
           set -euo pipefail
           if git diff --quiet; then
-            echo "NO_CHANGES=true" >> "$GITHUB_ENV"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git add -A
           git commit -m "chore(ci): bump Go/deps for ${{ matrix.go-version }}" || true
-          echo "NO_CHANGES=false" >> "$GITHUB_ENV"
-
-      - name: Create Pull Request (only when repo changes present)
-        if: ${{ env.NO_CHANGES == 'false' }}
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+      - name: Create Pull Request
+        if: ${{ steps.commit-changes.outputs.changed == 'true' }}
         uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ secrets.GH_TOKEN }}
@@ -316,11 +287,10 @@ jobs:
             - Gosec exit: ${{ env.GOSEC_EXIT }}
             - Notes: Only committed intended files (go.mod/go.sum and any applied fixes). Logs were uploaded as artifacts.
           labels: automated
-
       - name: Final status
         run: |
-          if [ "${NO_CHANGES:-true}" = "true" ]; then
-            echo "No PR created; no persistent changes required."
-          else
+          if [ "${{ steps.commit-changes.outputs.changed == 'true' }}" = "true" ]; then
             echo "Pull request created/updated."
+          else
+            echo "No PR created; no persistent changes required."
           fi
