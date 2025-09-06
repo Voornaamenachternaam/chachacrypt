@@ -16,7 +16,7 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      - name: Ensure jq available
+      - name: Ensure jq is available
         run: |
           set -euo pipefail
           if ! command -v jq >/dev/null 2>&1; then
@@ -26,15 +26,17 @@ jobs:
           fi
 
       - id: set-matrix
-        name: Build Go version matrix
+        name: Build Go version matrix (latest stable + up to 2 previous)
         run: |
           set -euo pipefail
           FALLBACK='["1.25","1.24","1.23"]'
           JSON=$(curl -sS 'https://go.dev/dl/?mode=json' || true)
           if [ -z "$JSON" ]; then
+            echo "::warning::Failed to fetch go.dev; using fallback matrix"
             echo "matrix=$FALLBACK" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
           mapfile -t VERSIONS < <(
             printf '%s\n' "$JSON" \
               | jq -r 'map(select(.stable==true)) | .[].version' \
@@ -42,6 +44,7 @@ jobs:
               | awk -F. '{print $1"."$2}' \
               | awk '!seen[$0]++'
           )
+
           ITEMS=()
           for i in 0 1 2; do
             v="${VERSIONS[i]:-}"
@@ -49,16 +52,19 @@ jobs:
               ITEMS+=("\"$v\"")
             fi
           done
+
           if [ ${#ITEMS[@]} -eq 0 ]; then
+            echo "::warning::No stable Go versions parsed; using fallback"
             echo "matrix=$FALLBACK" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
           MATRIX_JSON="$(printf '[%s]\n' "$(IFS=,; echo "${ITEMS[*]}")")"
           echo "$MATRIX_JSON" | jq . >/dev/null
           echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
 
   update-go:
-    name: Update Go, deps, tests & conditional PR
+    name: Update Go, dependencies, test, and conditional PR
     needs: detect-go
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -69,7 +75,6 @@ jobs:
     env:
       DEFAULT_BRANCH: main
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -77,17 +82,8 @@ jobs:
           fetch-depth: 0
           ref: ${{ env.DEFAULT_BRANCH }}
 
-      - name: Ensure jq available
-        run: |
-          set -euo pipefail
-          if ! command -v jq >/dev/null 2>&1; then
-            export DEBIAN_FRONTEND=noninteractive
-            sudo apt-get update -y
-            sudo apt-get install -y jq
-          fi
-
-      - name: Setup Go
-        uses: actions/setup-go@v6.0.0
+      - name: Setup Go ${{ matrix.go-version }}
+        uses: actions/setup-go@v5.5.0
         with:
           go-version: ${{ matrix.go-version }}
           check-latest: true
@@ -122,8 +118,8 @@ jobs:
           echo "RUNTIME_FULL=$RUNTIME_FULL" >> "$GITHUB_ENV"
           echo "RUNTIME_MM=$RUNTIME_MM" >> "$GITHUB_ENV"
 
-      - name: Safe go.mod update (preserve exact patch)
-        id: safe-go-mod
+      - id: safe-go-mod
+        name: Safe go.mod update (preserve exact patch if present)
         run: |
           set -euo pipefail
           CURRENT=""
@@ -155,8 +151,8 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Compute safe dependency upgrades
-        id: compute-upgrades
+      - id: compute-upgrades
+        name: Compute safe dependency upgrades
         run: |
           set -euo pipefail
           mapfile -t CAND < <(go list -m -u -json all 2>/dev/null | jq -r 'select(.Update) | "\(.Path) \(.Version // "") \(.Update.Version // "")"' || true)
@@ -191,11 +187,10 @@ jobs:
             fi
             echo "${PATH_MOD}@${UPDVER}" >> upgrades.txt
           done
-          COUNT=$(wc -l < upgrades.txt || echo 0)
-          echo "upgrades_count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "upgrades_count=$(wc -l < upgrades.txt || echo 0)" >> "$GITHUB_OUTPUT"
 
-      - name: Apply safe upgrades
-        id: apply-upgrades
+      - id: apply-upgrades
+        name: Apply safe upgrades
         run: |
           set -euo pipefail
           CHANGED=false
@@ -220,8 +215,8 @@ jobs:
           go fmt ./...
           go vet ./... || true
 
-      - name: Run tests (capture output)
-        id: run-tests
+      - id: run-tests
+        name: Run tests (capture output)
         run: |
           set -euo pipefail
           set +e
@@ -307,7 +302,7 @@ jobs:
 
       - name: Upload CI logs
         if: always()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v4
         with:
           name: ci-logs-${{ matrix.go-version }}
           path: |
@@ -330,8 +325,8 @@ jobs:
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Create Pull Request (only when changes)
-        if: steps.commit-changes.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@v7.0.8
+        if: ${{ steps.commit-changes.outputs.changed == 'true' }}
+        uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GH_TOKEN }}
           commit-message: "chore(ci): bump Go to ${{ matrix.go-version }} + deps"
