@@ -32,11 +32,9 @@ jobs:
           FALLBACK='["1.25","1.24","1.23"]'
           JSON=$(curl -sS 'https://go.dev/dl/?mode=json' || true)
           if [ -z "$JSON" ]; then
-            echo "::warning::Failed to fetch go.dev; using fallback matrix"
             echo "matrix=$FALLBACK" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
           mapfile -t VERSIONS < <(
             printf '%s\n' "$JSON" \
               | jq -r 'map(select(.stable==true)) | .[].version' \
@@ -44,7 +42,6 @@ jobs:
               | awk -F. '{print $1"."$2}' \
               | awk '!seen[$0]++'
           )
-
           ITEMS=()
           for i in 0 1 2; do
             v="${VERSIONS[i]:-}"
@@ -52,22 +49,19 @@ jobs:
               ITEMS+=("\"$v\"")
             fi
           done
-
           if [ ${#ITEMS[@]} -eq 0 ]; then
-            echo "::warning::No stable Go versions parsed; using fallback"
             echo "matrix=$FALLBACK" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
           MATRIX_JSON="$(printf '[%s]\n' "$(IFS=,; echo "${ITEMS[*]}")")"
           echo "$MATRIX_JSON" | jq . >/dev/null
           echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
 
   update-go:
-    name: Update Go, dependencies, test, and conditional PR
+    name: Update Go, deps, lint/fix, test, security scan & conditional PR
     needs: detect-go
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -75,6 +69,7 @@ jobs:
     env:
       DEFAULT_BRANCH: main
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      PR_TOKEN: ${{ secrets.GH_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -83,7 +78,7 @@ jobs:
           ref: ${{ env.DEFAULT_BRANCH }}
 
       - name: Setup Go ${{ matrix.go-version }}
-        uses: actions/setup-go@v5.5.0
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ matrix.go-version }}
           check-latest: true
@@ -108,6 +103,8 @@ jobs:
           echo "TEST_EXIT=" >> "$GITHUB_ENV"
           echo "NEW_TEST_EXIT=" >> "$GITHUB_ENV"
           echo "GOSEC_EXIT=" >> "$GITHUB_ENV"
+          echo "LINT_FIXED=false" >> "$GITHUB_ENV"
+          echo "SEC_FIXES_APPLIED=false" >> "$GITHUB_ENV"
 
       - name: Determine runtime Go info
         id: go-info
@@ -170,9 +167,9 @@ jobs:
             UPDVER=$(echo "$L" | awk '{print $3}')
             [ -n "$PATH_MOD" ] || continue
             [ -n "$UPDVER" ] || continue
-            CURMAJ=$(echo "${CURVER}" | sed 's/^v//' | cut -d. -f1)
-            UPDMAJ=$(echo "${UPDVER}" | sed 's/^v//' | cut -d. -f1)
-            if [ "$CURMAJ" != "$UPDMAJ" ]; then
+            CURMAJ=$(echo "${CURVER}" | sed 's/^v//' | cut -d. -f1 || echo "")
+            UPDMAJ=$(echo "${UPDVER}" | sed 's/^v//' | cut -d. -f1 || echo "")
+            if [ -n "$CURMAJ" ] && [ -n "$UPDMAJ" ] && [ "$CURMAJ" != "$UPDMAJ" ]; then
               continue
             fi
             MODJSON=$(go list -m -json "${PATH_MOD}@${UPDVER}" 2>/dev/null || true)
@@ -209,11 +206,44 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Format & vet
+      - name: Install tooling for automatic fixes
         run: |
           set -euo pipefail
-          go fmt ./...
-          go vet ./... || true
+          export GOBIN="${HOME}/.gobin"
+          mkdir -p "$GOBIN"
+          export PATH="$GOBIN:$PATH"
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+          go install mvdan.cc/gofumpt@latest
+          go install golang.org/x/tools/cmd/goimports@latest
+
+      - id: lint-fix
+        name: Run automatic linter fixes (golangci-lint --fix, gofumpt, goimports)
+        run: |
+          set -euo pipefail
+          export GOBIN="${HOME}/.gobin"
+          export PATH="$GOBIN:$PATH"
+          set +e
+          golangci-lint run --fix ./... 2>&1 | tee golangci-fix.txt
+          RC1=${PIPESTATUS[0]}
+          gofumpt -w .
+          RC2=$?
+          goimports -w .
+          RC3=$?
+          set -e
+          if [ "$RC1" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$RC3" -eq 0 ]; then
+            echo "LINT_FIXED=true" >> "$GITHUB_ENV"
+            git add -A
+            git commit -m "chore(ci): apply linter automatic fixes" || true
+            echo "lint_fixes_applied=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "LINT_FIXED=false" >> "$GITHUB_ENV"
+            echo "lint_fixes_applied=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run go vet
+        run: |
+          set -euo pipefail
+          go vet ./... 2>&1 | tee vet-output.txt || true
 
       - id: run-tests
         name: Run tests (capture output)
@@ -225,30 +255,81 @@ jobs:
           echo "TEST_EXIT=$TEST_EXIT" >> "$GITHUB_ENV"
           set -e
 
-      - name: Install gosec and run security scan
+      - name: Install gosec and run security scan (JSON output)
         run: |
           set -euo pipefail
           export GOBIN="${HOME}/.gobin"
           mkdir -p "$GOBIN"
           export PATH="$GOBIN:$PATH"
-          set +e
           go install github.com/securego/gosec/v2/cmd/gosec@latest
-          "$GOBIN/gosec" ./... 2>&1 | tee gosec-output.txt || true
-          GOSEC_EXIT=${PIPESTATUS[0]}
+          "$GOBIN/gosec" -fmt=json -out=gosec-report.json ./... || true
+          cat gosec-report.json || true
+          GOSEC_EXIT=0
+          if [ -s gosec-report.json ]; then
+            ISSUES=$(jq '.issues | length' gosec-report.json 2>/dev/null || echo 0)
+            if [ "$ISSUES" -gt 0 ]; then
+              GOSEC_EXIT=1
+            fi
+          fi
           echo "GOSEC_EXIT=$GOSEC_EXIT" >> "$GITHUB_ENV"
-          set -e
 
-      - name: Attempt conservative auto-fixes when tests failed
-        if: ${{ env.TEST_EXIT != '' && env.TEST_EXIT != '0' }}
+      - name: Attempt conservative auto-fixes for G115 (integer cast overflow)
+        if: ${{ env.GOSEC_EXIT == '1' }}
         run: |
           set -euo pipefail
-          go mod tidy || true
-          go fmt ./... || true
-          set +e
-          go test ./... -timeout 5m 2>&1 | tee test-output-after-fix.txt
-          NEW_TEST_EXIT=${PIPESTATUS[0]}
-          echo "NEW_TEST_EXIT=$NEW_TEST_EXIT" >> "$GITHUB_ENV"
-          set -e
+          FOUND=$(jq -r '.issues[] | select(.rule_id=="G115") | "\(.file):\(.line)"' gosec-report.json 2>/dev/null || true)
+          if [ -z "$FOUND" ]; then
+            exit 0
+          fi
+          TMPDIR=$(mktemp -d)
+          APPLIED=0
+          while IFS= read -r entry; do
+            file=$(echo "$entry" | cut -d: -f1)
+            line=$(echo "$entry" | cut -d: -f2)
+            [ -f "$file" ] || continue
+            code_line=$(sed -n "${line}p" "$file" 2>/dev/null || true)
+            if [ -z "$code_line" ]; then
+              continue
+            fi
+            if echo "$code_line" | grep -q -E 'uint(8|16|32|64)\s*\('; then
+              expr=$(echo "$code_line" | sed -E 's/.*uint[0-9]+\s*\((.*)\).*/\1/')
+              uintbits=$(echo "$code_line" | sed -n 's/.*uint\([0-9]\+\).*/\1/p')
+              case "$uintbits" in
+                8) MAX=255;;
+                16) MAX=65535;;
+                32) MAX=4294967295;;
+                64) MAX=18446744073709551615;;
+                *) MAX=0;;
+              esac
+              [ "$MAX" -eq 0 ] && continue
+              head_file="$TMPDIR/head"
+              tail_file="$TMPDIR/tail"
+              sed -n '1,'"$(($line-1))"p" "$file" > "$head_file"
+              sed -n "$line",'$p' "$file" > "$tail_file"
+              guard_file="$TMPDIR/guard"
+              cat > "$guard_file" <<'GUARD'
+/* inserted by CI: prevent integer cast overflow; review changes */
+if <EXPR> < 0 || <EXPR> > <MAX> {
+	// handle out-of-range value: return or clamp depending on project policy
+	<EXPR> = <MAX>
+}
+GUARD
+              sed -e "s|<EXPR>|$expr|g" -e "s|<MAX>|$MAX|g" "$guard_file" > "$TMPDIR/guard_filled"
+              cat "$head_file" "$TMPDIR/guard_filled" "$tail_file" > "$TMPDIR/newfile"
+              diff -u "$file" "$TMPDIR/newfile" > "$TMPDIR/diff.patch" || true
+              if [ -s "$TMPDIR/diff.patch" ]; then
+                if git apply --check "$TMPDIR/diff.patch" 2>/dev/null; then
+                  git apply "$TMPDIR/diff.patch"
+                  APPLIED=$((APPLIED+1))
+                fi
+              fi
+            fi
+          done <<< "$FOUND"
+          if [ "$APPLIED" -gt 0 ]; then
+            git add -A
+            git commit -m "chore(ci): apply conservative guards for gosec G115 findings (automated)" || true
+            echo "SEC_FIXES_APPLIED=true" >> "$GITHUB_ENV"
+          fi
 
       - name: Optionally run AI-assisted repair (last resort)
         if: ${{ env.TEST_EXIT != '' && env.TEST_EXIT != '0' && env.NEW_TEST_EXIT == '' }}
@@ -272,7 +353,7 @@ jobs:
           head -n 200 test-output.txt > fail-sample.txt || true
           jq -n \
             --arg model "qwen/qwen3-coder:free" \
-            --arg system "You are a Go refactoring assistant. Given a small repo diff and failing tests, output a patch (unified diff) that is safe to apply." \
+            --arg system "You are a Go refactoring assistant. Given a small repo diff and failing tests, output a patch (unified diff) that is safe to apply. Prefer minimal, well-typed changes and include guards for integer casts." \
             --arg diff "$(sed -n '1,200p' repair.diff 2>/dev/null || true)" \
             --arg fail "$(sed -n '1,200p' fail-sample.txt 2>/dev/null || true)" \
             '{
@@ -295,57 +376,28 @@ jobs:
             if git apply --check ai.patch 2>/dev/null; then
               git apply ai.patch
               git add -A
-              git commit -m "chore(ci): apply AI-assisted test fixes" || true
-              echo "applied_ai=true" >> "$GITHUB_OUTPUT"
+              git commit -m "chore(ci): apply AI-assisted test fixes (automated)" || true
             fi
           fi
 
-      - name: Upload CI logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-logs-${{ matrix.go-version }}
-          path: |
-            test-output.txt
-            test-output-after-fix.txt
-            gosec-output.txt
-            repair.diff
-            ai-response.txt
-
-      - id: commit-changes
-        name: Commit any intended changes
+      - id: rerun-tests
+        name: Re-run tests if prior failure or fixes applied
+        if: ${{ env.TEST_EXIT != '0' || env.LINT_FIXED == 'true' || env.SEC_FIXES_APPLIED == 'true' }}
         run: |
           set -euo pipefail
-          if git diff --quiet; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          git add -A
-          git commit -m "chore(ci): bump Go/deps for ${{ matrix.go-version }}" || true
-          echo "changed=true" >> "$GITHUB_OUTPUT"
+          set +e
+          go test ./... -timeout 5m 2>&1 | tee test-rerun.txt
+          NEW_TEST_EXIT=${PIPESTATUS[0]}
+          echo "NEW_TEST_EXIT=$NEW_TEST_EXIT" >> "$GITHUB_ENV"
+          set -e
 
-      - name: Create Pull Request (only when changes)
-        if: ${{ steps.commit-changes.outputs.changed == 'true' }}
+      - name: Create or update PR with all applied fixes
+        if: ${{ steps.safe-go-mod.outputs.changed == 'true' || steps.apply-upgrades.outputs.changed == 'true' || steps.lint-fix.outputs.lint_fixes_applied == 'true' || env.SEC_FIXES_APPLIED == 'true' }}
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GH_TOKEN }}
-          commit-message: "chore(ci): bump Go to ${{ matrix.go-version }} + deps"
-          branch: "ci/auto-update/go-${{ matrix.go-version }}-${{ github.run_id }}"
+          commit-message: "chore(ci): automated Go updates, linter/security fixes"
+          branch: "ci/go-update-${{ matrix.go-version }}"
+          title: "chore(ci): Automated updates & fixes for Go ${{ matrix.go-version }}"
           base: ${{ env.DEFAULT_BRANCH }}
-          title: "chore(ci): Go ${{ matrix.go-version }} + deps"
-          body: |
-            Automated update:
-            - Go runtime: ${{ env.RUNTIME_FULL }}
-            - Test exit (before fixes): ${{ env.TEST_EXIT }}
-            - Test exit (after fixes): ${{ env.NEW_TEST_EXIT }}
-            - Gosec exit: ${{ env.GOSEC_EXIT }}
-            - Notes: Only committed intended files (go.mod/go.sum and any applied fixes). Logs were uploaded as artifacts.
-          labels: automated
-
-      - name: Final status
-        run: |
-          if [ "${{ steps.commit-changes.outputs.changed }}" = "true" ]; then
-            echo "Pull request created/updated."
-          else
-            echo "No PR created; no persistent changes required."
-          fi
+          delete-branch: true
