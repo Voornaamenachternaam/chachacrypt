@@ -5,6 +5,10 @@ on:
     - cron: '0 2 * * *'
   workflow_dispatch:
 
+concurrency:
+  group: CI_Gemini
+  cancel-in-progress: true
+
 permissions:
   contents: write
   pull-requests: write
@@ -15,7 +19,7 @@ jobs:
     name: "Automate Go Language Version Update"
     steps:
       - name: "Checkout repository"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -43,7 +47,7 @@ jobs:
           go test ./...
 
       - name: "Create Pull Request for Go version update"
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ secrets.GH_TOKEN }}
           commit-message: "chore(go): update Go language version to ${{ steps.setup-go.outputs.go-version }}"
@@ -91,7 +95,7 @@ jobs:
           go test ./...
 
       - name: "Create Pull Request for dependency updates"
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ secrets.GH_TOKEN }}
           commit-message: "chore(deps): automated dependency update and refactoring"
