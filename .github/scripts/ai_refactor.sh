@@ -1,129 +1,174 @@
-#!/bin/bash
-#
-# ai_refactor.sh: An automated code refactoring script for Go projects.
-# This script is a blueprint for a production-ready AI-powered refactoring engine.
-# It is designed to be run as part of a GitHub Actions workflow.
-#
-# Best practices and features:
-# - Secure: Takes the API key from environment variables, not hardcoded.
-# - Robust: Uses 'set -e' to fail immediately if any command fails.
-# - Portable: Can be adapted to different AI services and APIs.
-# - Context-aware: Designed to create detailed prompts for the AI.
-#
-# Arguments:
-#   $1: The type of refactoring to perform ("go-version" or "dependencies").
-#   $2: The AI API URL endpoint.
-#
-# Assumptions:
-# - The script is located at `.github/scripts/ai_refactor.sh`
-# - The API key is stored as a GitHub Secret named `OPENROUTER_API_KEY`.
-# - The AI model name is provided as an environment variable `AI_MODEL`.
-# - Git is available on the runner.
+#!/usr/bin/env bash
+set -euo pipefail
 
-set -e
+# ai_refactor.sh
+# Automated AI-powered refactoring script for Go projects.
+# Usage:
+#   ./ai_refactor.sh <go-version|dependencies> <api-url>
+#
+# Requirements:
+# - OPENROUTER_API_KEY environment variable set (GitHub secret)
+# - AI_MODEL environment variable set (e.g. deepseek/deepseek-r1:free)
+# - curl and jq available (script will attempt to install jq if missing on Debian-based runners)
+# - git available (used to commit changes so the create-pull-request step can pick them up)
 
-# --- Environment Variable and Argument Validation ---
-# Ensure required environment variables and arguments are set.
-if; then
-  echo "Error: OPENROUTER_API_KEY environment variable is not set. Exiting."
-  exit 1
-fi
-
-if; then
-  echo "Error: AI_MODEL environment variable is not set. Exiting."
-  exit 1
-fi
-
+# --- Argument validation ---
 if [ "$#" -ne 2 ]; then
-  echo "Usage:./ai_refactor.sh <go-version|dependencies> <api-url>"
+  echo "Usage: $0 <go-version|dependencies> <api-url>"
   exit 1
 fi
 
 REFACTOR_TYPE=$1
 API_URL=$2
 
-echo "Starting AI-powered refactoring process for type: ${REFACTOR_TYPE}"
-echo "Using AI model: ${AI_MODEL}"
+# --- Environment validation ---
+if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+  echo "Error: OPENROUTER_API_KEY environment variable is not set. Exiting."
+  exit 1
+fi
 
-# Placeholder for identifying files to refactor based on the type.
-GO_FILES=$(find. -name "*.go" | grep -v 'vendor' | grep -v '_test.go')
+if [ -z "${AI_MODEL:-}" ]; then
+  echo "Error: AI_MODEL environment variable is not set. Exiting."
+  exit 1
+fi
 
-if; then
+# --- Ensure required CLI tools are present ---
+command -v curl >/dev/null 2>&1 || { echo "Error: curl is required but not installed. Exiting."; exit 1; }
+if ! command -v jq >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "jq not found. Attempting to install jq using apt-get..."
+    sudo apt-get update -y
+    sudo apt-get install -y jq
+  else
+    echo "Error: jq is required but not installed and cannot be installed automatically on this runner. Exiting."
+    exit 1
+  fi
+fi
+
+echo "Starting AI-powered refactoring: type='${REFACTOR_TYPE}' api='${API_URL}' model='${AI_MODEL}'"
+
+# --- Discover Go source files (exclude vendor and tests) ---
+# Use readarray to preserve filenames with spaces
+readarray -t GO_FILES < <(find . -type f -name "*.go" -not -path "./vendor/*" -not -name "*_test.go" -print)
+
+if [ "${#GO_FILES[@]}" -eq 0 ]; then
   echo "No Go source files found to refactor. Exiting."
   exit 0
 fi
 
-# A function to build a context-aware prompt for the AI.
-generate_prompt() {
-  local file_path=$1
-  local code_content
-  code_content=$(cat "${file_path}")
+# Helper: strip surrounding triple-backticks and leading language marker
+strip_code_fences() {
+  # Removes leading ```lang and trailing ``` if present, preserving content inside.
+  sed -e '1s/^```[[:alnum:]]*[\r\n]*//' -e '${/^```$/d}' -e 's/\r$//' | sed '/^```$/d'
+}
 
-  PROMPT="
-You are an expert Go developer. I have recently updated a ${REFACTOR_TYPE} which has introduced breaking changes in the following file: ${file_path}.
+# Ensure git user config for automated commits
+git config user.name "github-actions[bot]" || true
+git config user.email "github-actions[bot]@users.noreply.github.com" || true
 
-Your task is to rewrite the provided code to resolve all compilation errors,
-breaking changes, and deprecated function calls. Ensure the refactored code
-is idiomatic, follows best practices, and maintains all original functionality.
+TMPDIR=$(mktemp -d)
+cleanup() {
+  rm -rf "${TMPDIR}"
+}
+trap cleanup EXIT
 
-Do not include any explanations or commentary. Just provide the complete, updated code block.
+# Iterate files
+for file in "${GO_FILES[@]}"; do
+  echo "Processing file: ${file}"
+
+  # Build prompt
+  file_content=$(sed -n '1,20000p' "${file}" || true)
+  PROMPT=$(cat <<EOF
+You are an expert Go developer. I have recently updated a ${REFACTOR_TYPE} which may have introduced breaking changes in the following file: ${file}.
+
+Your task is to provide a complete, ready-to-write Go source file that resolves compilation errors, breaking changes, and deprecated function calls introduced by the ${REFACTOR_TYPE} change while preserving original functionality and intent. Provide idiomatic, modern Go. Do not include explanations — only a single code block containing the complete file contents (no surrounding commentary). If no changes are required, return the original file contents verbatim.
+
+File path: ${file}
 
 Code to refactor:
 \`\`\`go
-${code_content}
+${file_content}
 \`\`\`
-"
-  echo "${PROMPT}"
-}
+EOF
+)
 
-# Iterate over each Go file and generate a refactoring plan.
-for file in ${GO_FILES}; do
-  echo "Processing file: ${file}"
-  
-  PROMPT=$(generate_prompt "${file}")
-  
-  # --- OpenRouter API Call ---
-  # Construct the JSON payload for the OpenRouter chat completions API.
-  JSON_PAYLOAD=$(
-    jq -n \
-      --arg model "${AI_MODEL}" \
-      --arg prompt "${PROMPT}" \
-      '{
-        "model": $model,
-        "messages": [
-          {
-            "role": "user",
-            "content": $prompt
-          }
-        ]
-      }'
+  # Build JSON payload using jq to ensure proper escaping
+  JSON_PAYLOAD=$(jq -n \
+    --arg model "$AI_MODEL" \
+    --arg content "$PROMPT" \
+    '{
+      model: $model,
+      messages: [
+        { role: "user", content: $content }
+      ],
+      temperature: 0.0,
+      max_tokens: 2000
+    }'
   )
 
-  # Call the OpenRouter API using curl.
-  # The output is captured and processed to extract the refactored code.
-  AI_RESPONSE=$(
-    curl --silent --location --request POST "${API_URL}" \
+  # Call API and extract the response content
+  RESPONSE_RAW="$TMPDIR/response.json"
+  set +e
+  curl --silent --show-error --location --fail --request POST "${API_URL}" \
     --header "Authorization: Bearer ${OPENROUTER_API_KEY}" \
     --header "Content-Type: application/json" \
-    --data "${JSON_PAYLOAD}" \
+    --data "${JSON_PAYLOAD}" > "${RESPONSE_RAW}"
+  CURL_EXIT=$?
+  set -e
 
-| jq -r '.choices.message.content'
-  )
-  
-  if; then
-    echo "Error: AI response was empty or could not be parsed. Skipping file."
+  if [ "${CURL_EXIT}" -ne 0 ]; then
+    echo "Error: curl failed for file ${file} (exit ${CURL_EXIT}). Skipping."
     continue
   fi
 
-  echo "AI has successfully refactored the file. Saving changes..."
-  
-  # --- Applying Changes ---
-  # A robust script would apply the AI's output back to the file.
-  echo "${AI_RESPONSE}" > "${file}"
-  echo "Changes have been applied. Running final validation."
-  
+  # Extract content field defensively (supporting OpenRouter's chat completions schema)
+  AI_RESPONSE=$(jq -r '.choices[0].message.content // .choices[0].text // ""' "${RESPONSE_RAW}" 2>/dev/null || true)
+
+  if [ -z "${AI_RESPONSE}" ] || [ "${AI_RESPONSE}" = "null" ]; then
+    echo "Warning: AI response was empty or could not be parsed for file ${file}. Skipping."
+    continue
+  fi
+
+  # Clean code fences if present
+  CLEANED_RESPONSE=$(printf "%s" "${AI_RESPONSE}" | strip_code_fences)
+
+  # Sanity check: ensure output contains "package " for Go files to reduce risk of accidental garbage
+  if ! printf "%s" "${CLEANED_RESPONSE}" | grep -q '^package[[:space:]]' ; then
+    echo "Warning: AI output for ${file} does not appear to be a complete Go file (missing package declaration). Skipping."
+    continue
+  fi
+
+  # Write to temporary file then format with gofmt before replacing original
+  OUT_TMP="${TMPDIR}/out.go"
+  printf "%s\n" "${CLEANED_RESPONSE}" > "${OUT_TMP}"
+  # Attempt to format; if gofmt fails, skip to avoid corrupting file
+  if command -v gofmt >/dev/null 2>&1; then
+    if ! gofmt -w "${OUT_TMP}"; then
+      echo "Warning: gofmt failed for ${file}. Skipping write to file."
+      continue
+    fi
+  fi
+
+  # If the content is identical to existing file, skip
+  if cmp -s "${OUT_TMP}" "${file}"; then
+    echo "No changes required for ${file}."
+    continue
+  fi
+
+  # Replace original file with refactored content
+  mv "${OUT_TMP}" "${file}"
+  git add -- "${file}"
+
+  # Commit the change for the file (will be collected by create-pull-request action later)
+  if git diff --cached --quiet --exit-code; then
+    echo "No staged changes to commit for ${file}."
+  else
+    COMMIT_MSG="chore(ai): refactor ${file} for ${REFACTOR_TYPE} (AI: ${AI_MODEL})"
+    git commit -m "${COMMIT_MSG}" || true
+    echo "Committed changes for ${file}."
+  fi
+
 done
 
 echo "AI-powered refactoring completed successfully."
-
 exit 0
