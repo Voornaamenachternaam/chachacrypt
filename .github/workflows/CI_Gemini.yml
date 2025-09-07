@@ -3,6 +3,7 @@ name: CI_Gemini
 on:
   schedule:
     - cron: '0 2 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -27,20 +28,19 @@ jobs:
 
       - name: "Update go.mod to latest Go version"
         run: |
-          go mod edit -go=${{ steps.setup-go.outputs.go-version }}
+          go mod edit -go="${{ steps.setup-go.outputs.go-version }}"
 
       - name: "Run AI-powered refactoring for Go version compatibility"
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           AI_MODEL: "deepseek/deepseek-r1:free"
-        run: |
-          chmod +x.github/scripts/ai_refactor.sh && ./.github/scripts/ai_refactor.sh go-version https://openrouter.ai/api/v1/chat/completions
+        run: chmod +x ./.github/scripts/ai_refactor.sh && ./.github/scripts/ai_refactor.sh go-version https://openrouter.ai/api/v1/chat/completions
 
       - name: "Validate changes and run tests"
         run: |
           go mod tidy
           go mod verify
-          go test./...
+          go test ./...
 
       - name: "Create Pull Request for Go version update"
         uses: peter-evans/create-pull-request@v7
@@ -82,14 +82,13 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           AI_MODEL: "deepseek/deepseek-r1:free"
-        run: |
-          chmod +x.github/scripts/ai_refactor.sh && ./.github/scripts/ai_refactor.sh dependencies https://openrouter.ai/api/v1/chat/completions
+        run: chmod +x ./.github/scripts/ai_refactor.sh && ./.github/scripts/ai_refactor.sh dependencies https://openrouter.ai/api/v1/chat/completions
 
       - name: "Validate changes and run tests"
         run: |
           go mod tidy
           go mod verify
-          go test./...
+          go test ./...
 
       - name: "Create Pull Request for dependency updates"
         uses: peter-evans/create-pull-request@v7
