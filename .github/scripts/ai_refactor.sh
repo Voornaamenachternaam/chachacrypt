@@ -24,12 +24,12 @@ set -e
 
 # --- Environment Variable and Argument Validation ---
 # Ensure required environment variables and arguments are set.
-if]; then
+if; then
   echo "Error: OPENROUTER_API_KEY environment variable is not set. Exiting."
   exit 1
 fi
 
-if]; then
+if; then
   echo "Error: AI_MODEL environment variable is not set. Exiting."
   exit 1
 fi
