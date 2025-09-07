@@ -1,4 +1,4 @@
-name: CI
+name: CI_ChatGPT
 
 on:
   workflow_dispatch:
