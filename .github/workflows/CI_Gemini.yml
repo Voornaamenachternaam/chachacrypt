@@ -1,6 +1,7 @@
-name: Go Automated Updates
+name: CI_Gemini
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: '0 2 * * *'
 
@@ -14,7 +15,7 @@ jobs:
     name: "Automate Go Language Version Update"
     steps:
       - name: "Checkout repository"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -34,8 +35,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           AI_MODEL: "deepseek/deepseek-r1:free"
         run: |
-          chmod +x./.github/scripts/ai_refactor.sh
-         ./.github/scripts/ai_refactor.sh go-version https://openrouter.ai/api/v1/chat/completions
+          chmod +x./.github/scripts/ai_refactor.sh && ./.github/scripts/ai_refactor.sh go-version https://openrouter.ai/api/v1/chat/completions
 
       - name: "Validate changes and run tests"
         run: |
@@ -44,7 +44,7 @@ jobs:
           go test./...
 
       - name: "Create Pull Request for Go version update"
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ secrets.GH_TOKEN }}
           commit-message: "chore(go): update Go language version to ${{ steps.setup-go.outputs.go-version }}"
@@ -65,7 +65,7 @@ jobs:
     name: "Automate Dependency Updates and Refactoring"
     steps:
       - name: "Checkout repository"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -84,8 +84,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           AI_MODEL: "deepseek/deepseek-r1:free"
         run: |
-          chmod +x./.github/scripts/ai_refactor.sh
-         ./.github/scripts/ai_refactor.sh dependencies https://openrouter.ai/api/v1/chat/completions
+          chmod +x./.github/scripts/ai_refactor.sh && ./.github/scripts/ai_refactor.sh dependencies https://openrouter.ai/api/v1/chat/completions
 
       - name: "Validate changes and run tests"
         run: |
@@ -94,7 +93,7 @@ jobs:
           go test./...
 
       - name: "Create Pull Request for dependency updates"
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ secrets.GH_TOKEN }}
           commit-message: "chore(deps): automated dependency update and refactoring"
