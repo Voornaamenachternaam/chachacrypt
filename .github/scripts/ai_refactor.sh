@@ -1,148 +1,80 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ai_refactor.sh
-# Usage:
-#   ./ai_refactor.sh <go-version|dependencies> <api-url>
-# Environment:
-#   OPENROUTER_API_KEY - required
-#   AI_MODEL - required (e.g. deepseek/deepseek-r1:free)
+TYPE="${1:-}"
+API_URL="${2:-}"
 
-REFACTOR_TYPE="${1:-}" || true
-API_URL="${2:-}" || true
-
-function die() {
-  echo "Error: $*" >&2
+if [ -z "$TYPE" ] || [ -z "$API_URL" ]; then
+  echo "Usage: $0 <patch|dependencies|go-version> <api-url>" >&2
   exit 1
-}
-
-# Validate args
-if [ -z "${REFACTOR_TYPE}" ]; then
-  die "Missing refactor type. Usage: $0 <go-version|dependencies> <api-url>"
-fi
-if [ -z "${API_URL}" ]; then
-  die "Missing API URL. Usage: $0 <go-version|dependencies> <api-url>"
 fi
 
-# Validate env
 if [ -z "${OPENROUTER_API_KEY:-}" ]; then
-  die "OPENROUTER_API_KEY environment variable is not set. Exiting."
-fi
-if [ -z "${AI_MODEL:-}" ]; then
-  die "AI_MODEL environment variable is not set. Exiting."
+  echo "OPENROUTER_API_KEY not set" >&2
+  exit 1
 fi
 
-# Ensure required tools: curl, jq, git
-command -v curl >/dev/null 2>&1 || die "curl is required but not installed"
 if ! command -v jq >/dev/null 2>&1; then
-  echo "jq not found. Attempting to install (apt-get)..."
   if command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get update && sudo apt-get install -y jq || die "Failed to install jq"
+    sudo apt-get update
+    sudo apt-get install -y jq
   else
-    die "jq is required but not found. Please install jq or add it to PATH."
+    echo "jq required but not available; aborting." >&2
+    exit 1
   fi
 fi
-command -v git >/dev/null 2>&1 || die "git is required but not installed"
 
-# Find go files tracked by git
-mapfile -t GO_FILES < <(git ls-files '*.go' || true)
-if [ ${#GO_FILES[@]} -eq 0 ]; then
-  echo "No .go files found in the repository. Exiting successfully."
-  exit 0
-fi
+REPAIR_DIFF=$( [ -f repair.diff ] && sed -n '1,2000p' repair.diff | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g' || echo "" )
 
-# Helper: call OpenRouter with payload
-function call_openrouter() {
-  local payload_json="$1"
-  local max_attempts=3
-  local attempt=0
-  while [ $attempt -lt $max_attempts ]; do
-    attempt=$((attempt+1))
-    http_code=$(curl -sS -w "%{http_code}" -o /tmp/ai_response.$$ \
-      -X POST "$API_URL" \
-      -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
-      -H "Content-Type: application/json" \
-      -d "$payload_json" ) || true
+SYSTEM="You are an expert Go developer. Produce a unified patch (git diff/patch format) that fixes the repository issues. Output only the patch starting with 'diff --git'. If no changes are required, reply with 'NO_CHANGE'."
 
-    if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then
-      cat /tmp/ai_response.$$
-      rm -f /tmp/ai_response.$$
-      return 0
-    fi
+PAYLOAD=$(jq -n --arg model "${AI_MODEL:-qwen/qwen3-coder:free}" --arg system "$SYSTEM" --arg repair "$REPAIR_DIFF" '{
+  model: $model,
+  messages: [
+    {role: "system", content: $system},
+    {role: "user", content: ("Repair diff (may be empty):\n" + $repair + "\n\nInstruction: Return a unified patch (diff --git ...).")}
+  ]
+}')
 
-    echo "OpenRouter call failed (HTTP ${http_code}), attempt ${attempt}/${max_attempts}."
-    if [ $attempt -lt $max_attempts ]; then
-      sleep $((attempt * 2))
-    else
-      cat /tmp/ai_response.$$ || true
-      rm -f /tmp/ai_response.$$
-      return 2
-    fi
-  done
-}
-
-# Build a robust prompt
-function build_prompt() {
-  local file_path="$1"
-  local change_type="$2"
-  local file_content
-  file_content=$(sed -n '1,400p' "$file_path" | sed 's/\"/\\\\\"/g' | sed 's/$/\\\\n/')
-
-  jq -n --arg file "$file_path" --arg type "$change_type" --arg content "$file_content" '
-  {
-    model: $ARGS.named.model,
-    messages: [
-      {role: "system", content: "You are an expert Go developer. Produce a complete ready-to-write Go source file or precise edits that fix compatibility issues introduced by dependency or go-version changes. Keep semantics, comments and licensing intact where possible. Provide only the updated file contents in a JSON object with keys \"path\" and \"content\". If multiple files require edits, return a JSON array."},
-      {role: "user", content: ("Refactor type: " + $type + "\nFile path: " + $file + "\nFile content:\n" + $content)}
-    ]
-  }' --arg model "$AI_MODEL"
-}
-
-TMP_CHANGES_DIR=$(mktemp -d)
-trap 'rm -rf "${TMP_CHANGES_DIR}"' EXIT
-
-echo "Starting AI-powered refactoring: type='${REFACTOR_TYPE}' api='${API_URL}' model='${AI_MODEL}'"
-
-modified_any=false
-for file in "${GO_FILES[@]}"; do
-  echo "Processing file: ${file}"
-  payload=$(build_prompt "$file" "$REFACTOR_TYPE")
-
-  ai_output=$(call_openrouter "$payload") || {
-    echo "AI call failed for ${file}. Skipping file."
-    continue
-  }
-
-  if echo "$ai_output" | jq -e . >/dev/null 2>&1; then
-    echo "$ai_output" | jq -c '. as $in | (if type=="array" then .[] else . end) | {path: .path, content: .content}' | while IFS= read -r entry; do
-      path=$(echo "$entry" | jq -r '.path')
-      content=$(echo "$entry" | jq -r '.content')
-      if [ -z "$path" ] || [ "$path" = "null" ]; then
-        echo "AI result missing path; skipping."
-        continue
-      fi
-      echo "Applying AI edit to ${path}"
-      mkdir -p "$(dirname "$path")"
-      printf '%s' "$content" > "$path"
-      modified_any=true
-    done
+RESPONSE_FILE=response_ai.json
+MAX=3
+i=0
+while [ $i -lt $MAX ]; do
+  i=$((i+1))
+  HTTP=$(curl -sS -w '%{http_code}' -o "$RESPONSE_FILE" -X POST "$API_URL" -H "Content-Type: application/json" -H "Authorization: Bearer ${OPENROUTER_API_KEY}" -d "$PAYLOAD" || true)
+  if [ "$HTTP" = "200" ] || [ "$HTTP" = "201" ]; then
+    break
+  fi
+  if [ $i -lt $MAX ]; then
+    sleep $((i*2))
   else
-    echo "AI returned non-JSON output for ${file}. Skipping."
-    continue
+    echo "AI service failed HTTP $HTTP"
+    cat "$RESPONSE_FILE" || true
+    exit 1
   fi
 done
 
-if [ "$modified_any" = true ]; then
-  echo "Committing changes"
-  git add -A
-  if [ -n "$(git status --porcelain)" ]; then
-    git commit -m "chore(ai): apply AI-assisted refactors for ${REFACTOR_TYPE}"
-  else
-    echo "No changes to commit."
-  fi
+if jq -e '.choices[0].message.content' "$RESPONSE_FILE" >/dev/null 2>&1; then
+  jq -r '.choices[0].message.content' "$RESPONSE_FILE" > ai-response.txt
+elif jq -e '.result[0].content[0].text' "$RESPONSE_FILE" >/dev/null 2>&1; then
+  jq -r '.result[0].content[0].text' "$RESPONSE_FILE" > ai-response.txt
 else
-  echo "No modifications detected by AI run."
+  cat "$RESPONSE_FILE"
+  exit 1
 fi
 
-exit 0
- 
+sed -n '/^diff --git /,$p' ai-response.txt > ai.patch || true
+
+if [ -s ai.patch ]; then
+  if git apply --check ai.patch; then
+    git apply ai.patch
+    git add -A
+    git commit -m "chore(ai): apply AI patch" || true
+    echo "ai_patch_applied=true"
+  else
+    echo "ai.patch failed git apply --check" >&2
+    exit 1
+  fi
+else
+  echo "NO_PATCH returned by AI or patch empty"
+fi
