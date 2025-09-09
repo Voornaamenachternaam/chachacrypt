@@ -75,5 +75,5 @@ if [ -s ai.patch ]; then
     exit 1
   fi
 else
-  echo "NO_PATCH returned by AI or patch  empty"
+  echo "NO_PATCH returned by AI or patch empty"
 fi
