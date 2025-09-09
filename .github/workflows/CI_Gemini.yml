@@ -1,13 +1,9 @@
-name: CI_Gemini
+name: Go Automated Updates
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: '0 2 * * *'
-  workflow_dispatch:
-
-concurrency:
-  group: CI_Gemini
-  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -19,35 +15,36 @@ jobs:
     name: "Automate Go Language Version Update"
     steps:
       - name: "Checkout repository"
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: "Setup Go environment"
         id: setup-go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version: 'stable'
           check-latest: true
 
       - name: "Update go.mod to latest Go version"
         run: |
-          go mod edit -go="${{ steps.setup-go.outputs.go-version }}"
+          go mod edit -go=${{ steps.setup-go.outputs.go-version }}
 
       - name: "Run AI-powered refactoring for Go version compatibility"
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           AI_MODEL: "deepseek/deepseek-r1:free"
-        run: chmod +x ./.github/scripts/ai_refactor.sh && ./.github/scripts/ai_refactor.sh go-version https://openrouter.ai/api/v1/chat/completions
+        run: |
+          chmod +x./.github/scripts/ai_refactor.sh && ./.github/scripts/ai_refactor.sh go-version https://openrouter.ai/api/v1/chat/completions
 
       - name: "Validate changes and run tests"
         run: |
           go mod tidy
           go mod verify
-          go test ./...
+          go test./...
 
       - name: "Create Pull Request for Go version update"
-        uses: peter-evans/create-pull-request@v7.0.8
+        uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GH_TOKEN }}
           commit-message: "chore(go): update Go language version to ${{ steps.setup-go.outputs.go-version }}"
@@ -68,12 +65,12 @@ jobs:
     name: "Automate Dependency Updates and Refactoring"
     steps:
       - name: "Checkout repository"
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: "Setup Go environment"
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version-file: 'go.mod'
 
@@ -86,16 +83,17 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           AI_MODEL: "deepseek/deepseek-r1:free"
-        run: chmod +x ./.github/scripts/ai_refactor.sh && ./.github/scripts/ai_refactor.sh dependencies https://openrouter.ai/api/v1/chat/completions
+        run: |
+          chmod +x./.github/scripts/ai_refactor.sh && ./.github/scripts/ai_refactor.sh dependencies https://openrouter.ai/api/v1/chat/completions
 
       - name: "Validate changes and run tests"
         run: |
           go mod tidy
           go mod verify
-          go test ./...
+          go test./...
 
       - name: "Create Pull Request for dependency updates"
-        uses: peter-evans/create-pull-request@v7.0.8
+        uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GH_TOKEN }}
           commit-message: "chore(deps): automated dependency update and refactoring"
