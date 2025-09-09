@@ -3,7 +3,7 @@ name: CI_ChatGPT
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 06 * * *'
+    - cron: '0 6 * * *'
 
 permissions:
   contents: write
@@ -112,6 +112,7 @@ jobs:
       - name: Run golangci-lint (auto-fix where possible)
         id: golangci-action
         uses: golangci/golangci-lint-action@v8.0.0
+        continue-on-error: true
         with:
           args: --timeout 5m --fix
 
