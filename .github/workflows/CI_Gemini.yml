@@ -77,4 +77,4 @@ jobs:
             - **Changes:** `go.mod` and `go.sum` may have been updated; source code may have been modified to maintain compatibility.
 
             This is an automated PR. Please review and merge if all checks pass.
-          token: ${{ secrets.G H_TOKEN }}
+          token: ${{ secrets.GH_TOKEN }}
