@@ -3,7 +3,7 @@ name: CI_ChatGPT
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '0 06 * * *'
 
 permissions:
   contents: write
@@ -26,13 +26,14 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y jq
       - id: set-versions
         run: |
+          set -euo pipefail
           VERSIONS_RAW=$(curl -sS https://go.dev/dl/?mode=json | jq -r '.[] | select(.stable==true) | .version' | sed 's/^go//' | awk '!seen[$0]++' | head -n 3)
           if [ -z "$VERSIONS_RAW" ]; then
             VERSIONS_JSON='["stable"]'
           else
             VERSIONS_JSON=$(printf '%s\n' ${VERSIONS_RAW} | jq -R -s -c 'split("\n")[:-1]')
           fi
-          echo "go-versions=${VERSIONS_JSON}" >> $GITHUB_OUTPUT
+          echo "go-versions=${VERSIONS_JSON}" >> "$GITHUB_OUTPUT"
 
   update-go:
     name: Update, lint, auto-fix, AI-fallback
@@ -53,8 +54,17 @@ jobs:
 
       - name: Configure job variables
         run: |
-          echo "AI_MODEL=${{ secrets.AI_MODEL || env.DEFAULT_AI_MODEL }}" >> $GITHUB_ENV
-          echo "DEFAULT_BRANCH=${{ secrets.DEFAULT_BRANCH || env.DEFAULT_BRANCH }}" >> $GITHUB_ENV
+          set -euo pipefail
+          if [ -n "${{ secrets.AI_MODEL }}" ]; then
+            echo "AI_MODEL=${{ secrets.AI_MODEL }}" >> "$GITHUB_ENV"
+          else
+            echo "AI_MODEL=${{ env.DEFAULT_AI_MODEL }}" >> "$GITHUB_ENV"
+          fi
+          if [ -n "${{ secrets.DEFAULT_BRANCH }}" ]; then
+            echo "DEFAULT_BRANCH=${{ secrets.DEFAULT_BRANCH }}" >> "$GITHUB_ENV"
+          else
+            echo "DEFAULT_BRANCH=${{ env.DEFAULT_BRANCH }}" >> "$GITHUB_ENV"
+          fi
 
       - uses: actions/setup-go@v5
         with:
@@ -70,7 +80,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-mod-${{ matrix.go-version }}-
 
-      - name: Install tools
+      - name: Install tooling
         run: |
           set -euo pipefail
           go install mvdan.cc/gofumpt@latest
@@ -78,85 +88,93 @@ jobs:
           go install github.com/securego/gosec/v2/cmd/gosec@latest
           sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Format code
+      - name: Format (gofumpt + goimports)
         run: |
           set -euo pipefail
           find . -name '*.go' -not -path './vendor/*' -print0 | xargs -0 gofumpt -w
           find . -name '*.go' -not -path './vendor/*' -print0 | xargs -0 goimports -w
           git --no-pager diff --no-color > repair.diff || true
 
-      - id: golangci
-        uses: golangci/golangci-lint-action@v8.0.0
-        continue-on-error: true
-        with:
-          args: --timeout 5m --fix
-
-      - run: |
-          set -euo pipefail
-          go mod tidy
-          go vet ./... || true
-          go test ./... -count=1
-
-      - run: gosec -fmt=json -out gosec.json ./... || true
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pre-fix-${{ matrix.go-version }}
-          path: |
-            repair.diff
-            gosec.json
-
-      - id: auto-fix
+      # ---- Deterministic lint auto-fix BEFORE any annotating lint run ----
+      - name: Deterministic errcheck auto-fix
         run: |
+          set -euo pipefail
           chmod +x ./.github/scripts/auto_fix_lints.sh
           ./.github/scripts/auto_fix_lints.sh || true
 
-      - id: collect-lint
+      - name: "Pre-flight: vet, tests, gosec"
         run: |
           set -euo pipefail
-          golangci-lint run --out-format json ./... > golangci-output.json || true
-          REMAINING=$(jq -r '.Issues | length' golangci-output.json 2>/dev/null || echo 0)
-          echo "remaining_issues_count=$REMAINING" >> $GITHUB_OUTPUT
+          go mod tidy
+          go vet ./... || true
+          go test ./... -count=1
+          gosec -fmt=json -out gosec.json ./... || true
 
-      - id: ai-call
-        if: ${{ steps.collect-lint.outputs.remaining_issues_count != '0' }}
+      - name: Collect remaining lint issues (JSON, no annotations)
+        id: collect-lint
         run: |
+          set -euo pipefail
+          # Use golangci-lint binary directly to avoid publishing annotations at this stage.
+          if command -v golangci-lint >/dev/null 2>&1; then
+            golangci-lint run --out-format json ./... > golangci-output.json || true
+          else
+            TMPDIR=$(mktemp -d)
+            curl -sL -o "$TMPDIR/golangci.tgz" "https://github.com/golangci/golangci-lint/releases/download/v2.4.0/golangci-lint-2.4.0-linux-amd64.tar.gz"
+            tar -xzf "$TMPDIR/golangci.tgz" -C "$TMPDIR"
+            "$TMPDIR/golangci-lint" run --out-format json ./... > golangci-output.json || true
+          fi
+          REMAINING=$(jq -r '.Issues | length' golangci-output.json 2>/dev/null || echo 0)
+          echo "remaining_issues_count=$REMAINING" >> "$GITHUB_OUTPUT"
+
+      - name: AI fallback for remaining issues
+        if: ${{ steps.collect-lint.outputs.remaining_issues_count != '0' }}
+        id: ai-call
+        run: |
+          set -euo pipefail
           chmod +x ./.github/scripts/ai_refactor.sh
           ./.github/scripts/ai_refactor.sh patch https://openrouter.ai/api/v1/chat/completions || true
           if [ -s ai.patch ]; then
-            echo "ai_patch_present=true" >> $GITHUB_OUTPUT
+            echo "ai_patch_present=true" >> "$GITHUB_OUTPUT"
           else
-            echo "ai_patch_present=false" >> $GITHUB_OUTPUT
+            echo "ai_patch_present=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - if: ${{ steps.ai-call.outputs.ai_patch_present == 'true' }}
+      - name: Validate & apply AI patch
+        if: ${{ steps.ai-call.outputs.ai_patch_present == 'true' }}
         run: |
-          if git apply --check ai.patch; then
-            git apply ai.patch
-            git add -A
-            git commit -m "chore(ai): apply AI patch" || true
-          else
-            echo "ai.patch failed to apply" >&2
-            exit 1
-          fi
+          set -euo pipefail
+          git apply --check ai.patch
+          git apply ai.patch
+          git add -A
+          git commit -m "chore(ai): apply AI patch" || true
 
-      - run: |
+      - name: "Post-fix: vet, tests"
+        run: |
           set -euo pipefail
           go mod tidy
           go vet ./... || true
           go test ./... -count=1
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: post-fix-${{ matrix.go-version }}
+          name: ci-artifacts-${{ matrix.go-version }}
           path: |
+            repair.diff
             ai-response.txt
             ai.patch
-            repair.diff
             golangci-output.json
             gosec.json
 
-      - id: create_branch
+      # ---- Single annotating lint run after all fixes applied ----
+      - name: Lint (final, annotating)
+        id: golangci-final
+        uses: golangci/golangci-lint-action@v8.0.0
+        with:
+          args: --timeout 5m
+
+      - name: Create branch & push if changes
+        id: create_branch
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -167,10 +185,10 @@ jobs:
             git add -A
             git commit -m "chore(ci): automated fixes + AI-assist" || true
             git push --set-upstream origin "$BRANCH"
-            echo "branch=$BRANCH" >> $GITHUB_OUTPUT
-            echo "changes=true" >> $GITHUB_OUTPUT
+            echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+            echo "changes=true" >> "$GITHUB_OUTPUT"
           else
-            echo "changes=false" >> $GITHUB_OUTPUT
+            echo "changes=false" >> "$GITHUB_OUTPUT"
           fi
 
       - if: ${{ steps.create_branch.outputs.changes == 'true' }}
