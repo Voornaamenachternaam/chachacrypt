@@ -3,16 +3,16 @@ name: CI_ChatGPT
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 06 * * *'
+    - cron: '0 6 * * *'
 
 permissions:
   contents: write
   pull-requests: write
 
 env:
-  # default AI model; can be overridden with a secret named AI_MODEL if desired
-  AI_MODEL: qwen/qwen3-coder:free
-  # default branch of the repo - adjust if your main branch is 'main'/'master' etc.
+  # fallback default model (can be overridden by secrets.AI_MODEL)
+  DEFAULT_AI_MODEL: qwen/qwen3-coder:free
+  # fallback default branch (adjust if your default branch is 'main'/'master' etc.)
   DEFAULT_BRANCH: main
 
 jobs:
@@ -35,13 +35,11 @@ jobs:
       - name: Determine top stable Go versions and emit matrix
         id: set-versions
         run: |
-          # Query go.dev for stable versions, de-duplicate, pick top 3 stable releases
           VERSIONS_RAW=$(curl -sS https://go.dev/dl/?mode=json | jq -r '.[] | select(.stable==true) | .version' | sed 's/^go//' | awk '!seen[$0]++' | head -n 3)
           if [ -z "${VERSIONS_RAW}" ]; then
             echo "No stable Go versions detected; falling back to 'stable'"
             VERSIONS_JSON='["stable"]'
           else
-            # Convert newline-separated to JSON array
             VERSIONS_JSON=$(printf '%s\n' ${VERSIONS_RAW} | jq -R -s -c 'split("\n")[:-1]')
           fi
           echo "Detected Go versions: ${VERSIONS_JSON}"
@@ -58,16 +56,34 @@ jobs:
         go-version: ${{ fromJson(needs.detect-go.outputs.go-versions) }}
 
     env:
+      # Don't reference env in expressions; we set runtime final values into GITHUB_ENV below
+      # (DEFAULT_AI_MODEL and DEFAULT_BRANCH are defined at workflow env above)
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      # allow override via secrets.AI_MODEL; if not set fallback to env.AI_MODEL above
-      AI_MODEL: ${{ secrets.AI_MODEL || env.AI_MODEL }}
-      DEFAULT_BRANCH: ${{ env.DEFAULT_BRANCH }}
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+
+      - name: Configure job environment (determine AI_MODEL and DEFAULT_BRANCH)
+        run: |
+          # Expand secrets into shell variables (these are expanded by GitHub before running)
+          INITIAL_AI='${{ secrets.AI_MODEL }}'
+          if [ -z "$INITIAL_AI" ]; then
+            echo "AI_MODEL=${{ env.DEFAULT_AI_MODEL }}" >> $GITHUB_ENV
+          else
+            echo "AI_MODEL=$INITIAL_AI" >> $GITHUB_ENV
+          fi
+
+          # DEFAULT_BRANCH fallback
+          INITIAL_DEFAULT_BRANCH='${{ secrets.DEFAULT_BRANCH }}'
+          if [ -z "$INITIAL_DEFAULT_BRANCH" ]; then
+            echo "DEFAULT_BRANCH=${{ env.DEFAULT_BRANCH }}" >> $GITHUB_ENV
+          else
+            echo "DEFAULT_BRANCH=$INITIAL_DEFAULT_BRANCH" >> $GITHUB_ENV
+          fi
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -85,38 +101,29 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-mod-${{ matrix.go-version }}-
 
-      - name: Install required tools (gofumpt, goimports, gosec)
+      - name: Install required tools (gofumpt, goimports, gosec, jq)
         run: |
           set -euo pipefail
-          # install gofumpt and goimports
           GOPATH_BIN=$(go env GOPATH)/bin
           mkdir -p "$GOPATH_BIN"
-          # Use versioned installs only if you want pinned versions, otherwise latest
           go install mvdan.cc/gofumpt@latest
           go install golang.org/x/tools/cmd/goimports@latest
-          # gosec v2
           go install github.com/securego/gosec/v2/cmd/gosec@latest
-          echo "Installed tools to $GOPATH_BIN"
+          sudo apt-get update
+          sudo apt-get install -y jq
           echo "$GOPATH_BIN" >> $GITHUB_PATH
 
       - name: Run gofmt/gofumpt and goimports (format & fix)
         run: |
           set -euo pipefail
-          # format in-place
-          git_root=$(git rev-parse --show-toplevel)
-          find . -name '*.go' -not -path "./vendor/*" -print0 | xargs -0 -n1 sh -c 'gofumpt -w "$0" || true' 
-          # apply goimports
+          find . -name '*.go' -not -path "./vendor/*" -print0 | xargs -0 -n1 sh -c 'gofumpt -w "$0" || true'
           find . -name '*.go' -not -path "./vendor/*" -print0 | xargs -0 -n1 sh -c 'goimports -w "$0" || true'
-          # record formatting diff
           git --no-pager diff --no-color > repair.diff || true
 
       - name: Run golangci-lint (auto-fix where safe)
         uses: golangci/golangci-lint-action@v8.0.0
         with:
-          # optional: set to a stable golangci-lint version via "version" input if desired
-          # version: v2.4.0
           args: --timeout 5m --fix
-        # note: the action prints annotations and returns non-zero on errors unless configured
 
       - name: Run go vet and tests (pre-AI)
         run: |
@@ -140,18 +147,18 @@ jobs:
 
       - name: Build AI payload (patch-based) and call OpenRouter with retries
         id: ai-call
-        env:
-          OPENROUTER_API_KEY: ${{ env.OPENROUTER_API_KEY }}
-          AI_MODEL: ${{ env.AI_MODEL }}
         run: |
           set -euo pipefail
-          # Build system+user prompts. Keep system prompt short and explicit.
+          # Ensure AI_MODEL is available (it was written to GITHUB_ENV earlier)
+          if [ -z "${AI_MODEL:-}" ]; then
+            echo "AI_MODEL is not set; aborting." >&2
+            exit 1
+          fi
+
           SYSTEM_PROMPT="You are an expert Go developer. Given existing repository diffs and failing test output, produce a unified patch (git diff/patch format) that fixes the issues and preserves semantics and licensing. Output only the patch, starting with 'diff --git'. If no changes are needed reply with 'NO_CHANGE'."
 
-          # Read the repair diff (formatting auto-fixes) and a short failing-tests excerpt (if any)
           REPAIR_DIFF=$( [ -f repair.diff ] && sed -n '1,2000p' repair.diff | sed 's/\"/\\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g' || echo "" )
 
-          # Build JSON payload using jq to ensure correct escaping
           PAYLOAD=$(jq -n --arg model "$AI_MODEL" \
             --arg system "$SYSTEM_PROMPT" \
             --arg repair "$REPAIR_DIFF" \
@@ -163,7 +170,6 @@ jobs:
               ]
             }')
 
-          # Function to call OpenRouter with simple retry/backoff
           MAX_ATTEMPTS=3
           attempt=0
           RESPONSE_FILE=response_ai.json
@@ -191,7 +197,6 @@ jobs:
             fi
           done
 
-          # Extract AI message content (support variants similar to OpenAI-like responses)
           if jq -e '.choices[0].message.content' "$RESPONSE_FILE" >/dev/null 2>&1; then
             jq -r '.choices[0].message.content' "$RESPONSE_FILE" > ai-response.txt
           elif jq -e '.result[0].content[0].text' "$RESPONSE_FILE" >/dev/null 2>&1; then
@@ -202,29 +207,22 @@ jobs:
             exit 1
           fi
 
-          # Extract patch starting with "diff --git"
           sed -n '/^diff --git /,$p' ai-response.txt > ai.patch || true
-          if [ ! -s ai.patch ]; then
-            echo "AI did not return a patch. Saving ai-response.txt for inspection."
-            cat ai-response.txt
-            echo "NO_PATCH" > ai.patch
+          if [ -s ai.patch ]; then
+            echo "ai-patch=true" >> $GITHUB_OUTPUT
+          else
+            echo "ai-patch=false" >> $GITHUB_OUTPUT
           fi
-
-          echo "::set-output name=ai-patch::$( [ -s ai.patch ] && echo true || echo false )"
-        # Note: set-output is deprecated in older syntax but using ::set-output in script is permitted in run steps.
-        # We're also using step output via id:ai-call which we check below.
 
       - name: Validate AI patch and apply (safe path)
         if: steps.ai-call.outputs.ai-patch == 'true'
         run: |
           set -euo pipefail
-          # Ensure ai.patch is present
           if [ ! -f ai.patch ] || [ ! -s ai.patch ]; then
             echo "ai.patch missing or empty; nothing to apply."
             exit 0
           fi
 
-          # Validate patch
           if git apply --check ai.patch; then
             echo "ai.patch validated by git apply --check. Applying patch."
             git apply ai.patch
@@ -234,7 +232,6 @@ jobs:
             echo "ai.patch failed git apply --check. Saving ai-response.txt for review."
             echo "===== AI RESPONSE ====="
             sed -n '1,200p' ai-response.txt || true
-            # Fail the job to attract human review (optional: set to continue)
             exit 1
           fi
 
@@ -265,7 +262,6 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # If there are changes on the workspace (committed by previous step), create a branch
           if [ -n "$(git status --porcelain)" ]; then
             BRANCH="automated/ai-fix-${{ matrix.go-version }}-$(date +%s)"
             git push -u origin HEAD:"${BRANCH}"
@@ -281,9 +277,9 @@ jobs:
         with:
           token: ${{ secrets.GH_TOKEN }}
           branch: ${{ steps.git-check.outputs.branch }}
-          title: "chore(ai): Apply AI-suggested fixes (Go ${ { matrix.go-version } })"
-          commit-message: "chore(ai): automated AI-suggested fixes for Go ${ { matrix.go-version } }"
+          title: "chore(ai): Apply AI-suggested fixes (Go ${{ matrix.go-version }})"
+          commit-message: "chore(ai): automated AI-suggested fixes for Go ${{ matrix.go-version }}"
           body: |
             This automated PR contains AI-suggested fixes produced by the OpenRouter model `${{ env.AI_MODEL }}`.
             Please review the changes, run tests, and merge if acceptable.
-
+ 
