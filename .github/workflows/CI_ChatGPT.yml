@@ -3,432 +3,287 @@ name: CI_ChatGPT
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '0 06 * * *'
 
 permissions:
   contents: write
   pull-requests: write
 
+env:
+  # default AI model; can be overridden with a secret named AI_MODEL if desired
+  AI_MODEL: qwen/qwen3-coder:free
+  # default branch of the repo - adjust if your main branch is 'main'/'master' etc.
+  DEFAULT_BRANCH: main
+
 jobs:
   detect-go:
-    name: Detect stable Go versions
+    name: Detect latest stable Go versions
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      go-versions: ${{ steps.set-versions.outputs.go-versions }}
     steps:
-      - name: Ensure jq available
-        run: |
-          set -euo pipefail
-          if ! command -v jq >/dev/null 2>&1; then
-            export DEBIAN_FRONTEND=noninteractive
-            sudo apt-get update -y
-            sudo apt-get install -y jq
-          fi
+      - name: Checkout (needed for some actions)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-      - id: set-matrix
-        name: Build Go version matrix (latest stable + up to 2 previous)
+      - name: Install jq
         run: |
-          set -euo pipefail
-          FALLBACK='["1.25","1.24","1.23"]'
-          JSON=$(curl -sS 'https://go.dev/dl/?mode=json' || true)
-          if [ -z "$JSON" ]; then
-            echo "matrix=$FALLBACK" >> "$GITHUB_OUTPUT"
-            exit 0
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Determine top stable Go versions and emit matrix
+        id: set-versions
+        run: |
+          # Query go.dev for stable versions, de-duplicate, pick top 3 stable releases
+          VERSIONS_RAW=$(curl -sS https://go.dev/dl/?mode=json | jq -r '.[] | select(.stable==true) | .version' | sed 's/^go//' | awk '!seen[$0]++' | head -n 3)
+          if [ -z "${VERSIONS_RAW}" ]; then
+            echo "No stable Go versions detected; falling back to 'stable'"
+            VERSIONS_JSON='["stable"]'
+          else
+            # Convert newline-separated to JSON array
+            VERSIONS_JSON=$(printf '%s\n' ${VERSIONS_RAW} | jq -R -s -c 'split("\n")[:-1]')
           fi
-          mapfile -t VERSIONS < <(
-            printf '%s\n' "$JSON" \
-              | jq -r 'map(select(.stable==true)) | .[].version' \
-              | sed 's/^go//' \
-              | awk -F. '{print $1 "." $2}' \
-              | awk '!seen[$0]++'
-          )
-          ITEMS=()
-          for i in 0 1 2; do
-            v="${VERSIONS[i]:-}"
-            if [ -n "$v" ]; then
-              ITEMS+=("\"$v\"")
-            fi
-          done
-          if [ ${#ITEMS[@]} -eq 0 ]; then
-            echo "matrix=$FALLBACK" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          MATRIX_JSON="$(printf '[%s]' "$(IFS=,; echo "${ITEMS[*]}")")"
-          echo "$MATRIX_JSON" | jq . >/dev/null
-          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+          echo "Detected Go versions: ${VERSIONS_JSON}"
+          echo "go-versions=${VERSIONS_JSON}" >> "$GITHUB_OUTPUT"
 
   update-go:
-    name: Update Go, deps, lint/fix, test, security scan, AI repair & conditional PR
+    name: Update, lint, scan, AI-fix (matrix)
     needs: detect-go
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
-        go-version: ${{ fromJson(needs.detect-go.outputs.matrix) }}
+        go-version: ${{ fromJson(needs.detect-go.outputs.go-versions) }}
+
     env:
-      DEFAULT_BRANCH: main
-      PR_TOKEN: ${{ secrets.GH_TOKEN }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      # allow override via secrets.AI_MODEL; if not set fallback to env.AI_MODEL above
+      AI_MODEL: ${{ secrets.AI_MODEL || env.AI_MODEL }}
+      DEFAULT_BRANCH: ${{ env.DEFAULT_BRANCH }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          ref: ${{ env.DEFAULT_BRANCH }}
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
           check-latest: true
 
-      - name: Cache Go modules & build cache
+      - name: Cache Go modules
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
+            ~/.cache/gopath/pkg/mod
+          key: ${{ runner.os }}-go-mod-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-${{ matrix.go-version }}-
+            ${{ runner.os }}-go-mod-${{ matrix.go-version }}-
 
-      - name: Configure git identity
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Init state
-        run: |
-          echo "TEST_EXIT=" >> "$GITHUB_ENV"
-          echo "NEW_TEST_EXIT=" >> "$GITHUB_ENV"
-          echo "GOSEC_EXIT=" >> "$GITHUB_ENV"
-          echo "LINT_FIXED=false" >> "$GITHUB_ENV"
-          echo "SEC_SUPP_APPLIED=false" >> "$GITHUB_ENV"
-
-      - id: go-info
-        name: Determine runtime Go info
+      - name: Install required tools (gofumpt, goimports, gosec)
         run: |
           set -euo pipefail
-          RUNTIME_FULL=$(go version | awk '{print $3}' | sed 's/^go//')
-          RUNTIME_MM=$(printf '%s' "$RUNTIME_FULL" | awk -F. '{print $1 "." $2}')
-          echo "RUNTIME_FULL=$RUNTIME_FULL" >> "$GITHUB_ENV"
-          echo "RUNTIME_MM=$RUNTIME_MM" >> "$GITHUB_ENV"
-
-      - id: safe-go-mod
-        name: Safe go.mod update (preserve exact patch if present)
-        run: |
-          set -euo pipefail
-          CURRENT=""
-          if [ -f go.mod ]; then
-            CURRENT=$(awk '/^go /{print $2; exit}' go.mod || true)
-          fi
-          RUNTIME_FULL="${RUNTIME_FULL:-$(go version | awk '{print $3}' | sed 's/^go//')}"
-          RUNTIME_MM="${RUNTIME_MM:-$(printf '%s' "$RUNTIME_FULL" | awk -F. '{print $1 "." $2}')}"
-          CHANGED=false
-          if [ -z "$CURRENT" ]; then
-            echo "go $RUNTIME_MM" >> go.mod
-            git add go.mod
-            CHANGED=true
-          else
-            CURRENT_MM=$(printf '%s' "$CURRENT" | awk -F. '{print $1 "." $2}')
-            if [ "$CURRENT" = "$RUNTIME_FULL" ] || [ "$CURRENT_MM" = "$RUNTIME_MM" ]; then
-              CHANGED=false
-            else
-              sed -i -E "s/^go [0-9]+\.[0-9]+(\.[0-9]+)?/go $RUNTIME_MM/" go.mod
-              git add go.mod
-              CHANGED=true
-            fi
-          fi
-          if [ "$CHANGED" = "true" ]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - id: compute-upgrades
-        name: Compute safe dependency upgrades
-        run: |
-          set -euo pipefail
-          mapfile -t CAND < <(go list -m -u -json all 2>/dev/null | jq -r 'select(.Update) | "\(.Path) \(.Version // "") \(.Update.Version // "")"' || true)
-          RUNTIME_MM="${RUNTIME_MM:-$(go version | awk '{print $3}' | sed 's/^go//' | awk -F. '{print $1 "." $2}')}"
-          num_from_mm() {
-            maj=$(echo "$1" | awk -F. '{print $1}')
-            min=$(echo "$1" | awk -F. '{print $2+0}')
-            echo $((maj * 1000 + min))
-          }
-          CUR_NUM=$(num_from_mm "$RUNTIME_MM")
-          > upgrades.txt
-          for L in "${CAND[@]}"; do
-            PATH_MOD=$(echo "$L" | awk '{print $1}')
-            CURVER=$(echo "$L" | awk '{print $2}')
-            UPDVER=$(echo "$L" | awk '{print $3}')
-            [ -n "$PATH_MOD" ] || continue
-            [ -n "$UPDVER" ] || continue
-            CURMAJ=$(echo "${CURVER}" | sed 's/^v//' | cut -d. -f1 || echo "")
-            UPDMAJ=$(echo "${UPDVER}" | sed 's/^v//' | cut -d. -f1 || echo "")
-            if [ -n "$CURMAJ" ] && [ -n "$UPDMAJ" ] && [ "$CURMAJ" != "$UPDMAJ" ]; then
-              continue
-            fi
-            MODJSON=$(go list -m -json "${PATH_MOD}@${UPDVER}" 2>/dev/null || true)
-            REQ_GO=$(printf '%s' "$MODJSON" | jq -r '.GoVersion // empty' 2>/dev/null || true)
-            if [ -z "$REQ_GO" ]; then
-              REQ_GO="1.0"
-            fi
-            REQ_MM=$(echo "${REQ_GO}" | awk -F. '{print $1 "." $2}')
-            REQ_NUM=$(num_from_mm "${REQ_MM}")
-            if [ "${REQ_NUM}" -gt "${CUR_NUM}" ]; then
-              continue
-            fi
-            echo "${PATH_MOD}@${UPDVER}" >> upgrades.txt
-          done
-          COUNT=0
-          if [ -f upgrades.txt ]; then
-            COUNT=$(wc -l < upgrades.txt || echo 0)
-          fi
-          echo "upgrades_count=$COUNT" >> "$GITHUB_OUTPUT"
-
-      - id: apply-upgrades
-        name: Apply safe upgrades
-        run: |
-          set -euo pipefail
-          CHANGED=false
-          if [ -s upgrades.txt ]; then
-            while IFS= read -r m; do
-              [ -n "$m" ] || continue
-              go get -u "$m" || echo "::warning::go get failed for $m"
-            done < upgrades.txt
-            go mod tidy
-            git add go.mod go.sum || true
-            CHANGED=true
-          fi
-          if [ "$CHANGED" = "true" ]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Install fix tools
-        run: |
-          set -euo pipefail
-          export GOBIN="${HOME}/.gobin"
-          mkdir -p "$GOBIN"
-          export PATH="$GOBIN:$PATH"
-          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+          # install gofumpt and goimports
+          GOPATH_BIN=$(go env GOPATH)/bin
+          mkdir -p "$GOPATH_BIN"
+          # Use versioned installs only if you want pinned versions, otherwise latest
           go install mvdan.cc/gofumpt@latest
           go install golang.org/x/tools/cmd/goimports@latest
-          go env GOPATH >/dev/null
-
-      - id: lint-fix
-        name: Run automatic linter fixes
-        run: |
-          set -euo pipefail
-          export GOBIN="${HOME}/.gobin"
-          export PATH="$GOBIN:$PATH"
-          set +e
-          golangci-lint run --fix ./... 2>&1 | tee golangci-fix.txt
-          RC1=${PIPESTATUS[0]}
-          gofumpt -w .
-          RC2=$?
-          goimports -w .
-          RC3=$?
-          set -e
-          if [ "$RC1" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$RC3" -eq 0 ]; then
-            git add -A
-            git commit -m "chore(ci): apply linter automatic fixes" || true
-            echo "LINT_FIXED=true" >> "$GITHUB_ENV"
-            echo "lint_fixes_applied=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "LINT_FIXED=false" >> "$GITHUB_ENV"
-            echo "lint_fixes_applied=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Run go vet
-        run: |
-          set -euo pipefail
-          go vet ./... 2>&1 | tee vet-output.txt || true
-
-      - id: run-tests
-        name: Run tests
-        run: |
-          set -euo pipefail
-          set +e
-          go test ./... -timeout 10m 2>&1 | tee test-output.txt
-          TEST_EXIT=${PIPESTATUS[0]}
-          echo "TEST_EXIT=$TEST_EXIT" >> "$GITHUB_ENV"
-          set -e
-
-      - name: Install gosec and run security scan (JSON)
-        run: |
-          set -euo pipefail
-          export GOBIN="${HOME}/.gobin"
-          mkdir -p "$GOBIN"
-          export PATH="$GOBIN:$PATH"
+          # gosec v2
           go install github.com/securego/gosec/v2/cmd/gosec@latest
-          "$GOBIN/gosec" -fmt=json -out=gosec-report.json ./... || true
-          ISSUES=0
-          if [ -s gosec-report.json ]; then
-            ISSUES=$(jq '.issues | length' gosec-report.json 2>/dev/null || echo 0)
-          fi
-          echo "gosec_issues=$ISSUES" >> "$GITHUB_OUTPUT"
-          if [ "$ISSUES" -gt 0 ]; then
-            echo "GOSEC_EXIT=1" >> "$GITHUB_ENV"
-          else
-            echo "GOSEC_EXIT=0" >> "$GITHUB_ENV"
-          fi
+          echo "Installed tools to $GOPATH_BIN"
+          echo "$GOPATH_BIN" >> $GITHUB_PATH
 
-      - name: Auto-append // #nosec G115 to flagged lines (safe, reviewable)
-        if: ${{ env.GOSEC_EXIT == '1' }}
+      - name: Run gofmt/gofumpt and goimports (format & fix)
         run: |
           set -euo pipefail
-          if [ ! -f gosec-report.json ]; then
-            exit 0
-          fi
-          FOUND=$(jq -r '.issues[] | select(.rule_id=="G115") | "\(.file):\(.line)"' gosec-report.json 2>/dev/null || true)
-          if [ -z "$FOUND" ]; then
-            exit 0
-          fi
-          MODIFIED=0
-          while IFS= read -r entry; do
-            file=$(echo "$entry" | cut -d: -f1)
-            line=$(echo "$entry" | cut -d: -f2)
-            [ -f "$file" ] || continue
-            orig=$(sed -n "${line}p" "$file" 2>/dev/null || true)
-            case "$orig" in
-              *"// #nosec G115"*) continue ;;
-            esac
-            awk -v L="$line" -v C="// #nosec G115" 'NR==L {sub(/[ \t\r\n]*$/, " " C)} {print}' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
-            MODIFIED=1
-          done <<< "$FOUND"
-          if [ "$MODIFIED" -eq 1 ]; then
-            git add -A
-            git commit -m "chore(ci): append // #nosec G115 to simple integer-cast findings (automated)" || true
-            echo "SEC_SUPP_APPLIED=true" >> "$GITHUB_ENV"
-            echo "gosec_suppressed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "gosec_suppressed=false" >> "$GITHUB_OUTPUT"
-          fi
+          # format in-place
+          git_root=$(git rev-parse --show-toplevel)
+          find . -name '*.go' -not -path "./vendor/*" -print0 | xargs -0 -n1 sh -c 'gofumpt -w "$0" || true' 
+          # apply goimports
+          find . -name '*.go' -not -path "./vendor/*" -print0 | xargs -0 -n1 sh -c 'goimports -w "$0" || true'
+          # record formatting diff
+          git --no-pager diff --no-color > repair.diff || true
 
-      - name: Re-run gosec to verify suppressions
+      - name: Run golangci-lint (auto-fix where safe)
+        uses: golangci/golangci-lint-action@v8.0.0
+        with:
+          # optional: set to a stable golangci-lint version via "version" input if desired
+          # version: v2.4.0
+          args: --timeout 5m --fix
+        # note: the action prints annotations and returns non-zero on errors unless configured
+
+      - name: Run go vet and tests (pre-AI)
         run: |
           set -euo pipefail
-          export GOBIN="${HOME}/.gobin"
-          export PATH="$GOBIN:$PATH"
-          "$GOBIN/gosec" -fmt=json -out=gosec-report-after.json ./... || true
-          ISSUES_AFTER=0
-          if [ -s gosec-report-after.json ]; then
-            ISSUES_AFTER=$(jq '.issues | length' gosec-report-after.json 2>/dev/null || echo 0)
-          fi
-          echo "gosec_issues_after=$ISSUES_AFTER" >> "$GITHUB_OUTPUT"
+          go mod tidy
+          go vet ./... || true
+          go test ./... -count=1
 
-      - name: AI-assisted repair (sandboxed, last-resort)
-        if: ${{ env.TEST_EXIT != '' && env.TEST_EXIT != '0' && env.NEW_TEST_EXIT == '' }}
+      - name: Run gosec security scan
+        run: |
+          set -euo pipefail
+          gosec -fmt=json -out gosec.json ./... || true
+
+      - name: Upload pre-AI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pre-ai-artifacts-${{ matrix.go-version }}
+          path: |
+            repair.diff
+            gosec.json
+
+      - name: Build AI payload (patch-based) and call OpenRouter with retries
+        id: ai-call
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_API_KEY: ${{ env.OPENROUTER_API_KEY }}
+          AI_MODEL: ${{ env.AI_MODEL }}
         run: |
           set -euo pipefail
-          if [ -z "${OPENROUTER_API_KEY:-}" ]; then
-            exit 0
-          fi
-          export GOBIN="${HOME}/.gobin"
-          mkdir -p "$GOBIN"
-          export PATH="$GOBIN:$PATH"
-          if ! command -v jq >/dev/null 2>&1; then
-            export DEBIAN_FRONTEND=noninteractive
-            sudo apt-get update -y
-            sudo apt-get install -y jq
-          fi
-          git fetch origin ${{ env.DEFAULT_BRANCH }} --depth=1 || true
-          git diff origin/${{ env.DEFAULT_BRANCH }}...HEAD > repair.diff || true
-          head -n 400 test-output.txt > fail-sample.txt || true
-          jq -n \
-            --arg model "qwen/qwen3-coder:free" \
-            --arg system "You are a Go refactoring assistant. Given a small repo diff and failing tests, propose a minimal unified patch that fixes tests and avoid introducing syntax errors." \
-            --arg diff "$(sed -n '1,400p' repair.diff 2>/dev/null || true)" \
-            --arg fail "$(sed -n '1,400p' fail-sample.txt 2>/dev/null || true)" \
+          # Build system+user prompts. Keep system prompt short and explicit.
+          SYSTEM_PROMPT="You are an expert Go developer. Given existing repository diffs and failing test output, produce a unified patch (git diff/patch format) that fixes the issues and preserves semantics and licensing. Output only the patch, starting with 'diff --git'. If no changes are needed reply with 'NO_CHANGE'."
+
+          # Read the repair diff (formatting auto-fixes) and a short failing-tests excerpt (if any)
+          REPAIR_DIFF=$( [ -f repair.diff ] && sed -n '1,2000p' repair.diff | sed 's/\"/\\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g' || echo "" )
+
+          # Build JSON payload using jq to ensure correct escaping
+          PAYLOAD=$(jq -n --arg model "$AI_MODEL" \
+            --arg system "$SYSTEM_PROMPT" \
+            --arg repair "$REPAIR_DIFF" \
             '{
               model: $model,
               messages: [
-                {role: "system", content: $system},
-                {role: "user", content: ("Diff:\n" + $diff + "\n\nFailing tests (first lines):\n" + $fail)}
-              ],
-              temperature: 0.0,
-              max_tokens: 2048
-            }' > /tmp/payload.json
-          curl -sS https://openrouter.ai/api/v1/chat/completions \
-            -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d @/tmp/payload.json \
-            | jq -r '.choices[0].message.content' > ai-response.txt || true
-          PATCH=$(sed -n '/^diff --git /,$p' ai-response.txt || true)
-          if [ -z "$PATCH" ]; then
+                {role:"system", content:$system},
+                {role:"user", content: ("Repair diff (may be empty):\n" + $repair + "\n\nInstruction: Return a valid unified patch (diff --git ...).")}
+              ]
+            }')
+
+          # Function to call OpenRouter with simple retry/backoff
+          MAX_ATTEMPTS=3
+          attempt=0
+          RESPONSE_FILE=response_ai.json
+          while [ $attempt -lt $MAX_ATTEMPTS ]; do
+            attempt=$((attempt+1))
+            echo "AI request attempt $attempt/$MAX_ATTEMPTS..."
+            http_code=$(curl -sS -w '%{http_code}' -o "$RESPONSE_FILE" \
+              -X POST "https://openrouter.ai/api/v1/chat/completions" \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
+              -d "$PAYLOAD" || true)
+
+            if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then
+              echo "AI call successful (HTTP $http_code)"
+              break
+            fi
+
+            echo "AI call HTTP $http_code (attempt $attempt)."
+            if [ $attempt -lt $MAX_ATTEMPTS ]; then
+              sleep $((attempt * 3))
+            else
+              echo "AI service failed after ${MAX_ATTEMPTS} attempts. Dumping response (if any):"
+              [ -f "$RESPONSE_FILE" ] && cat "$RESPONSE_FILE"
+              exit 1
+            fi
+          done
+
+          # Extract AI message content (support variants similar to OpenAI-like responses)
+          if jq -e '.choices[0].message.content' "$RESPONSE_FILE" >/dev/null 2>&1; then
+            jq -r '.choices[0].message.content' "$RESPONSE_FILE" > ai-response.txt
+          elif jq -e '.result[0].content[0].text' "$RESPONSE_FILE" >/dev/null 2>&1; then
+            jq -r '.result[0].content[0].text' "$RESPONSE_FILE" > ai-response.txt
+          else
+            echo "Could not extract AI response content; raw response:"
+            cat "$RESPONSE_FILE"
+            exit 1
+          fi
+
+          # Extract patch starting with "diff --git"
+          sed -n '/^diff --git /,$p' ai-response.txt > ai.patch || true
+          if [ ! -s ai.patch ]; then
+            echo "AI did not return a patch. Saving ai-response.txt for inspection."
+            cat ai-response.txt
+            echo "NO_PATCH" > ai.patch
+          fi
+
+          echo "::set-output name=ai-patch::$( [ -s ai.patch ] && echo true || echo false )"
+        # Note: set-output is deprecated in older syntax but using ::set-output in script is permitted in run steps.
+        # We're also using step output via id:ai-call which we check below.
+
+      - name: Validate AI patch and apply (safe path)
+        if: steps.ai-call.outputs.ai-patch == 'true'
+        run: |
+          set -euo pipefail
+          # Ensure ai.patch is present
+          if [ ! -f ai.patch ] || [ ! -s ai.patch ]; then
+            echo "ai.patch missing or empty; nothing to apply."
             exit 0
           fi
-          printf '%s\n' "$PATCH" > ai.patch
-          if git apply --check ai.patch 2>/dev/null; then
+
+          # Validate patch
+          if git apply --check ai.patch; then
+            echo "ai.patch validated by git apply --check. Applying patch."
             git apply ai.patch
             git add -A
-            git commit -m "chore(ci): apply AI-assisted patch (automated, validated)" || true
+            git commit -m "chore(ai): apply AI suggested patch" || true
+          else
+            echo "ai.patch failed git apply --check. Saving ai-response.txt for review."
+            echo "===== AI RESPONSE ====="
+            sed -n '1,200p' ai-response.txt || true
+            # Fail the job to attract human review (optional: set to continue)
+            exit 1
           fi
 
-      - name: Re-run tests after fixes
+      - name: Re-run tests and vet after AI patch (if applied)
         run: |
           set -euo pipefail
-          set +e
-          go test ./... -timeout 10m 2>&1 | tee test-rerun.txt
-          NEW_TEST_EXIT=${PIPESTATUS[0]}
-          echo "NEW_TEST_EXIT=$NEW_TEST_EXIT" >> "$GITHUB_ENV"
-          set -e
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Changes present; running go vet and tests"
+            go vet ./... || true
+            go test ./... -count=1
+          else
+            echo "No code changes; skipping re-test step."
+          fi
 
-      - name: Upload artifacts
-        if: always()
+      - name: Record AI & post-run artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ci-logs-${{ matrix.go-version }}
+          name: ai-and-ci-artifacts-${{ matrix.go-version }}
           path: |
-            test-output.txt
-            test-rerun.txt
-            golangci-fix.txt
-            vet-output.txt
-            gosec-report.json
-            gosec-report-after.json
-            repair.diff
             ai-response.txt
+            ai.patch
+            repair.diff
+            gosec.json
 
-      - id: commit-changes
-        name: Commit any intended changes
+      - name: Check for staged/committed changes and create a PR
+        id: git-check
         run: |
           set -euo pipefail
-          if git diff --quiet; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          git add -A
-          git commit -m "chore(ci): automated Go updates, lint and security suppressions/fixes" || true
-          echo "changed=true" >> "$GITHUB_OUTPUT"
-
-      - name: Create Pull Request
-        if: ${{ steps.commit-changes.outputs.changed == 'true' }}
-        uses: peter-evans/create-pull-request@v7.0.8
-        with:
-          token: ${{ env.PR_TOKEN }}
-          commit-message: "chore(ci): automated Go updates & fixes"
-          branch: "ci/auto-update/go-${{ matrix.go-version }}-${{ github.run_id }}"
-          base: ${{ env.DEFAULT_BRANCH }}
-          title: "chore(ci): Automated updates & fixes for Go ${{ matrix.go-version }}"
-          body: |
-            Automated updates and fixes:
-            - Safe dependency upgrades when compatible with runtime Go
-            - Automatic linter fixes (golangci-lint --fix, gofumpt, goimports)
-            - Gosec G115 simple-line suppressions where applicable (// #nosec G115)
-            - Optional AI-assisted patch applied only when validated with git apply --check
-            Review changes before merging.
-          labels: automated
-
-      - name: Final status
-        run: |
-          if [ "${{ steps.commit-changes.outputs.changed }}" = "true" ]; then
-            echo "PR created/updated."
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # If there are changes on the workspace (committed by previous step), create a branch
+          if [ -n "$(git status --porcelain)" ]; then
+            BRANCH="automated/ai-fix-${{ matrix.go-version }}-$(date +%s)"
+            git push -u origin HEAD:"${BRANCH}"
+            echo "branch=${BRANCH}" >> $GITHUB_OUTPUT
+            echo "changes=true" >> $GITHUB_OUTPUT
           else
-            echo "No persistent changes; nothing to PR."
+            echo "changes=false" >> $GITHUB_OUTPUT
           fi
+
+      - name: Create Pull Request for dependency updates / AI fixes
+        if: steps.git-check.outputs.changes == 'true'
+        uses: peter-evans/create-pull-request@v7.0.7
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+          branch: ${{ steps.git-check.outputs.branch }}
+          title: "chore(ai): Apply AI-suggested fixes (Go ${ { matrix.go-version } })"
+          commit-message: "chore(ai): automated AI-suggested fixes for Go ${ { matrix.go-version } }"
+          body: |
+            This automated PR contains AI-suggested fixes produced by the OpenRouter model `${{ env.AI_MODEL }}`.
+            Please review the changes, run tests, and merge if acceptable.
+
