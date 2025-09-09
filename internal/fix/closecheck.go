@@ -89,11 +89,11 @@ func main() {
 		if changed {
 			newSrc := strings.Join(lines, "\n")
 			if formatted, ferr := format.Source([]byte(newSrc)); ferr == nil {
-				if werr := os.WriteFile(path, formatted, 0644); werr != nil {
+				if werr := os.WriteFile(path, formatted, 0o644); werr != nil {
 					fmt.Fprintf(os.Stderr, "write error for %s: %v\n", path, werr)
 				}
 			} else {
-				if werr := os.WriteFile(path, []byte(newSrc), 0644); werr != nil {
+				if werr := os.WriteFile(path, []byte(newSrc), 0o644); werr != nil {
 					fmt.Fprintf(os.Stderr, "write error for %s: %v\n", path, werr)
 				}
 			}
@@ -101,7 +101,6 @@ func main() {
 
 		return nil
 	})
-
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "WalkDir failed: %v\n", err)
 		os.Exit(1)

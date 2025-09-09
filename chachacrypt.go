@@ -206,13 +206,21 @@ func encryptFile(inputFile, outputFile, password string) error {
 	if err != nil {
 		return fmt.Errorf("error opening input file: %w", err)
 	}
-	defer inFile.Close()
+	defer func() {
+		if err := inFile.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close resource: %v\n", err)
+		}
+	}()
 
 	outFile, err := os.Create(outputFile)
 	if err != nil {
 		return fmt.Errorf("error creating output file: %w", err)
 	}
-	defer outFile.Close()
+	defer func() {
+		if err := outFile.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close resource: %v\n", err)
+		}
+	}()
 
 	if _, err := outFile.Write(salt); err != nil {
 		return fmt.Errorf("error writing salt: %w", err)
@@ -274,13 +282,21 @@ func decryptFile(inputFile, outputFile, password string) error {
 	if err != nil {
 		return fmt.Errorf("error opening input file: %w", err)
 	}
-	defer inFile.Close()
+	defer func() {
+		if err := inFile.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close resource: %v\n", err)
+		}
+	}()
 
 	outFile, err := os.Create(outputFile)
 	if err != nil {
 		return fmt.Errorf("error creating output file: %w", err)
 	}
-	defer outFile.Close()
+	defer func() {
+		if err := outFile.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close resource: %v\n", err)
+		}
+	}()
 
 	salt := make([]byte, config.SaltSize)
 	if _, err := io.ReadFull(inFile, salt); err != nil {
