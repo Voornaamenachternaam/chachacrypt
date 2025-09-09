@@ -14,10 +14,10 @@ if [ -z "${OPENROUTER_API_KEY:-}" ]; then
   exit 1
 fi
 
-# Ensure jq
 if ! command -v jq >/dev/null 2>&1; then
   if command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get update && sudo apt-get install -y jq
+    sudo apt-get update
+    sudo apt-get install -y jq
   else
     echo "jq required but not available; aborting." >&2
     exit 1
@@ -26,7 +26,7 @@ fi
 
 REPAIR_DIFF=$( [ -f repair.diff ] && sed -n '1,4000p' repair.diff | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g' || echo "" )
 
-SYSTEM_PROMPT="You are an expert Go developer. Produce a unified patch (git diff/patch format) that fixes repository issues. Output only the patch starting with 'diff --git'. If no changes are required, reply with 'NO_CHANGE'. Keep changes minimal and correct."
+SYSTEM_PROMPT="You are an expert Go developer. Produce a unified patch (git diff/patch format) that fixes the repository issues. Output only the patch starting with 'diff --git'. If no changes are required, reply with 'NO_CHANGE'. Keep changes minimal and correct."
 
 MODEL="${AI_MODEL:-tngtech/deepseek-r1t2-chimera:free}"
 
@@ -59,7 +59,6 @@ while [ $i -lt $MAX ]; do
   fi
 done
 
-# Extract text content across common response shapes
 if jq -e '.choices[0].message.content' "$RESPONSE_FILE" >/dev/null 2>&1; then
   jq -r '.choices[0].message.content' "$RESPONSE_FILE" > ai-response.txt
 elif jq -e '.result[0].content[0].text' "$RESPONSE_FILE" >/dev/null 2>&1; then
@@ -69,12 +68,10 @@ else
   exit 1
 fi
 
-# Save only the unified diff section
 sed -n '/^diff --git /,$p' ai-response.txt > ai.patch || true
 
 if [ -s ai.patch ]; then
-  # Do not apply here; the workflow validates & applies safely.
-  echo "AI patch generated."
+  echo "AI patch created (ai.patch)."
 else
   echo "NO_PATCH returned by AI or patch empty"
 fi
