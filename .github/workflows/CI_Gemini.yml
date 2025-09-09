@@ -39,7 +39,7 @@ jobs:
       - name: Run AI-powered refactoring for dependency compatibility
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          AI_MODEL: "deepseek/deepseek-r1:free"
+          AI_MODEL: "tngtech/deepseek-r1t2-chimera:free"
         run: |
           chmod +x ./.github/scripts/ai_refactor.sh
           ./.github/scripts/ai_refactor.sh dependencies https://openrouter.ai/api/v1/chat/completions
