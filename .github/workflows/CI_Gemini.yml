@@ -1,4 +1,4 @@
-name: Go Automated Updates
+name: CI_Gemini
 
 on:
   workflow_dispatch:
