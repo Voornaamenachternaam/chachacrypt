@@ -10,7 +10,7 @@ permissions:
   pull-requests: write
 
 env:
-  DEFAULT_AI_MODEL: qwen/qwen3-coder:free
+  DEFAULT_AI_MODEL: tngtech/deepseek-r1t2-chimera:free
   DEFAULT_BRANCH: main
 
 jobs:
