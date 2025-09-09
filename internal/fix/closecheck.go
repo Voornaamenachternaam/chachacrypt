@@ -6,23 +6,23 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
-
-var deferCloseRe = regexp.MustCompile(`(?m)^(?P<indent>\s*)defer\s+(?P<expr>.+?)\s*\.\s*Close\s*\(\s*\)\s*(?P<comment>//.*)?$`)
 
 func main() {
 	start := "."
 	if len(os.Args) > 1 {
 		start = os.Args[1]
 	}
-	filepath.WalkDir(start, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
+
+	err := filepath.WalkDir(start, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			fmt.Fprintf(os.Stderr, "walk error for %s: %v\n", path, walkErr)
 			return nil
 		}
+		// skip directories and non-go files
 		if d.IsDir() {
-			// Skip vendor and the internal fixer itself
+			// skip vendor and this internal fixer directory
 			if d.Name() == "vendor" {
 				return filepath.SkipDir
 			}
@@ -31,39 +31,79 @@ func main() {
 		if !strings.HasSuffix(path, ".go") {
 			return nil
 		}
-		// Do not modify files under internal/fix (avoid modifying this tool)
-		if strings.HasPrefix(filepath.Clean(path), filepath.Clean("internal/fix")) {
+		// do not modify files under internal/fix
+		cleanPath := filepath.Clean(path)
+		if strings.HasPrefix(cleanPath, filepath.Clean("internal/fix")) {
 			return nil
 		}
+
 		data, rerr := os.ReadFile(path)
 		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "read error for %s: %v\n", path, rerr)
 			return nil
 		}
 		src := string(data)
-		newSrc := deferCloseRe.ReplaceAllStringFunc(src, func(m string) string {
-			sub := deferCloseRe.FindStringSubmatch(m)
-			if len(sub) < 3 {
-				return m
+		lines := strings.Split(src, "\n")
+		changed := false
+
+		for i, line := range lines {
+			trim := strings.TrimSpace(line)
+			if !strings.HasPrefix(trim, "defer ") || !strings.Contains(trim, ".Close()") {
+				continue
 			}
-			indent := sub[1]
-			expr := strings.TrimSpace(sub[2])
+
+			// preserve inline comment if present
 			comment := ""
-			if len(sub) >= 4 {
-				comment = sub[3]
+			cidx := strings.Index(line, "//")
+			lineNoComment := line
+			if cidx >= 0 {
+				comment = line[cidx:]
+				lineNoComment = line[:cidx]
 			}
-			// Build replacement preserving indentation and comment
+
+			// find ".Close(" index in the non-comment portion
+			closeIdx := strings.Index(lineNoComment, ".Close(")
+			if closeIdx == -1 {
+				continue
+			}
+
+			// find "defer" index to preserve indentation
+			defIdx := strings.Index(lineNoComment, "defer")
+			if defIdx == -1 {
+				continue
+			}
+
+			indent := lineNoComment[:defIdx]
+			exprPart := lineNoComment[defIdx+len("defer") : closeIdx]
+			expr := strings.TrimSpace(exprPart)
+			if expr == "" {
+				continue
+			}
+
+			// build replacement: defer func() { if err := <expr>.Close(); err != nil { fmt.Fprintf(os.Stderr, "...", err) } }() <comment>
 			rep := fmt.Sprintf("%sdefer func() { if err := %s.Close(); err != nil { fmt.Fprintf(os.Stderr, \"warning: failed to close resource: %%v\\n\", err) } }() %s", indent, expr, comment)
-			return rep
-		})
-		if newSrc != src {
-			// try to format
+			lines[i] = rep
+			changed = true
+		}
+
+		if changed {
+			newSrc := strings.Join(lines, "\n")
 			if formatted, ferr := format.Source([]byte(newSrc)); ferr == nil {
-				_ = os.WriteFile(path, formatted, 0o644)
+				if werr := os.WriteFile(path, formatted, 0644); werr != nil {
+					fmt.Fprintf(os.Stderr, "write error for %s: %v\n", path, werr)
+				}
 			} else {
-				// fallback: write unformatted (should rarely happen)
-				_ = os.WriteFile(path, []byte(newSrc), 0o644)
+				if werr := os.WriteFile(path, []byte(newSrc), 0644); werr != nil {
+					fmt.Fprintf(os.Stderr, "write error for %s: %v\n", path, werr)
+				}
 			}
 		}
+
 		return nil
 	})
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "WalkDir failed: %v\n", err)
+		os.Exit(1)
+	}
 }
