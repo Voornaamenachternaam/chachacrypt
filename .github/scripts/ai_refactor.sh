@@ -28,7 +28,7 @@ REPAIR_DIFF=$( [ -f repair.diff ] && sed -n '1,2000p' repair.diff | sed 's/"/\\"
 
 SYSTEM_PROMPT="You are an expert Go developer. Produce a unified patch (git diff/patch format) that fixes the repository issues. Output only the patch starting with 'diff --git'. If no changes are required, reply with 'NO_CHANGE'."
 
-PAYLOAD=$(jq -n --arg model "${AI_MODEL:-qwen/qwen3-coder:free}" --arg system "$SYSTEM_PROMPT" --arg repair "$REPAIR_DIFF" '{
+PAYLOAD=$(jq -n --arg model "${AI_MODEL:-tngtech/deepseek-r1t2-chimera:free}" --arg system "$SYSTEM_PROMPT" --arg repair "$REPAIR_DIFF" '{
   model: $model,
   messages: [
     {role: "system", content: $system},
