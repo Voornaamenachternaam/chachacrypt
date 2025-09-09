@@ -38,20 +38,17 @@ ERR_FILES=$(jq -r '.Issues[] | select(.FromLinter=="errcheck") | .Pos.Filename' 
 
 if [ -z "$ERR_FILES" ]; then
   echo "No errcheck issues detected."
-  exit 0
-fi
-
-for f in $ERR_FILES; do
-  if [ ! -f "$f" ]; then
-    continue
-  fi
-  perl -0777 -pe 's/defer\s+([A-Za-z0-9_]+)\.Close\(\)/defer closeFile($1)/g' -i "$f"
-done
-
-PKG_NAME=$(awk '/^package /{print $2; exit}' $(git ls-files '*.go' | head -n1) 2>/dev/null || echo "main")
-HELPER_FILE="zz_close_helper.go"
-if ! grep -q 'func closeFile(' "$HELPER_FILE" 2>/dev/null; then
-  cat > "$HELPER_FILE" <<EOF
+else
+  for f in $ERR_FILES; do
+    if [ ! -f "$f" ]; then
+      continue
+    fi
+    perl -0777 -pe 's/defer\s+([A-Za-z0-9_]+)\.Close\(\)/defer closeFile($1)/g' -i "$f"
+    DIR=$(dirname "$f")
+    PKG_NAME=$(awk '/^package /{print $2; exit}' "$f" 2>/dev/null || echo "main")
+    HELPER_FILE="$DIR/zz_close_helper.go"
+    if ! grep -q 'func closeFile(' "$HELPER_FILE" 2>/dev/null; then
+      cat > "$HELPER_FILE" <<EOF
 package ${PKG_NAME}
 
 import (
@@ -68,7 +65,9 @@ func closeFile(f *os.File) {
 	}
 }
 EOF
-  git add "$HELPER_FILE"
+      git add "$HELPER_FILE"
+    fi
+  done
 fi
 
 if command -v goimports >/dev/null 2>&1; then
@@ -77,5 +76,5 @@ fi
 
 if [ -n "$(git status --porcelain)" ]; then
   git add -A
-  git commit -m "chore(ci): automated errcheck close fixe s" || true
+  git commit -m "chore(ci): automated errcheck close fixes" || true
 fi
