@@ -77,5 +77,5 @@ fi
 
 if [ -n "$(git status --porcelain)" ]; then
   git add -A
-  git commit -m "chore(ci): automated errcheck() close fixes" || true
+  git commit -m "chore(ci): automated errcheck close fixe s" || true
 fi
