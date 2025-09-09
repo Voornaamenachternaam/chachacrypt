@@ -1,0 +1,140 @@
+{
+	"Golang errors": {},
+	"Issues": [
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "190",
+				"url": "https://cwe.mitre.org/data/definitions/190.html"
+			},
+			"rule_id": "G115",
+			"details": "integer overflow conversion int -\u003e uint8",
+			"file": "/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go",
+			"code": "50: \t\tKeyMemory:  defaultKeyMemory,\n51: \t\tKeyThreads: uint8(threads),\n52: \t\tChunkSize:  defaultChunkSize,\n",
+			"line": "51",
+			"column": "20",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "190",
+				"url": "https://cwe.mitre.org/data/definitions/190.html"
+			},
+			"rule_id": "G115",
+			"details": "integer overflow conversion int -\u003e uint32",
+			"file": "/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go",
+			"code": "352: \t}\n353: \treturn uint32(n), nil\n354: }\n",
+			"line": "353",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go",
+			"code": "290: \n291: \toutFile, err := os.Create(outputFile)\n292: \tif err != nil {\n",
+			"line": "291",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go",
+			"code": "280: \n281: \tinFile, err := os.Open(inputFile)\n282: \tif err != nil {\n",
+			"line": "281",
+			"column": "17",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go",
+			"code": "214: \n215: \toutFile, err := os.Create(outputFile)\n216: \tif err != nil {\n",
+			"line": "215",
+			"column": "18",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go",
+			"code": "204: \n205: \tinFile, err := os.Open(inputFile)\n206: \tif err != nil {\n",
+			"line": "205",
+			"column": "17",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/home/runner/work/chachacrypt/chachacrypt/internal/fix/closecheck.go",
+			"code": "95: \t\t\t} else {\n96: \t\t\t\tif werr := os.WriteFile(path, []byte(newSrc), 0o644); werr != nil {\n97: \t\t\t\t\tfmt.Fprintf(os.Stderr, \"write error for %s: %v\\n\", path, werr)\n",
+			"line": "96",
+			"column": "16",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "276",
+				"url": "https://cwe.mitre.org/data/definitions/276.html"
+			},
+			"rule_id": "G306",
+			"details": "Expect WriteFile permissions to be 0600 or less",
+			"file": "/home/runner/work/chachacrypt/chachacrypt/internal/fix/closecheck.go",
+			"code": "91: \t\t\tif formatted, ferr := format.Source([]byte(newSrc)); ferr == nil {\n92: \t\t\t\tif werr := os.WriteFile(path, formatted, 0o644); werr != nil {\n93: \t\t\t\t\tfmt.Fprintf(os.Stderr, \"write error for %s: %v\\n\", path, werr)\n",
+			"line": "92",
+			"column": "16",
+			"nosec": false,
+			"suppressions": null
+		}
+	],
+	"Stats": {
+		"files": 2,
+		"lines": 473,
+		"nosec": 0,
+		"found": 8
+	},
+	"GosecVersion": "dev"
+}
