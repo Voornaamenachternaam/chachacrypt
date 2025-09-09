@@ -26,9 +26,9 @@ fi
 
 REPAIR_DIFF=$( [ -f repair.diff ] && sed -n '1,2000p' repair.diff | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g' || echo "" )
 
-SYSTEM="You are an expert Go developer. Produce a unified patch (git diff/patch format) that fixes the repository issues. Output only the patch starting with 'diff --git'. If no changes are required, reply with 'NO_CHANGE'."
+SYSTEM_PROMPT="You are an expert Go developer. Produce a unified patch (git diff/patch format) that fixes the repository issues. Output only the patch starting with 'diff --git'. If no changes are required, reply with 'NO_CHANGE'."
 
-PAYLOAD=$(jq -n --arg model "${AI_MODEL:-qwen/qwen3-coder:free}" --arg system "$SYSTEM" --arg repair "$REPAIR_DIFF" '{
+PAYLOAD=$(jq -n --arg model "${AI_MODEL:-qwen/qwen3-coder:free}" --arg system "$SYSTEM_PROMPT" --arg repair "$REPAIR_DIFF" '{
   model: $model,
   messages: [
     {role: "system", content: $system},
@@ -70,11 +70,10 @@ if [ -s ai.patch ]; then
     git apply ai.patch
     git add -A
     git commit -m "chore(ai): apply AI patch" || true
-    echo "ai_patch_applied=true"
   else
     echo "ai.patch failed git apply --check" >&2
     exit 1
   fi
 else
-  echo "NO_PATCH returned by AI or patch empty"
+  echo "NO_PATCH returned by AI or patch  empty"
 fi
