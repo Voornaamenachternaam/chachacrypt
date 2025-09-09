@@ -231,6 +231,7 @@ jobs:
         with:
           token: ${{ secrets.GH_TOKEN }}
           branch: ${{ steps.create_branch.outputs.branch }}
+          base: ${{ env.DEFAULT_BRANCH }}
           title: "chore(ci): automated lint fixes and AI suggestions (Go ${{ matrix.go-version }})"
           body: |
             This PR contains deterministic lint fixes and AI-suggested patches where needed.
