@@ -2,23 +2,7 @@
 set -euo pipefail
 
 if ! command -v jq >/dev/null 2>&1; then
-  if command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get update
-    sudo apt-get install -y jq
-  else
-    echo "jq required but not available; aborting." >&2
-    exit 1
-  fi
-fi
-
-if ! command -v git >/dev/null 2>&1; then
-  echo "git required but not available; aborting." >&2
-  exit 1
-fi
-
-if ! command -v goimports >/dev/null 2>&1; then
-  GO111MODULE=on go install golang.org/x/tools/cmd/goimports@latest
-  echo "$(go env GOPATH)/bin" >> $GITHUB_PATH || true
+  sudo apt-get update && sudo apt-get install -y jq
 fi
 
 TMPDIR=$(mktemp -d)
@@ -36,27 +20,23 @@ fi
 
 ERR_FILES=$(jq -r '.Issues[] | select(.FromLinter=="errcheck") | .Pos.Filename' "$TMPDIR/gc_output.json" 2>/dev/null | sort -u || true)
 
-if [ -z "$ERR_FILES" ]; then
-  echo "No errcheck issues detected."
-else
+if [ -n "$ERR_FILES" ]; then
   for f in $ERR_FILES; do
-    if [ ! -f "$f" ]; then
-      continue
-    fi
-    perl -0777 -pe 's/defer\s+([A-Za-z0-9_]+)\.Close\(\)/defer closeFile($1)/g' -i "$f"
+    [ -f "$f" ] || continue
+    PACKAGE=$(awk '/^package /{print $2; exit}' "$f")
+    perl -0777 -pe 's/defer\s+([A-Za-z0-9_]+)\.Close\(\)/defer safeClose(\1)/g' -i "$f"
     DIR=$(dirname "$f")
-    PKG_NAME=$(awk '/^package /{print $2; exit}' "$f" 2>/dev/null || echo "main")
-    HELPER_FILE="$DIR/zz_close_helper.go"
-    if ! grep -q 'func closeFile(' "$HELPER_FILE" 2>/dev/null; then
+    HELPER_FILE="$DIR/zz_safe_close.go"
+    if ! grep -q 'func safeClose(' "$HELPER_FILE" 2>/dev/null; then
       cat > "$HELPER_FILE" <<EOF
-package ${PKG_NAME}
+package $PACKAGE
 
 import (
 	"fmt"
 	"os"
 )
 
-func closeFile(f *os.File) {
+func safeClose(f *os.File) {
 	if f == nil {
 		return
 	}
@@ -70,11 +50,9 @@ EOF
   done
 fi
 
-if command -v goimports >/dev/null 2>&1; then
-  find . -name '*.go' -not -path "./vendor/*" -print0 | xargs -0 -n1 goimports -w || true
-fi
+find . -name '*.go' -not -path "./vendor/*" -print0 | xargs -0 goimports -w || true
 
 if [ -n "$(git status --porcelain)" ]; then
   git add -A
-  git commit -m "chore(ci): automated errcheck close fixes" || true
+  git commit -m "chore(ci): deterministic errcheck safeClose fixes" || true
 fi
