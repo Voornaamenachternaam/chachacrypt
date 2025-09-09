@@ -21,7 +21,7 @@ jobs:
 
       - name: Setup Go environment
         id: setup-go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: 'stable'
           check-latest: true
