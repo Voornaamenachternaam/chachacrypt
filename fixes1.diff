@@ -1,0 +1,82 @@
+diff --git a/chachacrypt.go b/chachacrypt.go
+index abcdef1..1234567 100644
+--- a/chachacrypt.go
++++ b/chachacrypt.go
+@@ -48,7 +48,11 @@ func NewEncryptor(threads int) *Encryptor {
+ 	return &Encryptor{
+ 		Time:       defaultTime,
+ 		KeyMemory:  defaultKeyMemory,
+-		KeyThreads: uint8(threads),
++		KeyThreads: func() uint8 {
++			if threads < 0 || threads > 255 { return 1 }
++			return uint8(threads)
++		}(),
+ 		ChunkSize:  defaultChunkSize,
+ 	}
+ }
+@@ -202,7 +206,7 @@ func encryptFile(inputFile, outputFile string, key []byte, e *Encryptor) error {
+ 	var wg sync.WaitGroup
+ 	defer wg.Wait()
+ 
+-	inFile, err := os.Open(inputFile)
++	inFile, err := os.OpenFile(inputFile, os.O_RDONLY, 0)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -212,7 +216,7 @@ func encryptFile(inputFile, outputFile string, key []byte, e *Encryptor) error {
+ 		return fmt.Errorf("input file is not regular")
+ 	}
+ 
+-	outFile, err := os.Create(outputFile)
++	outFile, err := os.OpenFile(outputFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -278,7 +282,7 @@ func decryptFile(inputFile, outputFile string, key []byte, d *Decryptor) error {
+ 	var wg sync.WaitGroup
+ 	defer wg.Wait()
+ 
+-	inFile, err := os.Open(inputFile)
++	inFile, err := os.OpenFile(inputFile, os.O_RDONLY, 0)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -288,7 +292,7 @@ func decryptFile(inputFile, outputFile string, key []byte, d *Decryptor) error {
+ 		return fmt.Errorf("input file is not regular")
+ 	}
+ 
+-	outFile, err := os.Create(outputFile)
++	outFile, err := os.OpenFile(outputFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -350,6 +354,9 @@ func readChunkSize(r io.Reader) (uint32, error) {
+ 	if err != nil {
+ 		return 0, err
+ 	}
++	if n < 0 {
++		return 0, fmt.Errorf("invalid chunk size: negative value %d", n)
++	}
+ 	return uint32(n), nil
+ }
+ 
+diff --git a/internal/fix/closecheck.go b/internal/fix/closecheck.go
+index ghijklm..nopqrst 100644
+--- a/internal/fix/closecheck.go
++++ b/internal/fix/closecheck.go
+@@ -89,11 +89,11 @@ func fixFile(path string, info os.FileInfo, err error) error {
+ 			if !bytes.Equal(src, []byte(newSrc)) {
+ 				// Try to format if possible
+ 				if formatted, ferr := format.Source([]byte(newSrc)); ferr == nil {
+-					if werr := os.WriteFile(path, formatted, 0o644); werr != nil {
++					if werr := os.WriteFile(path, formatted, 0o600); werr != nil {
+ 						fmt.Fprintf(os.Stderr, "write error for %s: %v\n", path, werr)
+ 					}
+ 				} else {
+-					if werr := os.WriteFile(path, []byte(newSrc), 0o644); werr != nil {
++					if werr := os.WriteFile(path, []byte(newSrc), 0o600); werr != nil {
+ 						fmt.Fprintf(os.Stderr, "write error for %s: %v\n", path, werr)
+ 					}
+ 				}
+```
+
