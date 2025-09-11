@@ -1,15 +1,14 @@
 diff --git a/chachacrypt.go b/chachacrypt.go
-index 8322f73..3a30cca 100644
 --- a/chachacrypt.go
 +++ b/chachacrypt.go
-@@ -206,13 +206,21 @@ func encryptFile(inputFile, outputFile, password string) error {
+@@ -206,13 +206,21 @@
  	if err != nil {
  		return fmt.Errorf("error opening input file: %w", err)
  	}
 -	defer inFile.Close()
 +	defer func() {
 +		if err := inFile.Close(); err != nil {
-+			fmt.Fprintf(os.Stderr, "warning: failed to close resource: %v\n", err)
++			fmt.Fprintf(os.Stderr, "warning: failed to close input file: %v\n", err)
 +		}
 +	}()
  
@@ -20,20 +19,20 @@ index 8322f73..3a30cca 100644
 -	defer outFile.Close()
 +	defer func() {
 +		if err := outFile.Close(); err != nil {
-+			fmt.Fprintf(os.Stderr, "warning: failed to close resource: %v\n", err)
++			fmt.Fprintf(os.Stderr, "warning: failed to close output file: %v\n", err)
 +		}
 +	}()
  
  	if _, err := outFile.Write(salt); err != nil {
  		return fmt.Errorf("error writing salt: %w", err)
-@@ -274,13 +282,21 @@ func decryptFile(inputFile, outputFile, password string) error {
+@@ -274,13 +282,21 @@
  	if err != nil {
  		return fmt.Errorf("error opening input file: %w", err)
  	}
 -	defer inFile.Close()
 +	defer func() {
 +		if err := inFile.Close(); err != nil {
-+			fmt.Fprintf(os.Stderr, "warning: failed to close resource: %v\n", err)
++			fmt.Fprintf(os.Stderr, "warning: failed to close input file: %v\n", err)
 +		}
 +	}()
  
@@ -44,17 +43,16 @@ index 8322f73..3a30cca 100644
 -	defer outFile.Close()
 +	defer func() {
 +		if err := outFile.Close(); err != nil {
-+			fmt.Fprintf(os.Stderr, "warning: failed to close resource: %v\n", err)
++			fmt.Fprintf(os.Stderr, "warning: failed to close output file: %v\n", err)
 +		}
 +	}()
  
  	salt := make([]byte, config.SaltSize)
  	if _, err := io.ReadFull(inFile, salt); err != nil {
 diff --git a/internal/fix/closecheck.go b/internal/fix/closecheck.go
-index ad77144..eca669b 100644
 --- a/internal/fix/closecheck.go
 +++ b/internal/fix/closecheck.go
-@@ -89,11 +89,11 @@ func main() {
+@@ -89,11 +89,11 @@
  		if changed {
  			newSrc := strings.Join(lines, "\n")
  			if formatted, ferr := format.Source([]byte(newSrc)); ferr == nil {
@@ -68,7 +66,7 @@ index ad77144..eca669b 100644
  					fmt.Fprintf(os.Stderr, "write error for %s: %v\n", path, werr)
  				}
  			}
-@@ -101,7 +101,6 @@ func main() {
+@@ -101,7 +101,6 @@
  
  		return nil
  	})
