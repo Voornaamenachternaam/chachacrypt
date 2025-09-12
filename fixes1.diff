@@ -1,0 +1,85 @@
+diff --git a/chachacrypt/chachacrypt.go b/chachacrypt/chachacrypt.go
+--- a/chachacrypt/chachacrypt.go
++++ b/chachacrypt/chachacrypt.go
+@@ -48,7 +48,11 @@
+ 		KeyTime:    defaultKeyTime,
+ 		Salt:       salt,
+ 		KeyMemory:  defaultKeyMemory,
+-		KeyThreads: uint8(threads),
++		KeyThreads: func() uint8 {
++			if threads < 0 || threads > 255 { return 1 }
++			return uint8(threads)
++		}(),
+ 		ChunkSize:  defaultChunkSize,
+ 	}
+ 
+ 	return params
+@@ -205,7 +209,7 @@
+ 
+ func encryptFile(inputFile, outputFile string, key []byte) error {
+ 
+-	inFile, err := os.Open(inputFile)
++	inFile, err := os.Open(filepath.Clean(inputFile))
+ 	if err != nil {
+ 		return fmt.Errorf("error opening input file: %w", err)
+ 	}
+@@ -215,7 +219,7 @@
+ 		return fmt.Errorf("error getting file info: %w", err)
+ 	}
+ 
+-	outFile, err := os.Create(outputFile)
++	outFile, err := os.Create(filepath.Clean(outputFile))
+ 	if err != nil {
+ 		return fmt.Errorf("error creating output file: %w", err)
+ 	}
+@@ -281,7 +285,7 @@
+ 
+ func decryptFile(inputFile, outputFile string, key []byte) error {
+ 
+-	inFile, err := os.Open(inputFile)
++	inFile, err := os.Open(filepath.Clean(inputFile))
+ 	if err != nil {
+ 		return fmt.Errorf("error opening input file: %w", err)
+ 	}
+@@ -291,7 +295,7 @@
+ 		return fmt.Errorf("error reading header: %w", err)
+ 	}
+ 
+-	outFile, err := os.Create(outputFile)
++	outFile, err := os.Create(filepath.Clean(outputFile))
+ 	if err != nil {
+ 		return fmt.Errorf("error creating output file: %w", err)
+ 	}
+@@ -350,6 +354,9 @@
+ 	if err != nil {
+ 		return 0, fmt.Errorf("error hashing password: %w", err)
+ 	}
++	if n < 0 || n > math.MaxUint32 {
++		return 0, fmt.Errorf("generated key size exceeds uint32 maximum")
++	}
+ 	return uint32(n), nil
+ }
+ 
+diff --git a/chachacrypt/internal/fix/closecheck.go b/chachacrypt/internal/fix/closecheck.go
+--- a/chachacrypt/internal/fix/closecheck.go
++++ b/chachacrypt/internal/fix/closecheck.go
+@@ -89,7 +89,7 @@
+ 			if fix {
+ 				newSrc := applyFixes(content, fixes)
+ 				if formatted, ferr := format.Source([]byte(newSrc)); ferr == nil {
+-					if werr := os.WriteFile(path, formatted, 0o644); werr != nil {
++					if werr := os.WriteFile(path, formatted, 0o600); werr != nil {
+ 						fmt.Fprintf(os.Stderr, "write error for %s: %v\n", path, werr)
+ 					}
+ 				} else {
+@@ -93,7 +93,7 @@
+ 						fmt.Fprintf(os.Stderr, "write error for %s: %v\n", path, werr)
+ 					}
+ 				} else {
+-					if werr := os.WriteFile(path, []byte(newSrc), 0o644); werr != nil {
++					if werr := os.WriteFile(path, []byte(newSrc), 0o600); werr != nil {
+ 						fmt.Fprintf(os.Stderr, "write error for %s: %v\n", path, werr)
+ 					}
+ 				}
+```
+
