@@ -1,0 +1,84 @@
+diff --git a/chachacrypt/chachacrypt.go b/chachacrypt/chachacrypt.go
+index abcdef1..1234567 100644
+--- a/chachacrypt/chachacrypt.go
++++ b/chachacrypt/chachacrypt.go
+@@ -48,6 +48,9 @@ func NewConfig(threads int) Config {
+ 	if threads < 1 {
+ 		threads = runtime.NumCPU()
+ 	}
++	if threads > 255 {
++		threads = 255
++	}
+ 	return Config{
+ 		KeyMemory:  defaultKeyMemory,
+ 		KeyThreads: uint8(threads),
+@@ -202,7 +205,8 @@ func encryptFile(inputFile, outputFile string, config Config) error {
+ 		return fmt.Errorf("input and output files must be different")
+ 	}
+ 
+-	inFile, err := os.Open(inputFile)
++	cleanInput := filepath.Clean(inputFile)
++	inFile, err := os.Open(cleanInput)
+ 	if err != nil {
+ 		return fmt.Errorf("error opening input file: %w", err)
+ 	}
+@@ -212,7 +216,8 @@ func encryptFile(inputFile, outputFile string, config Config) error {
+ 		return fmt.Errorf("error getting input file info: %w", err)
+ 	}
+ 
+-	outFile, err := os.Create(outputFile)
++	cleanOutput := filepath.Clean(outputFile)
++	outFile, err := os.OpenFile(cleanOutput, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+ 	if err != nil {
+ 		return fmt.Errorf("error creating output file: %w", err)
+ 	}
+@@ -278,7 +283,8 @@ func decryptFile(inputFile, outputFile string, config Config) error {
+ 		return fmt.Errorf("input and output files must be different")
+ 	}
+ 
+-	inFile, err := os.Open(inputFile)
++	cleanInput := filepath.Clean(inputFile)
++	inFile, err := os.Open(cleanInput)
+ 	if err != nil {
+ 		return fmt.Errorf("error opening input file: %w", err)
+ 	}
+@@ -288,7 +294,8 @@ func decryptFile(inputFile, outputFile string, config Config) error {
+ 		return fmt.Errorf("input file is too small to be valid")
+ 	}
+ 
+-	outFile, err := os.Create(outputFile)
++	cleanOutput := filepath.Clean(outputFile)
++	outFile, err := os.OpenFile(cleanOutput, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+ 	if err != nil {
+ 		return fmt.Errorf("error creating output file: %w", err)
+ 	}
+@@ -350,6 +357,9 @@ func readChunk(r io.Reader, buf []byte) (uint32, error) {
+ 	if err != nil && err != io.EOF {
+ 		return 0, fmt.Errorf("read error: %w", err)
+ 	}
++	if n < 0 {
++		return 0, fmt.Errorf("invalid read count: %d", n)
++	}
+ 	return uint32(n), nil
+ }
+ 
+diff --git a/chachacrypt/internal/fix/closecheck.go b/chachacrypt/internal/fix/closecheck.go
+index ghijklm..nopqrst 100644
+--- a/chachacrypt/internal/fix/closecheck.go
++++ b/chachacrypt/internal/fix/closecheck.go
+@@ -89,11 +89,11 @@ func fixFile(path string) error {
+ 			newSrc = append([]byte("//go:build gosec\n\n"), newSrc...)
+ 		}
+ 		if formatted, ferr := format.Source([]byte(newSrc)); ferr == nil {
+-			if werr := os.WriteFile(path, formatted, 0o644); werr != nil {
++			if werr := os.WriteFile(path, formatted, 0o600); werr != nil {
+ 				fmt.Fprintf(os.Stderr, "write error for %s: %v\n", path, werr)
+ 			}
+ 		} else {
+-			if werr := os.WriteFile(path, []byte(newSrc), 0o644); werr != nil {
++			if werr := os.WriteFile(path, []byte(newSrc), 0o600); werr != nil {
+ 				fmt.Fprintf(os.Stderr, "write error for %s: %v\n", path, werr)
+ 			}
+ 		}
+```
+
