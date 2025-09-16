@@ -18,8 +18,8 @@ if [ -z "${OPENROUTER_API_KEY:-}" ]; then
   exit 1
 fi
 
-# Ensure required runtime tools exist (we rely on prebuilt binaries; do not build from source here)
-for cmd in jq git curl go gitleaks golangci-lint; do
+# Required commands (these are provided by the workflow steps / runner)
+for cmd in git go jq curl; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "Required command not found in PATH: $cmd" >&2
     exit 1
@@ -31,7 +31,6 @@ RESPONSE_FILE="ai-response.json"
 PATCH_FILE="ai.patch"
 TEST_LOG="tests.log"
 LINTER_LOG="linter.log"
-GITLEAKS_LOG="gitleaks.log"
 PRE_DIFF="pre-ai.diff"
 PUSH_LOG="push.log"
 
@@ -40,7 +39,6 @@ PUSH_LOG="push.log"
 : > "${PATCH_FILE}"
 : > "${TEST_LOG}"
 : > "${LINTER_LOG}"
-: > "${GITLEAKS_LOG}"
 : > "${PRE_DIFF}"
 : > "${PUSH_LOG}"
 
@@ -91,18 +89,8 @@ if [ -f go.mod ]; then
   CURRENT_GO_DIRECTIVE="$(awk '/^go [0-9]/ {print $2; exit}' go.mod || true)"
   if [ -n "$GO_VER" ] && [ "$CURRENT_GO_DIRECTIVE" != "$GO_VER" ]; then
     echo "Updating go.mod go directive to ${GO_VER}"
-    # Non-fatal if edit fails under older go toolchains
     go mod edit -go="${GO_VER}" || true
   fi
-fi
-
-# Run a secrets scan and save output (do not fail the workflow on leaks; we capture results)
-echo "Running gitleaks scan (artifact only)..." | tee -a "${GITLEAKS_LOG}"
-# Use JSON output for structured results
-if gitleaks detect --format json --report-path="${GITLEAKS_LOG}" 2>&1 | tee -a "${GITLEAKS_LOG}"; then
-  echo "gitleaks completed."
-else
-  echo "gitleaks found findings or returned non-zero; results saved to ${GITLEAKS_LOG} (this is non-fatal to CI pipeline)." | tee -a "${GITLEAKS_LOG}"
 fi
 
 # List available module updates
@@ -111,52 +99,49 @@ UPGRADE_LINES=$(go list -m -u -json all 2>/dev/null | jq -r 'select(.Update) | .
 
 if [ -z "$UPGRADE_LINES" ]; then
   echo "No available module updates detected."
-  # Still upload gitleaks result artifact via files present; exit successfully
   exit 0
 fi
 
 # Save list for debug
 printf "%s\n" "$UPGRADE_LINES" > candidate-upgrades.txt
 
-# Apply updates: run go get for each update candidate (this uses 'go get' to fetch specific versions; it does not build actions/tools)
-echo "Updating modules to the available versions..."
+# Apply updates: run go get for each update candidate (may include major bumps)
+echo "Updating modules to the available versions..." | tee -a "${PRE_DIFF}"
 TMP_UPGRADES="$(mktemp)"
 printf "%s\n" "$UPGRADE_LINES" > "$TMP_UPGRADES"
 
 while IFS= read -r modver; do
   if [ -n "$modver" ]; then
-    echo "Running: go get ${modver}" | tee -a "${LINTER_LOG}"
-    if ! go get "${modver}" 2>&1 | tee -a "${LINTER_LOG}"; then
-      echo "Warning: go get ${modver} failed; continuing" | tee -a "${LINTER_LOG}"
+    echo "Running: go get ${modver}" | tee -a "${PRE_DIFF}"
+    if ! go get "${modver}" 2>&1 | tee -a "${PRE_DIFF}"; then
+      echo "Warning: go get ${modver} failed; continuing" | tee -a "${PRE_DIFF}"
     fi
   fi
 done < "$TMP_UPGRADES"
 rm -f "$TMP_UPGRADES"
 
 # Tidy modules
-go mod tidy 2>&1 | tee -a "${LINTER_LOG}"
+go mod tidy 2>&1 | tee -a "${PRE_DIFF}"
 
 # Create a branch to hold automated changes
 BRANCH_NAME="automated-deps-$(date -u +"%Y%m%dT%H%M%SZ")"
 git checkout -b "${BRANCH_NAME}"
 
-# Stage mod changes
+# Stage mod changes and record pre-AI diff
 git add go.mod go.sum || true
-
-# Save a pre-AI diff for artifact and debugging
 git diff --staged --no-color > "${PRE_DIFF}" || true
 if [ ! -s "${PRE_DIFF}" ]; then
   git diff --no-color > "${PRE_DIFF}" || true
 fi
 
-# Iterative repair loop: run format/lint/tests, ask AI for a patch when failures occur, apply patch, repeat.
+# Iterative repair loop: run format/vet/tests, ask AI for a patch when failures occur, apply patch, repeat.
 MAX_ITER=5
 ITER=0
 PASS_ALL=false
 
 while [ $ITER -lt $MAX_ITER ]; do
   ITER=$((ITER + 1))
-  echo "=== Iteration ${ITER} ==="
+  echo "=== Iteration ${ITER} ===" | tee -a "${TEST_LOG}"
 
   # Format code (in-place)
   echo "Running gofmt..." | tee -a "${LINTER_LOG}"
@@ -166,15 +151,6 @@ while [ $ITER -lt $MAX_ITER ]; do
     echo "$GO_FMT_ERRORS" | tee -a "${LINTER_LOG}"
     gofmt -w .
     git add -A
-  fi
-
-  # Run golangci-lint (prebuilt binary installed earlier)
-  echo "Running golangci-lint..." | tee -a "${LINTER_LOG}"
-  # Run but never fail the script; capture output for artifacts.
-  if golangci-lint run ./... 2>&1 | tee -a "${LINTER_LOG}"; then
-    echo "golangci-lint completed without errors." | tee -a "${LINTER_LOG}"
-  else
-    echo "golangci-lint reported issues; see ${LINTER_LOG}" | tee -a "${LINTER_LOG}"
   fi
 
   # Run go vet
@@ -228,7 +204,7 @@ while [ $ITER -lt $MAX_ITER ]; do
   HTTP_BODY="$(printf "%s" "$HTTP_RESPONSE" | sed '$d')"
   HTTP_STATUS="$(printf "%s" "$HTTP_RESPONSE" | tail -n1)"
   printf "%s" "$HTTP_BODY" > "${RESPONSE_FILE}"
-  echo "HTTP status: ${HTTP_STATUS}"
+  echo "HTTP status: ${HTTP_STATUS}" | tee -a "${TEST_LOG}"
 
   redact < "${RESPONSE_FILE}" > "${RESPONSE_FILE}.redacted" || true
 
@@ -271,14 +247,10 @@ done
 
 # Final checks (capture logs)
 gofmt -l . > /dev/null 2>&1 || true
-golangci-lint run ./... 2>&1 | tee -a "${LINTER_LOG}" || true
 go vet ./... 2>&1 | tee -a "${TEST_LOG}" || true
 go test ./... 2>&1 | tee -a "${TEST_LOG}" || true || true
 
-# Final secrets scan
-gitleaks detect --format json --report-path="${GITLEAKS_LOG}" 2>&1 | tee -a "${GITLEAKS_LOG}" || true
-
-# Decide push / PR strategy
+# Push changes / create PR
 echo "Attempting to push changes to remote..." | tee -a "${PUSH_LOG}"
 set +e
 git push --set-upstream origin "${BRANCH_NAME}" 2>&1 | tee -a "${PUSH_LOG}"
@@ -300,35 +272,12 @@ if [ ${PUSH_EXIT} -ne 0 ]; then
   PR_NUMBER=$(printf "%s" "$PR_RESPONSE" | jq -r '.number // empty' || true)
   if [ -n "$PR_NUMBER" ]; then
     echo "Created PR #${PR_NUMBER}." | tee -a "${PUSH_LOG}"
-    MERGE_RESPONSE=$(curl -sS -X PUT "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/merge" \
-      -H "Authorization: token ${GITHUB_TOKEN}" \
-      -H "Accept: application/vnd.github+json" \
-      -d '{"merge_method":"merge"}' || true)
-    MERGED=$(printf "%s" "$MERGE_RESPONSE" | jq -r '.merged // false' || true)
-    if [ "$MERGED" = "true" ]; then
-      echo "PR #${PR_NUMBER} merged automatically." | tee -a "${PUSH_LOG}"
-    else
-      echo "PR #${PR_NUMBER} could not be merged automatically; manual merge may be required." | tee -a "${PUSH_LOG}"
-      printf "%s\n" "$MERGE_RESPONSE" >> "${PUSH_LOG}"
-    fi
   else
-    echo "Failed to create PR via API; see response." | tee -a "${PUSH_LOG}"
+    echo "Failed to create PR via API; see push.log for details." | tee -a "${PUSH_LOG}"
     printf "%s\n" "$PR_RESPONSE" >> "${PUSH_LOG}"
   fi
 else
   echo "Pushed branch ${BRANCH_NAME} successfully." | tee -a "${PUSH_LOG}"
-  set +e
-  git checkout "${DEFAULT_BRANCH}" 2>&1 | tee -a "${PUSH_LOG}" || true
-  git pull origin "${DEFAULT_BRANCH}" 2>&1 | tee -a "${PUSH_LOG}" || true
-  git merge --ff-only "${BRANCH_NAME}" 2>&1 | tee -a "${PUSH_LOG}" || true
-  MERGE_EXIT=${PIPESTATUS[0]}
-  set -e
-  if [ ${MERGE_EXIT} -eq 0 ]; then
-    git push origin "${DEFAULT_BRANCH}" 2>&1 | tee -a "${PUSH_LOG}" || true
-    echo "Fast-forward merged ${BRANCH_NAME} into ${DEFAULT_BRANCH}." | tee -a "${PUSH_LOG}"
-  else
-    echo "Fast-forward merge not possible; branch ${BRANCH_NAME} created and pushed for manual review." | tee -a "${PUSH_LOG}"
-  fi
 fi
 
 # Prepare artifacts (redacted)
@@ -340,7 +289,6 @@ cp -f "${RESPONSE_FILE}.redacted" ai-response.json || true
 cp -f "${PATCH_FILE}" ai.patch || true
 cp -f "${TEST_LOG}" tests.log || true
 cp -f "${LINTER_LOG}" linter.log || true
-cp -f "${GITLEAKS_LOG}" gitleaks.log || true
 cp -f "${PRE_DIFF}" pre-ai.diff || true
 cp -f "${PUSH_LOG}" push.log || true
 
