@@ -48,38 +48,58 @@ jobs:
             ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
 
-      - name: Install essentials and build tools
+      - name: Install OS packages (jq, curl, git, ca-certificates)
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y jq curl git build-essential ca-certificates
+          sudo apt-get install -y --no-install-recommends jq curl git ca-certificates unzip
 
-      - name: Install gitleaks (built with runner Go) and golangci-lint (built with runner Go)
+      - name: Install golangci-lint (prebuilt binary v2.4.0)
         run: |
           set -euo pipefail
-          # Ensure module-aware go install and ensure bin directory exists
-          GO_BIN="$(go env GOBIN 2>/dev/null || true)"
-          if [ -z "${GO_BIN}" ]; then
-            GO_BIN="$(go env GOPATH 2>/dev/null)/bin"
-          fi
-          mkdir -p "${GO_BIN}"
-          # Install gitleaks v8.28.0 (built from source by go install)
-          GOFLAGS="" GOBIN="${GO_BIN}" go install github.com/zricethezav/gitleaks/v8.28.0
-          # Install golangci-lint v8 (build from source)
-          GOFLAGS="" GOBIN="${GO_BIN}" go install github.com/golangci/golangci-lint/cmd/golangci-lint@v8.0.0
-          # Ensure binaries are on PATH for subsequent steps
-          sudo mv "${GO_BIN}/gitleaks" /usr/local/bin/gitleaks || true
-          sudo mv "${GO_BIN}/golangci-lint" /usr/local/bin/golangci-lint || true
-          if ! command -v gitleaks >/dev/null 2>&1; then
-            echo "gitleaks installation failed" >&2
+          # Install official prebuilt golangci-lint binary (v2.4.0 supports go1.25)
+          INSTALL_DIR=/usr/local/bin
+          VERSION=v2.4.0
+          TMPDIR=$(mktemp -d)
+          trap 'rm -rf "$TMPDIR"' EXIT
+          curl -fsSL "https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh" -o "$TMPDIR/install_golangci.sh"
+          chmod +x "$TMPDIR/install_golangci.sh"
+          # The installer downloads a prebuilt binary for the requested version; this does not build from source.
+          "$TMPDIR/install_golangci.sh" -b "$INSTALL_DIR" "$VERSION"
+          command -v golangci-lint >/dev/null
+          golangci-lint --version
+
+      - name: Install gitleaks (prebuilt release)
+        run: |
+          set -euo pipefail
+          # Prefer official release binary for gitleaks v8.28.0 (prebuilt), do not build from source.
+          GL_VER="8.28.0"
+          INSTALL_DIR="/usr/local/bin"
+          TMPDIR=$(mktemp -d)
+          trap 'rm -rf "$TMPDIR"' EXIT
+          ASSET_URL="https://github.com/zricethezav/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_x86_64.tar.gz"
+          # Try download with retries
+          n=0
+          until [ $n -ge 5 ]; do
+            if curl -fSL "$ASSET_URL" -o "$TMPDIR/gitleaks.tar.gz"; then
+              break
+            fi
+            n=$((n+1))
+            sleep 2
+          done
+          if [ ! -s "$TMPDIR/gitleaks.tar.gz" ]; then
+            echo "Failed to download gitleaks release asset ${ASSET_URL}" >&2
             exit 1
           fi
-          if ! command -v golangci-lint >/dev/null 2>&1; then
-            echo "golangci-lint installation failed" >&2
+          tar -xzf "$TMPDIR/gitleaks.tar.gz" -C "$TMPDIR"
+          if [ ! -x "$TMPDIR/gitleaks" ]; then
+            echo "gitleaks binary not found in archive" >&2
             exit 1
           fi
+          sudo mv "$TMPDIR/gitleaks" "$INSTALL_DIR/gitleaks"
+          sudo chmod +x "$INSTALL_DIR/gitleaks"
+          command -v gitleaks >/dev/null
           gitleaks version || true
-          golangci-lint --version || true
 
       - name: Ensure script is executable
         run: chmod +x ./.github/scripts/ai_refactor.sh
@@ -88,7 +108,7 @@ jobs:
         id: run_refactor
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           ./.github/scripts/ai_refactor.sh dependencies "${{ env.API_URL }}" "${{ env.AI_MODEL }}"
@@ -105,6 +125,8 @@ jobs:
             tests.log
             linter.log
             gitleaks.log
+            pre-ai.diff
+            push.log
 
       - name: Final status
         if: always()
