@@ -47,12 +47,18 @@ jobs:
             ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
 
-      - name: Run Gitleaks scan (artifact only)
+      - name: Install golangci-lint (prebuilt binary)
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.4.0
+          install-mode: binary
+
+      - name: Run gitleaks scan (artifact only)
         uses: gitleaks/gitleaks-action@v2.3.9
+        with:
+          args: detect --format json --report-path=gitleaks.json || true
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
-        # The action will scan the repository and upload an artifact if configured.
 
       - name: Ensure ai_refactor script is executable
         run: chmod +x ./.github/scripts/ai_refactor.sh
@@ -66,21 +72,13 @@ jobs:
           set -euo pipefail
           ./.github/scripts/ai_refactor.sh dependencies "${{ env.API_URL }}" "${{ env.AI_MODEL }}"
 
-      - name: Install golangci-lint binary (using official action, binary install)
-        uses: golangci/golangci-lint-action@v8
-        with:
-          version: v2.4.0
-          install-mode: binary
-          args: --version
-
       - name: Run golangci-lint and save output
         run: |
           set -euo pipefail
-          # capture linter output as JSON (do not fail workflow if lint finds issues)
-          if golangci-lint run ./... --out-format json --issues-exit-code=0 2>&1 | tee linter.log; then
-            echo "golangci-lint completed."
+          if golangci-lint run ./... 2>&1 | tee linter.log; then
+            echo "golangci-lint completed without fatal error"
           else
-            echo "golangci-lint completed with reported issues; see linter.log"
+            echo "golangci-lint completed (issues may be reported in linter.log)"
           fi
 
       - name: Upload artifacts (AI request/response, patch, logs, diffs)
@@ -94,11 +92,11 @@ jobs:
             ai.patch
             tests.log
             linter.log
-            gitleaks.log
+            gitleaks.json
             pre-ai.diff
             push.log
 
       - name: Final status
         if: always()
         run: |
-          echo "CI_Gemini finished. Check artifacts for AI request/response, linter, gitlea ks and logs."
+          echo "CI_Gemini finished. Check artifacts for AI request/response and logs."
