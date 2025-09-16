@@ -22,6 +22,7 @@ jobs:
     env:
       AI_MODEL: "tngtech/deepseek-r1t2-chimera:free"
       API_URL: "https://openrouter.ai/api/v1/chat/completions"
+      GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -48,36 +49,32 @@ jobs:
             ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
 
-      - name: Install essentials (jq, curl, git) and gitleaks via go install
+      - name: Install essentials and gitleaks (build with local Go)
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y jq curl git
-          # Install gitleaks via 'go install' to avoid brittle tarball download logic
-          GL_VER="v8.28.0"
-          go install github.com/zricethezav/gitleaks/v8@${GL_VER}
-          GOBIN_DIR="$(go env GOPATH 2>/dev/null)/bin"
-          if [ -x "${GOBIN_DIR}/gitleaks" ]; then
-            sudo mv "${GOBIN_DIR}/gitleaks" /usr/local/bin/gitleaks || true
-          else
-            # If GOBIN not set, fallback to GOPATH default location or go env GOBIN
-            GOBIN_DIR="$(go env GOBIN 2>/dev/null || true)"
-            if [ -n "${GOBIN_DIR}" ] && [ -x "${GOBIN_DIR}/gitleaks" ]; then
-              sudo mv "${GOBIN_DIR}/gitleaks" /usr/local/bin/gitleaks || true
-            fi
+          sudo apt-get install -y jq curl git build-essential
+          # Install gitleaks using 'go install' so it is built with runner's Go version
+          GO_BIN="$(go env GOBIN 2>/dev/null || true)"
+          if [ -z "$GO_BIN" ]; then
+            GO_BIN="$(go env GOPATH 2>/dev/null)/bin"
           fi
-          # final sanity check
+          mkdir -p "$GO_BIN"
+          go install github.com/zricethezav/gitleaks/v8@v8.28.0
+          if [ -x "${GO_BIN}/gitleaks" ]; then
+            sudo mv "${GO_BIN}/gitleaks" /usr/local/bin/gitleaks || true
+          fi
           if ! command -v gitleaks >/dev/null 2>&1; then
             echo "gitleaks not found after install" >&2
             exit 1
           fi
           gitleaks version || true
 
-      - name: Install golangci-lint
+      - name: Install golangci-lint (build from source to match toolchain)
         uses: golangci/golangci-lint-action@v8
         with:
           version: v2.1.0
-          install-only: true
+          install-mode: source
 
       - name: Ensure script is executable
         run: chmod +x ./.github/scripts/ai_refactor.sh
@@ -87,7 +84,6 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           set -euo pipefail
           ./.github/scripts/ai_refactor.sh dependencies "${{ env.API_URL }}" "${{ env.AI_MODEL }}"
