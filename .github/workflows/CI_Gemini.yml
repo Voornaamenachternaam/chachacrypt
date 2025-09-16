@@ -48,14 +48,31 @@ jobs:
             ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
 
-      - name: Install essentials (jq, gitleaks)
+      - name: Install essentials (jq, curl, git) and gitleaks via go install
         run: |
+          set -euo pipefail
           sudo apt-get update -y
           sudo apt-get install -y jq curl git
-          # Install gitleaks (binary) for secret scanning
-          GL_VER="8.28.0"
-          curl -sSL "https://github.com/zricethezav/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_x86_64.tar.gz" | tar -xz -C /tmp
-          sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
+          # Install gitleaks via 'go install' to avoid brittle tarball download logic
+          GL_VER="v8.28.0"
+          go install github.com/zricethezav/gitleaks/v8@${GL_VER}
+          GOBIN_DIR="$(go env GOPATH 2>/dev/null)/bin"
+          if [ -x "${GOBIN_DIR}/gitleaks" ]; then
+            sudo mv "${GOBIN_DIR}/gitleaks" /usr/local/bin/gitleaks || true
+          else
+            # If GOBIN not set, fallback to GOPATH default location or go env GOBIN
+            GOBIN_DIR="$(go env GOBIN 2>/dev/null || true)"
+            if [ -n "${GOBIN_DIR}" ] && [ -x "${GOBIN_DIR}/gitleaks" ]; then
+              sudo mv "${GOBIN_DIR}/gitleaks" /usr/local/bin/gitleaks || true
+            fi
+          fi
+          # final sanity check
+          if ! command -v gitleaks >/dev/null 2>&1; then
+            echo "gitleaks not found after install" >&2
+            exit 1
+          fi
+          gitleaks version || true
+
       - name: Install golangci-lint
         uses: golangci/golangci-lint-action@v8
         with:
@@ -70,6 +87,7 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           set -euo pipefail
           ./.github/scripts/ai_refactor.sh dependencies "${{ env.API_URL }}" "${{ env.AI_MODEL }}"
