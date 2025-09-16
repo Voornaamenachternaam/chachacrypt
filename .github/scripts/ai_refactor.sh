@@ -18,6 +18,7 @@ fi
 
 command -v jq >/dev/null 2>&1 || { echo "jq required"; exit 1; }
 command -v gitleaks >/dev/null 2>&1 || { echo "gitleaks required"; exit 1; }
+command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint required"; exit 1; }
 
 REQUEST_FILE="ai-request.json"
 RESPONSE_FILE="ai-response.json"
