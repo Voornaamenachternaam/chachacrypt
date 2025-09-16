@@ -1,0 +1,80 @@
+diff --git a/chachacrypt/chachacrypt.go b/chachacrypt/chachacrypt.go
+index 1234567..abcdefg 100644
+--- a/chachacrypt/chachacrypt.go
++++ b/chachacrypt/chachacrypt.go
+@@ -48,6 +48,9 @@ func NewConfig(iterations, threads int) (*Config, error) {
+ 	if iterations < 1 {
+ 		return nil, errors.New("iterations must be at least 1")
+ 	}
++	if threads < 0 || threads > 255 {
++		return nil, errors.New("threads must be between 0 and 255")
++	}
+ 	return &Config{
+ 		Iterations: iterations,
+ 		KeyMemory:  defaultKeyMemory,
+@@ -202,7 +205,7 @@ func encryptFile(inputFile, outputFile string, config *Config) error {
+ 		return err
+ 	}
+ 
+-	inFile, err := os.Open(inputFile)
++	inFile, err := os.Open(filepath.Clean(inputFile))
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -212,7 +215,7 @@ func encryptFile(inputFile, outputFile string, config *Config) error {
+ 		return fmt.Errorf("file too large")
+ 	}
+ 
+-	outFile, err := os.Create(outputFile)
++	outFile, err := os.Create(filepath.Clean(outputFile))
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -278,7 +281,7 @@ func decryptFile(inputFile, outputFile string, config *Config) error {
+ 		return err
+ 	}
+ 
+-	inFile, err := os.Open(inputFile)
++	inFile, err := os.Open(filepath.Clean(inputFile))
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -288,7 +291,7 @@ func decryptFile(inputFile, outputFile string, config *Config) error {
+ 		return fmt.Errorf("failed to read header: %w", err)
+ 	}
+ 
+-	outFile, err := os.Create(outputFile)
++	outFile, err := os.Create(filepath.Clean(outputFile))
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -350,6 +353,9 @@ func readUint32(r io.Reader) (uint32, error) {
+ 	if err != nil {
+ 		return 0, err
+ 	}
++	if n < 0 || n > math.MaxUint32 {
++		return 0, errors.New("value exceeds uint32 range")
++	}
+ 	return uint32(n), nil
+ }
+ 
+diff --git a/chachacrypt/internal/fix/closecheck.go b/chachacrypt/internal/fix/closecheck.go
+index 89abcde..fghijkl 100644
+--- a/chachacrypt/internal/fix/closecheck.go
++++ b/chachacrypt/internal/fix/closecheck.go
+@@ -89,11 +89,11 @@ func run(path string) error {
+ 			}
+ 
+ 			if formatted, ferr := format.Source([]byte(newSrc)); ferr == nil {
+-				if werr := os.WriteFile(path, formatted, 0o644); werr != nil {
++				if werr := os.WriteFile(path, formatted, 0o600); werr != nil {
+ 					fmt.Fprintf(os.Stderr, "write error for %s: %v\n", path, werr)
+ 				}
+ 			} else {
+-				if werr := os.WriteFile(path, []byte(newSrc), 0o644); werr != nil {
++				if werr := os.WriteFile(path, []byte(newSrc), 0o600); werr != nil {
+ 					fmt.Fprintf(os.Stderr, "write error for %s: %v\n", path, werr)
+ 				}
+ 			}
+```
+
