@@ -22,7 +22,6 @@ jobs:
     env:
       AI_MODEL: "tngtech/deepseek-r1t2-chimera:free"
       API_URL: "https://openrouter.ai/api/v1/chat/completions"
-      GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -48,72 +47,43 @@ jobs:
             ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
 
-      - name: Install OS packages (jq, curl, git, ca-certificates)
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends jq curl git ca-certificates unzip
+      - name: Run Gitleaks scan (artifact only)
+        uses: gitleaks/gitleaks-action@v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
+        # The action will scan the repository and upload an artifact if configured.
 
-      - name: Install golangci-lint (prebuilt binary v2.4.0)
-        run: |
-          set -euo pipefail
-          # Install official prebuilt golangci-lint binary (v2.4.0 supports go1.25)
-          INSTALL_DIR=/usr/local/bin
-          VERSION=v2.4.0
-          TMPDIR=$(mktemp -d)
-          trap 'rm -rf "$TMPDIR"' EXIT
-          curl -fsSL "https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh" -o "$TMPDIR/install_golangci.sh"
-          chmod +x "$TMPDIR/install_golangci.sh"
-          # The installer downloads a prebuilt binary for the requested version; this does not build from source.
-          "$TMPDIR/install_golangci.sh" -b "$INSTALL_DIR" "$VERSION"
-          command -v golangci-lint >/dev/null
-          golangci-lint --version
-
-      - name: Install gitleaks (prebuilt release)
-        run: |
-          set -euo pipefail
-          # Prefer official release binary for gitleaks v8.28.0 (prebuilt), do not build from source.
-          GL_VER="8.28.0"
-          INSTALL_DIR="/usr/local/bin"
-          TMPDIR=$(mktemp -d)
-          trap 'rm -rf "$TMPDIR"' EXIT
-          ASSET_URL="https://github.com/zricethezav/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_x86_64.tar.gz"
-          # Try download with retries
-          n=0
-          until [ $n -ge 5 ]; do
-            if curl -fSL "$ASSET_URL" -o "$TMPDIR/gitleaks.tar.gz"; then
-              break
-            fi
-            n=$((n+1))
-            sleep 2
-          done
-          if [ ! -s "$TMPDIR/gitleaks.tar.gz" ]; then
-            echo "Failed to download gitleaks release asset ${ASSET_URL}" >&2
-            exit 1
-          fi
-          tar -xzf "$TMPDIR/gitleaks.tar.gz" -C "$TMPDIR"
-          if [ ! -x "$TMPDIR/gitleaks" ]; then
-            echo "gitleaks binary not found in archive" >&2
-            exit 1
-          fi
-          sudo mv "$TMPDIR/gitleaks" "$INSTALL_DIR/gitleaks"
-          sudo chmod +x "$INSTALL_DIR/gitleaks"
-          command -v gitleaks >/dev/null
-          gitleaks version || true
-
-      - name: Ensure script is executable
+      - name: Ensure ai_refactor script is executable
         run: chmod +x ./.github/scripts/ai_refactor.sh
 
       - name: Run automated updates + AI refactor
         id: run_refactor
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           set -euo pipefail
           ./.github/scripts/ai_refactor.sh dependencies "${{ env.API_URL }}" "${{ env.AI_MODEL }}"
 
-      - name: Upload artifacts (AI request/response, patch, logs)
+      - name: Install golangci-lint binary (using official action, binary install)
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.4.0
+          install-mode: binary
+          args: --version
+
+      - name: Run golangci-lint and save output
+        run: |
+          set -euo pipefail
+          # capture linter output as JSON (do not fail workflow if lint finds issues)
+          if golangci-lint run ./... --out-format json --issues-exit-code=0 2>&1 | tee linter.log; then
+            echo "golangci-lint completed."
+          else
+            echo "golangci-lint completed with reported issues; see linter.log"
+          fi
+
+      - name: Upload artifacts (AI request/response, patch, logs, diffs)
         if: always()
         uses: actions/upload-artifact@v4.6.2
         with:
@@ -131,4 +101,4 @@ jobs:
       - name: Final status
         if: always()
         run: |
-          echo "CI_Gemini finished. Check artifacts for AI request/response and logs."
+          echo "CI_Gemini finished. Check artifacts for AI request/response, linter, gitlea ks and logs."
