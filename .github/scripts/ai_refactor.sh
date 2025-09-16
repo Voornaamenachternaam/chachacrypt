@@ -91,7 +91,7 @@ if [ -f go.mod ]; then
 fi
 
 # Run pre-send secret scan to catch obvious secrets (artifact only)
-gitleaks protect --no-verify 2>&1 | tee "${GITLEAKS_LOG}" || true
+gitleaks detect --report-path="${GITLEAKS_LOG}" || true
 
 # Find upgrade candidates: list module updates (direct & indirect)
 UPGRADE_LINES=$(go list -m -u -json all 2>/dev/null | jq -r 'select(.Update) | .Path + "@" + .Update.Version' || true)
@@ -103,7 +103,6 @@ fi
 
 # Apply updates: update each module to its Update.Version (which may be a major)
 echo "Updating modules to the latest available versions..."
-# Use a temporary list to ensure safe handling of spaces
 TMP_UPGRADES="$(mktemp)"
 printf "%s\n" "$UPGRADE_LINES" > "$TMP_UPGRADES"
 
@@ -111,7 +110,6 @@ printf "%s\n" "$UPGRADE_LINES" > "$TMP_UPGRADES"
 while IFS= read -r modver; do
   if [ -n "$modver" ]; then
     echo "Running: go get ${modver}"
-    # tolerate individual failures but continue
     if ! go get "${modver}"; then
       echo "Warning: go get ${modver} failed, continuing" >&2
     fi
@@ -131,7 +129,6 @@ git add go.mod go.sum || true
 
 # Capture the post-update diff (this is the delta that will be repaired by AI if needed)
 git diff --staged --no-color > pre-ai.diff || true
-# If there is no staged diff, still compute working tree diff
 if [ ! -s pre-ai.diff ]; then
   git diff --no-color > pre-ai.diff || true
 fi
@@ -151,7 +148,6 @@ while [ $ITER -lt $MAX_ITER ]; do
   if [ -n "$GO_FMT_ERRORS" ]; then
     echo "gofmt suggested changes for following files:" | tee -a "${LINTER_LOG}"
     echo "$GO_FMT_ERRORS" | tee -a "${LINTER_LOG}"
-    # Apply gofmt fixes (safest to keep code consistent)
     gofmt -w .
   fi
 
@@ -177,7 +173,6 @@ while [ $ITER -lt $MAX_ITER ]; do
   FAIL_SNIPPET="$(tail -n 500 "${TEST_LOG}" || true)"
   STAGED_DIFF="$(git diff --staged --no-color || true)"
   WORKING_DIFF="$(git diff --no-color || true)"
-  # Prefer sending the minimal (staged) diff; fall back to working diff
   DIFF_TO_SEND="${STAGED_DIFF:-${WORKING_DIFF}}"
   if [ -z "${DIFF_TO_SEND}" ]; then
     echo "No diff found to repair; aborting AI loop."
@@ -212,10 +207,8 @@ while [ $ITER -lt $MAX_ITER ]; do
   redact < "${RESPONSE_FILE}" > "${RESPONSE_FILE}.redacted" || true
 
   # Extract unified diff from the response - accept either OpenAI-like or other shapes
-  # Try common locations for text content
   AI_CONTENT="$(jq -r '.choices[0].message.content // .choices[0].text // .result[0].content[0].text // empty' "${RESPONSE_FILE}" 2>/dev/null || true)"
   if [ -z "${AI_CONTENT}" ]; then
-    # Fallback: raw response as text
     AI_CONTENT="$(cat "${RESPONSE_FILE}")"
   fi
 
@@ -227,15 +220,8 @@ while [ $ITER -lt $MAX_ITER ]; do
 
   if [ ! -s "${PATCH_FILE}" ]; then
     echo "AI did not return a unified diff starting with 'diff --git'. Aborting AI loop." | tee -a "${TEST_LOG}"
-    # Save the AI content for inspection and abort
     cat ai-response.raw.txt >> "${TEST_LOG}" || true
     break
-  fi
-
-  # Sanity check: ensure patch touches only code files or go.mod/go.sum
-  if grep -Eqv '^(\+\+\+ b/|--- a/|diff --git )' "${PATCH_FILE}"; then
-    # continue, but also check filenames
-    :
   fi
 
   # Apply patch safely
@@ -247,7 +233,6 @@ while [ $ITER -lt $MAX_ITER ]; do
   if [ ${APPLY_EXIT} -ne 0 ]; then
     echo "git apply failed; saving apply.err and aborting AI loop."
     cat apply.err >> "${TEST_LOG}" || true
-    # Keep AI response for debugging
     cat ai-response.raw.txt >> "${TEST_LOG}" || true
     break
   fi
@@ -260,8 +245,6 @@ while [ $ITER -lt $MAX_ITER ]; do
 done
 
 # After loop: decide final outcome
-# Always produce artifacts for inspection
-# Save final patch (if any)
 if [ -f "${PATCH_FILE}" ] && [ -s "${PATCH_FILE}" ]; then
   echo "Final AI patch saved to ${PATCH_FILE}."
 else
@@ -287,7 +270,6 @@ set -e
 if [ ${PUSH_EXIT} -ne 0 ]; then
   echo "Direct push to remote branch failed; attempting PR creation and automatic merge."
 
-  # Create a PR via GitHub API
   PR_PAYLOAD=$(jq -n \
     --arg head "${BRANCH_NAME}" \
     --arg base "${DEFAULT_BRANCH}" \
@@ -295,16 +277,15 @@ if [ ${PUSH_EXIT} -ne 0 ]; then
     --arg body "Automated dependency updates applied and refactored by CI_Gemini. Tests and linters run in CI. This PR was opened by automation and will be auto-merged if merge checks pass." \
     '{title:$title, head:$head, base:$base, body:$body}')
   PR_RESPONSE=$(curl -sS -X POST "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls" \
-    -H "Authorization: token ${GITHUB_TOKEN}" \
+    -H "Authorization: token ${GITHUB_TOKEN:-${GH_TOKEN:-}}}" \
     -H "Accept: application/vnd.github+json" \
     -d "$PR_PAYLOAD" || true)
 
   PR_NUMBER=$(printf "%s" "$PR_RESPONSE" | jq -r '.number // empty' || true)
   if [ -n "$PR_NUMBER" ]; then
     echo "Created PR #${PR_NUMBER}."
-    # Attempt to merge immediately
     MERGE_RESPONSE=$(curl -sS -X PUT "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/merge" \
-      -H "Authorization: token ${GITHUB_TOKEN}" \
+      -H "Authorization: token ${GITHUB_TOKEN:-${GH_TOKEN:-}}}" \
       -H "Accept: application/vnd.github+json" \
       -d '{"merge_method":"merge"}' || true)
     MERGED=$(printf "%s" "$MERGE_RESPONSE" | jq -r '.merged // false' || true)
@@ -321,7 +302,6 @@ if [ ${PUSH_EXIT} -ne 0 ]; then
 else
   echo "Pushed branch ${BRANCH_NAME} successfully."
 
-  # Try to fast-forward merge into default branch directly
   set +e
   git checkout "${DEFAULT_BRANCH}"
   git pull origin "${DEFAULT_BRANCH}"
@@ -337,11 +317,9 @@ else
 fi
 
 # Ensure artifacts are present in workspace for the workflow to upload
-# Redact the request/response saved earlier for privacy
 redact < "${REQUEST_FILE}" > "${REQUEST_FILE}.redacted" || true
 redact < "${RESPONSE_FILE}" > "${RESPONSE_FILE}.redacted" || true
 
-# Copy redacted copies into top-level artifact filenames
 cp -f "${REQUEST_FILE}.redacted" ai-request.json || true
 cp -f "${RESPONSE_FILE}.redacted" ai-response.json || true
 cp -f "${PATCH_FILE}" ai.patch || true
