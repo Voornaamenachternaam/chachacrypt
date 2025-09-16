@@ -45,36 +45,41 @@ jobs:
         with:
           path: |
             ~/.cache/go-build
-            ~/.modcache
             ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
 
-      - name: Install essentials and gitleaks (build with local Go)
+      - name: Install essentials and build tools
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y jq curl git build-essential
-          # Install gitleaks using 'go install' so it is built with runner's Go version
+          sudo apt-get install -y jq curl git build-essential ca-certificates
+
+      - name: Install gitleaks (built with runner Go) and golangci-lint (built with runner Go)
+        run: |
+          set -euo pipefail
+          # Ensure module-aware go install and ensure bin directory exists
           GO_BIN="$(go env GOBIN 2>/dev/null || true)"
-          if [ -z "$GO_BIN" ]; then
+          if [ -z "${GO_BIN}" ]; then
             GO_BIN="$(go env GOPATH 2>/dev/null)/bin"
           fi
-          mkdir -p "$GO_BIN"
-          go install github.com/zricethezav/gitleaks/v8@v8.28.0
-          if [ -x "${GO_BIN}/gitleaks" ]; then
-            sudo mv "${GO_BIN}/gitleaks" /usr/local/bin/gitleaks || true
-          fi
+          mkdir -p "${GO_BIN}"
+          # Install gitleaks v8.28.0 (built from source by go install)
+          GOFLAGS="" GOBIN="${GO_BIN}" go install github.com/zricethezav/gitleaks/v8@v8.28.0
+          # Install golangci-lint v2.1.0 (build from source)
+          GOFLAGS="" GOBIN="${GO_BIN}" go install github.com/golangci/golangci-lint/cmd/golangci-lint@v2.1.0
+          # Ensure binaries are on PATH for subsequent steps
+          sudo mv "${GO_BIN}/gitleaks" /usr/local/bin/gitleaks || true
+          sudo mv "${GO_BIN}/golangci-lint" /usr/local/bin/golangci-lint || true
           if ! command -v gitleaks >/dev/null 2>&1; then
-            echo "gitleaks not found after install" >&2
+            echo "gitleaks installation failed" >&2
+            exit 1
+          fi
+          if ! command -v golangci-lint >/dev/null 2>&1; then
+            echo "golangci-lint installation failed" >&2
             exit 1
           fi
           gitleaks version || true
-
-      - name: Install golangci-lint (build from source to match toolchain)
-        uses: golangci/golangci-lint-action@v8
-        with:
-          version: v2.1.0
-          install-mode: source
+          golangci-lint --version || true
 
       - name: Ensure script is executable
         run: chmod +x ./.github/scripts/ai_refactor.sh
