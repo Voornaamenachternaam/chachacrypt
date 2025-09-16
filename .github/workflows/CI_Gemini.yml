@@ -1,3 +1,4 @@
+# .github/workflows/CI_Gemini.yml
 name: CI_Gemini
 
 on:
@@ -7,74 +8,86 @@ on:
 
 permissions:
   contents: write
+  checks: write
   pull-requests: write
 
+concurrency:
+  group: ci-gemini
+  cancel-in-progress: false
+
 jobs:
-  go_language_update:
+  update-and-refactor:
+    name: Automated dependency & toolchain update with AI refactor
     runs-on: ubuntu-latest
-    name: "Automate Go Language & Dependency Update"
+    env:
+      AI_MODEL: "tngtech/deepseek-r1t2-chimera:free"
+      API_URL: "https://openrouter.ai/api/v1/chat/completions"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          persist-credentials: true
 
-      - name: Setup Go environment
-        id: setup-go
+      - name: Configure git
+        run: |
+          git config user.name "ci-gemini-bot"
+          git config user.email "ci-gemini-bot@users.noreply.github.com"
+
+      - name: Set up Go (stable)
         uses: actions/setup-go@v6
         with:
-          go-version: 'stable'
-          check-latest: true
+          go-version: stable
 
-      - name: Update go.mod to latest resolved Go version
+      - name: Cache Go modules
+        uses: actions/cache@v4.2.4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/.modcache
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+
+      - name: Install essentials (jq, gitleaks)
         run: |
-          GO_VER="${{ steps.setup-go.outputs.go-version || 'stable' }}"
-          echo "Updating go.mod to go ${GO_VER}"
-          go mod edit -go=${GO_VER}
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl git
+          # Install gitleaks (binary) for secret scanning
+          GL_VER="8.28.0"
+          curl -sSL "https://github.com/zricethezav/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_x86_64.tar.gz" | tar -xz -C /tmp
+          sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.1.0
+          install-only: true
 
-      - name: Run go mod tidy
-        run: |
-          go mod tidy
+      - name: Ensure script is executable
+        run: chmod +x ./.github/scripts/ai_refactor.sh
 
-      - name: Run AI-powered refactoring for dependency compatibility
+      - name: Run automated updates + AI refactor
+        id: run_refactor
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          AI_MODEL: "tngtech/deepseek-r1t2-chimera:free"
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          chmod +x ./.github/scripts/ai_refactor.sh
-          ./.github/scripts/ai_refactor.sh dependencies https://openrouter.ai/api/v1/chat/completions
+          set -euo pipefail
+          ./.github/scripts/ai_refactor.sh dependencies "${{ env.API_URL }}" "${{ env.AI_MODEL }}"
 
-      - name: Validate changes and run tests
-        run: |
-          go mod tidy
-          go mod verify || true
-          go vet ./... || true
-          go test ./...
-
-      - name: Check for changes
-        id: git-check
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if [ -n "$(git status --porcelain)" ]; then
-            echo "changes=true" >> $GITHUB_OUTPUT
-          else
-            echo "changes=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Create Pull Request for dependency updates
-        if: steps.git-check.outputs.changes == 'true'
-        uses: peter-evans/create-pull-request@v7
+      - name: Upload artifacts (AI request/response, patch, logs)
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
         with:
-          branch: automated-dependency-update
-          title: "chore(deps): Automated Dependency Update and Refactoring"
-          commit-message: "chore(deps): automated dependency update and refactoring"
-          body: |
-            ## Automated Dependency Update
-            This PR automatically updates project dependencies and applies compatibility refactors (AI-assisted) where necessary.
+          name: ci-gemini-artifacts
+          path: |
+            ai-request.json
+            ai-response.json
+            ai.patch
+            tests.log
+            linter.log
+            gitleaks.log
 
-            - **Rationale:** keep dependencies up-to-date to pick up bug fixes, security patches, and performance improvements.
-            - **Changes:** `go.mod` and `go.sum` may have been updated; source code may have been modified to maintain compatibility.
-
-            This is an automated PR. Please review and merge if all checks pass.
-          token: ${{ secrets.GH_TOKEN }}
+      - name: Final status
+        if: always()
+        run: |
+          echo "CI_Gemini finished. Check artifacts for AI request/response and logs."
