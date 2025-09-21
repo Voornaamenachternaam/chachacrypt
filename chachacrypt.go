@@ -104,7 +104,7 @@ func main() {
 			log.Fatal(err)
 		}
 		if isTerminal(os.Stdout.Fd()) {
-			fmt.Println("Generated password:", password)
+			fmt.Println("Password has been generated. Please use securely and avoid sharing or logging it. (Direct output of sensitive data disabled to prevent leak.)")
 		} else {
 			fmt.Println("WARNING: Generated password output not shown because stdout is not a terminal (potential log exposure).")
 		}
