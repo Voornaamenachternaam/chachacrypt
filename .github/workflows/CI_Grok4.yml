@@ -11,14 +11,14 @@ permissions:
   checks: write
 
 concurrency:
-  group: ci-gemini
+  group: ci-grok4
   cancel-in-progress: false
 
 env:
   API_URL: "https://openrouter.ai/api/v1/chat/completions"
   AI_MODEL: "x-ai/grok-4-fast:free"
   OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-  GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+  GH_TOKEN: ${{ secrets.GH_TOKEN }}
 
 jobs:
   ai-deps:
@@ -35,23 +35,42 @@ jobs:
 
       - name: Configure git
         run: |
-          git config user.name "ci-gemini-bot"
-          git config user.email "ci-gemini-bot@users.noreply.github.com"
+          git config user.name "ci-grok4-bot"
+          git config user.email "ci-grok4-bot@users.noreply.github.com"
 
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
           go-version: stable
 
-      - name: Cache Go modules
-        uses: actions/cache@v4
+      - name: Determine Go cache locations
+        id: goenv
+        run: |
+          echo "gomodcache=$(go env GOMODCACHE)" >> $GITHUB_OUTPUT
+          echo "gocache=$(go env GOCACHE)" >> $GITHUB_OUTPUT
+
+      - name: Clear existing Go cache directories to avoid tar extract conflicts
+        run: |
+          set -euxo pipefail
+          # Remove any pre-existing module/cache directories to avoid "tar: Cannot open: File exists" when restoring cache
+          if [ -n "${{ steps.goenv.outputs.gomodcache }}" ]; then
+            rm -rf "${{ steps.goenv.outputs.gomodcache }}" || true
+          fi
+          if [ -n "${{ steps.goenv.outputs.gocache }}" ]; then
+            rm -rf "${{ steps.goenv.outputs.gocache }}" || true
+          fi
+
+      - name: Cache Go modules and build cache
+        uses: actions/cache@v4.2.4
         with:
           path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
+            ${{ steps.goenv.outputs.gomodcache }}
+            ${{ steps.goenv.outputs.gocache }}
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
 
-      - name: Install golangci-lint
+      - name: Install golangci-lint (recommended action)
         uses: golangci/golangci-lint-action@v8
         with:
           version: v1.64.2
@@ -61,26 +80,24 @@ jobs:
           chmod +x .github/scripts/ai_refactor.sh || true
           chmod +x .github/scripts/auto_fix_lints.sh || true
 
-      - name: "Patch ai_refactor.sh to enable OpenRouter reasoning (effort: high)"
-        run: |
-          # Insert include_reasoning and reasoning fields into the payload built by ai_refactor.sh
-          perl -0777 -pe 's/max_tokens:\s*32768\s*\n\s*}/max_tokens: 32768,\n      include_reasoning: true,\n      reasoning: { effort: "high" }\n    }/s' -i .github/scripts/ai_refactor.sh
-          # verify patch applied
-          grep -n "include_reasoning" .github/scripts/ai_refactor.sh || (echo "Failed to patch ai_refactor.sh" && exit 1)
-
-      - name: Run AI refactor (produce ai.patch and artifacts) — do not allow the script to push/create PR itself
+      - name: Run AI refactor (produce ai.patch and artifacts)
         id: run_refactor
         env:
           API_URL: ${{ env.API_URL }}
           AI_MODEL: ${{ env.AI_MODEL }}
           OPENROUTER_API_KEY: ${{ env.OPENROUTER_API_KEY }}
-          # prevent the script from pushing or creating PRs itself (we will create a restricted PR later)
+          OPENROUTER_INCLUDE_REASONING: "true"
+          OPENROUTER_REASONING_EFFORT: "high"
+          # Ensure the script does not push itself; we'll create the PR using the GH_TOKEN secret later.
           GITHUB_TOKEN: ""
         run: |
           set -euo pipefail
-          .github/scripts/ai_refactor.sh dependencies "${API_URL}" "${AI_MODEL}" || true
-          # Copy artifacts into workspace if produced by the script
-          test -f ai.patch && echo "ai.patch created" || echo "ai.patch not present"
+          # Run the repository's AI refactor script; it should write ai.patch and relevant artifacts to workspace
+          if [ -x .github/scripts/ai_refactor.sh ]; then
+            ./.github/scripts/ai_refactor.sh dependencies "${API_URL}" "${AI_MODEL}" || true
+          else
+            echo "ai_refactor.sh not present or not executable; skipping AI refactor step."
+          fi
           ls -lah || true
 
       - name: Apply AI patch locally (if present)
@@ -88,11 +105,12 @@ jobs:
         run: |
           set -euo pipefail
           if [ -f ai.patch ]; then
+            # Dry-run check then apply
             if git apply --check ai.patch; then
               git apply ai.patch
               echo "Applied ai.patch to workspace."
             else
-              echo "ai.patch present but failed git apply --check; saving for artifact and continuing."
+              echo "ai.patch exists but failed git apply --check; saving for artifact and continuing."
               exit 0
             fi
           else
@@ -109,9 +127,9 @@ jobs:
 
       - name: Create Pull Request for Go/module changes only
         if: success()
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v7.0.8
         with:
-          token: ${{ secrets.GH_TOKEN }}
+          token: ${{ env.GH_TOKEN }}
           commit-message: "chore: automated dependency updates and AI refactor"
           title: "chore(deps): Automated dependency updates and AI refactor"
           body: |
@@ -148,17 +166,17 @@ jobs:
           fi
 
       - name: Run gitleaks scan (non-blocking)
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v2.3.9
         with:
           args: detect --format json --report-path=gitleaks.json || true
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ env.GH_TOKEN }}
 
       - name: Upload CI artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ci-gemini-artifacts
+          name: ci-grok4-artifacts
           path: |
             ai-request.json
             ai-response.json
@@ -173,4 +191,4 @@ jobs:
 
       - name: Final status
         if: always()
-        run: echo "CI_Gemini workflow finished."
+        run: echo "CI_grok4 workflow finished."
