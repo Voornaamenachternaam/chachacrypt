@@ -53,13 +53,9 @@ jobs:
         run: |
           set -euxo pipefail
 
-          # Helper to safely remove a directory that may contain root-owned files.
-          # Strategy:
-          # 1. If dir exists, show owner info for diagnostics.
-          # 2. Attempt to change ownership recursively to the current runner user.
-          # 3. If chown succeeds, remove as runner user.
-          # 4. If chown fails, fall back to sudo rm -rf.
-          # This avoids repeated "Permission denied" errors when removing caches restored with root-owned files.
+          # Iterate the reported Go cache paths and remove them safely.
+          # Use sudo rm -rf as the primary removal mechanism; if that fails,
+          # attempt to remove immutable flags and relax permissions before retrying.
           for dir in "${{ steps.goenv.outputs.gomodcache }}" "${{ steps.goenv.outputs.gocache }}"; do
             if [ -z "$dir" ]; then
               continue
@@ -70,23 +66,25 @@ jobs:
             fi
 
             echo "Preparing to remove cache path: $dir"
-            # Show ownership and basic info
             ls -lad "$dir" || true
             stat -c "owner=%u:%g mode=%a" "$dir" || true
 
-            # Attempt to chown recursively to the current runner user; if that works, rm -rf as runner user.
-            if sudo chown -R "$(id -u):$(id -g)" "$dir" 2>/dev/null; then
-              echo "Successfully changed ownership of $dir to $(id -u):$(id -g). Removing..."
-              rm -rf "$dir"
+            # Primary attempt: remove with sudo (should succeed on hosted ubuntu runners)
+            if sudo rm -rf "$dir" 2>/dev/null; then
+              echo "Removed $dir with sudo rm -rf"
             else
-              echo "Failed to chown $dir (permission escalation may be needed). Attempting sudo rm -rf..."
-              # Final fallback: remove with sudo; this should succeed on ubuntu-latest hosted runners.
-              sudo rm -rf "$dir"
+              echo "sudo rm -rf failed for $dir; attempting to clear immutable attrs and relax perms, then retrying"
+              # Try to remove immutable attribute if present (chattr may not be available; ignore errors)
+              sudo chattr -R -i "$dir" 2>/dev/null || true
+              # Ensure files are writable/executable for the runner user
+              sudo chmod -R u+rwX "$dir" 2>/dev/null || true
+              # Retry removal
+              sudo rm -rf "$dir" 2>/dev/null || true
             fi
 
-            # Confirm removal (or warn)
+            # Final verification
             if [ -e "$dir" ]; then
-              echo "Warning: cache path still exists after removal attempt: $dir"
+              echo "Warning: cache path still exists after removal attempts: $dir"
               ls -lad "$dir" || true
             else
               echo "Cache path removed: $dir"
