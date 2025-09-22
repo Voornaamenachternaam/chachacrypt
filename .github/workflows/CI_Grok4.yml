@@ -73,7 +73,7 @@ jobs:
       - name: Install golangci-lint (recommended action)
         uses: golangci/golangci-lint-action@v8
         with:
-          version: v1.64.2
+          version: v2.5.0
 
       - name: Ensure scripts are executable
         run: |
