@@ -17,14 +17,13 @@ concurrency:
 env:
   API_URL: "https://openrouter.ai/api/v1/chat/completions"
   AI_MODEL: "x-ai/grok-4-fast:free"
+  OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+  GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
 jobs:
   ai-deps:
     runs-on: ubuntu-latest
     env:
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-      # BASE_BRANCH is evaluated at workflow runtime and injected into the job
       BASE_BRANCH: ${{ github.ref_name }}
 
     steps:
@@ -52,7 +51,7 @@ jobs:
             ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
 
-      - name: Install golangci-lint (recommended action)
+      - name: Install golangci-lint
         uses: golangci/golangci-lint-action@v8
         with:
           version: v1.64.2
@@ -62,85 +61,54 @@ jobs:
           chmod +x .github/scripts/ai_refactor.sh || true
           chmod +x .github/scripts/auto_fix_lints.sh || true
 
-      - name: Inject reasoning config into AI payload (enable include_reasoning + high effort)
+      - name: "Patch ai_refactor.sh to enable OpenRouter reasoning (effort: high)"
         run: |
-          python - <<'PY'
-import io,sys,os,re
-p = ".github/scripts/ai_refactor.sh"
-s = open(p, "r", encoding="utf-8").read()
-old = "max_tokens: 32768\n    }"
-if old in s:
-    new = 'max_tokens: 32768,\n      include_reasoning: true,\n      reasoning: { effort: \"high\" }\n    }'
-    s = s.replace(old, new)
-    open(p, "w", encoding="utf-8").write(s)
-    print("Patched build_payload to include reasoning.")
-else:
-    # attempt a safer insertion near the max_tokens assignment if formatting differs
-    s2 = re.sub(r'(max_tokens:\s*\d+\s*\n\s*\})', 'max_tokens: 32768,\n      include_reasoning: true,\n      reasoning: { effort: "high" }\n    }', s, count=1)
-    if s2 != s:
-        open(p, "w", encoding="utf-8").write(s2)
-        print("Patched build_payload via regex.")
-    else:
-        print("Warning: Could not patch ai_refactor.sh automatically; please verify build_payload block.", file=sys.stderr)
-        sys.exit(0)
-PY
+          # Insert include_reasoning and reasoning fields into the payload built by ai_refactor.sh
+          perl -0777 -pe 's/max_tokens:\s*32768\s*\n\s*}/max_tokens: 32768,\n      include_reasoning: true,\n      reasoning: { effort: "high" }\n    }/s' -i .github/scripts/ai_refactor.sh
+          # verify patch applied
+          grep -n "include_reasoning" .github/scripts/ai_refactor.sh || (echo "Failed to patch ai_refactor.sh" && exit 1)
 
-      - name: Run AI refactor (produces ai.patch and logs in workspace)
+      - name: Run AI refactor (produce ai.patch and artifacts) — do not allow the script to push/create PR itself
         id: run_refactor
         env:
           API_URL: ${{ env.API_URL }}
           AI_MODEL: ${{ env.AI_MODEL }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          OPENROUTER_API_KEY: ${{ env.OPENROUTER_API_KEY }}
+          # prevent the script from pushing or creating PRs itself (we will create a restricted PR later)
+          GITHUB_TOKEN: ""
         run: |
           set -euo pipefail
-          # this script writes ai.patch and related artifacts into the repo workspace
-          ./.github/scripts/ai_refactor.sh dependencies "${API_URL}" "${AI_MODEL}"
-
-      - name: Preserve AI artifacts (copy created files from any temp locations)
-        run: |
-          # The script attempts to copy artifacts into the repo workspace; ensure they are present
+          .github/scripts/ai_refactor.sh dependencies "${API_URL}" "${AI_MODEL}" || true
+          # Copy artifacts into workspace if produced by the script
+          test -f ai.patch && echo "ai.patch created" || echo "ai.patch not present"
           ls -lah || true
-          test -f ai.patch || echo "ai.patch not found (no changes suggested)"; true
 
-      - name: Restore workspace to the original branch state
-        if: always()
-        run: |
-          set -euxo pipefail
-          # Ensure we reset to the checked-out base branch as it was at workflow start.
-          git fetch --no-tags origin +refs/heads/${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH} || true
-          # Checkout local base branch
-          git checkout --force "${BASE_BRANCH}"
-          # Reset hard to remote base to remove any in-workspace changes the script may have made
-          git reset --hard "origin/${BASE_BRANCH}" || true
-          git clean -fdx || true
-
-      - name: Apply AI patch (if present)
+      - name: Apply AI patch locally (if present)
         id: apply_patch
         run: |
           set -euo pipefail
           if [ -f ai.patch ]; then
-            # Try a dry apply first to detect problems
             if git apply --check ai.patch; then
               git apply ai.patch
-              echo "Applied ai.patch"
+              echo "Applied ai.patch to workspace."
             else
-              echo "ai.patch failed git apply --check; writing ai.patch to artifact and continuing."
+              echo "ai.patch present but failed git apply --check; saving for artifact and continuing."
               exit 0
             fi
           else
             echo "No ai.patch to apply."
           fi
 
-      - name: Show git status / changes
+      - name: Show workspace changes
         if: always()
         run: |
-          echo "Changed files:"
+          echo "Git status:"
           git status --porcelain
+          echo "Changed files:"
           git --no-pager diff --name-only || true
 
       - name: Create Pull Request for Go/module changes only
-        if: success() && steps.apply_patch.outcome == 'success'
+        if: success()
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GH_TOKEN }}
@@ -170,7 +138,7 @@ PY
           set -euo pipefail
           go test ./... 2>&1 | tee tests.log || true
 
-      - name: Run gofmt check (capture)
+      - name: Run gofmt check
         run: |
           set -euo pipefail
           gofmt -l . > gofmt.list || true
@@ -179,7 +147,14 @@ PY
             cat gofmt.list
           fi
 
-      - name: Save CI artifacts (AI request/response, patch, logs, diffs)
+      - name: Run gitleaks scan (non-blocking)
+        uses: gitleaks/gitleaks-action@v2
+        with:
+          args: detect --format json --report-path=gitleaks.json || true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+
+      - name: Upload CI artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
