@@ -52,13 +52,46 @@ jobs:
       - name: Clear existing Go cache directories to avoid tar extract conflicts
         run: |
           set -euxo pipefail
-          # Remove any pre-existing module/cache directories to avoid "tar: Cannot open: File exists" when restoring cache
-          if [ -n "${{ steps.goenv.outputs.gomodcache }}" ]; then
-            rm -rf "${{ steps.goenv.outputs.gomodcache }}" || true
-          fi
-          if [ -n "${{ steps.goenv.outputs.gocache }}" ]; then
-            rm -rf "${{ steps.goenv.outputs.gocache }}" || true
-          fi
+
+          # Helper to safely remove a directory that may contain root-owned files.
+          # Strategy:
+          # 1. If dir exists, show owner info for diagnostics.
+          # 2. Attempt to change ownership recursively to the current runner user.
+          # 3. If chown succeeds, remove as runner user.
+          # 4. If chown fails, fall back to sudo rm -rf.
+          # This avoids repeated "Permission denied" errors when removing caches restored with root-owned files.
+          for dir in "${{ steps.goenv.outputs.gomodcache }}" "${{ steps.goenv.outputs.gocache }}"; do
+            if [ -z "$dir" ]; then
+              continue
+            fi
+            if [ ! -e "$dir" ]; then
+              echo "Cache path does not exist: $dir"
+              continue
+            fi
+
+            echo "Preparing to remove cache path: $dir"
+            # Show ownership and basic info
+            ls -lad "$dir" || true
+            stat -c "owner=%u:%g mode=%a" "$dir" || true
+
+            # Attempt to chown recursively to the current runner user; if that works, rm -rf as runner user.
+            if sudo chown -R "$(id -u):$(id -g)" "$dir" 2>/dev/null; then
+              echo "Successfully changed ownership of $dir to $(id -u):$(id -g). Removing..."
+              rm -rf "$dir"
+            else
+              echo "Failed to chown $dir (permission escalation may be needed). Attempting sudo rm -rf..."
+              # Final fallback: remove with sudo; this should succeed on ubuntu-latest hosted runners.
+              sudo rm -rf "$dir"
+            fi
+
+            # Confirm removal (or warn)
+            if [ -e "$dir" ]; then
+              echo "Warning: cache path still exists after removal attempt: $dir"
+              ls -lad "$dir" || true
+            else
+              echo "Cache path removed: $dir"
+            fi
+          done
 
       - name: Cache Go modules and build cache
         uses: actions/cache@v4.2.4
