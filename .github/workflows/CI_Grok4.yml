@@ -1,4 +1,4 @@
-name: CI_Gemini
+name: CI_Grok4
 
 on:
   workflow_dispatch:
