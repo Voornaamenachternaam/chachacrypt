@@ -104,7 +104,8 @@ func main() {
 			log.Fatal(err)
 		}
 		if isTerminal(os.Stdout.Fd()) {
-			fmt.Println("Password has been generated. Please use securely and avoid sharing or logging it. (Direct output of sensitive data disabled to prevent leak.)")
+			fmt.Println("Generated Password:", password)
+			fmt.Println("Please use it securely and avoid sharing or logging it.")
 		} else {
 			fmt.Println("WARNING: Generated password output not shown because stdout is not a terminal (potential log exposure).")
 		}
@@ -120,8 +121,8 @@ func isTerminal(fd uintptr) bool {
 
 func showHelp() {
 	fmt.Println("Usage:")
-	fmt.Println("  Encrypt a file:       chachacrypt enc -i input.txt -o output.enc")
-	fmt.Println("  Decrypt a file:       chachacrypt dec -i input.enc -o output.txt")
+	fmt.Println("  Encrypt a file:     chachacrypt enc -i input.txt -o output.enc")
+	fmt.Println("  Decrypt a file:     chachacrypt dec -i input.enc -o output.txt")
 	fmt.Println("  Generate a password:  chachacrypt pw -s 15")
 }
 
