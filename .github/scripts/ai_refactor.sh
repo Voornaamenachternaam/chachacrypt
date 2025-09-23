@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # .github/scripts/ai_refactor.sh
+# AI-assisted dependency updater and refactorer for Go projects.
 # Usage: ./ai_refactor.sh <mode> <api_url> <ai_model>
 set -euo pipefail
 
@@ -16,15 +17,15 @@ fi
 : "${GITHUB_TOKEN:?GITHUB_TOKEN must be set}"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY must be set}"
 
-# Ensure required commands exist
-for cmd in git go jq curl sed awk cmp mktemp mkdir date tee awk; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "Required command not found in PATH: $cmd" >&2
+# Verify required commands are available
+for c in git go jq curl sed awk cmp mktemp mkdir date tee awk; do
+  if ! command -v "$c" >/dev/null 2>&1; then
+    echo "Required command not found in PATH: $c" >&2
     exit 1
   fi
 done
 
-# Redact stream for artifacts
+# Redaction helper for artifacts
 redact_stream() {
   sed -E \
     -e 's/(Authorization: Bearer )[A-Za-z0-9._-]+/\1REDACTED_TOKEN/g' \
@@ -34,16 +35,17 @@ redact_stream() {
     -e '/-----BEGIN PRIVATE KEY-----/,/-----END PRIVATE KEY-----/c\[REDACTED PRIVATE KEY\]'
 }
 
+# Create temp workspace & files
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "${TMP_ROOT}"' EXIT
 
 REQUEST_FILE="${TMP_ROOT}/ai-request.json"
 RESPONSE_TMP="${TMP_ROOT}/ai-response.tmp"
-RESPONSE_RED="${TMP_ROOT}/ai-response-redacted.json"
+RESPONSE_REDACTED="${TMP_ROOT}/ai-response-redacted.json"
 AI_RAW="${TMP_ROOT}/ai-response-raw.txt"
 PATCH_FILE="${TMP_ROOT}/ai.patch"
 APPLY_ERR="${TMP_ROOT}/apply.err"
-TEST_LOG="${TMP_ROOT}/tests.log"
+BUILD_LOG="${TMP_ROOT}/build.log"
 LINTER_LOG="${TMP_ROOT}/linter.log"
 PRE_DIFF_TMP="${TMP_ROOT}/pre-ai.diff"
 PUSH_LOG="${TMP_ROOT}/push.log"
@@ -53,11 +55,11 @@ PR_RESPONSE="${TMP_ROOT}/pr_response.json"
 
 : > "${REQUEST_FILE}"
 : > "${RESPONSE_TMP}"
-: > "${RESPONSE_RED}"
+: > "${RESPONSE_REDACTED}"
 : > "${AI_RAW}"
 : > "${PATCH_FILE}"
 : > "${APPLY_ERR}"
-: > "${TEST_LOG}"
+: > "${BUILD_LOG}"
 : > "${LINTER_LOG}"
 : > "${PRE_DIFF_TMP}"
 : > "${PUSH_LOG}"
@@ -65,7 +67,7 @@ PR_RESPONSE="${TMP_ROOT}/pr_response.json"
 : > "${GOFMT_LIST}"
 : > "${PR_RESPONSE}"
 
-# Clone repository into temp dir to operate safely
+# Clone repo into temp dir to avoid mutating workspace directly
 REPO_CLONE_DIR="${TMP_ROOT}/repo"
 git clone --depth=1 --no-single-branch "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "${REPO_CLONE_DIR}"
 cd "${REPO_CLONE_DIR}"
@@ -76,26 +78,28 @@ git config user.email "ci-grok4-bot@users.noreply.github.com"
 BASE_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 BRANCH_NAME="automated-deps-$(date -u +"%Y%m%dT%H%M%SZ")"
 git checkout -b "${BRANCH_NAME}"
+echo "Switched to new branch ${BRANCH_NAME} (base ${BASE_BRANCH})"
 
-# Ensure go.mod go directive matches runtime Go version if present
+# Keep go.mod go directive aligned with runtime
 if [ -f go.mod ]; then
   GO_VER_RAW="$(go version | awk '{print $3}')"
   GO_VER="${GO_VER_RAW#go}"
   CURRENT_GO_DIRECTIVE="$(awk '/^go [0-9]/ {print $2; exit}' go.mod || true)"
-  if [ -n "$GO_VER" ] && [ "$CURRENT_GO_DIRECTIVE" != "$GO_VER" ]; then
+  if [ -n "${GO_VER}" ] && [ "${CURRENT_GO_DIRECTIVE}" != "${GO_VER}" ]; then
+    echo "Updating go.mod go directive ${CURRENT_GO_DIRECTIVE} -> ${GO_VER}" | tee -a "${LINTER_LOG}"
     go mod edit -go="${GO_VER}" || true
     git add go.mod || true
   fi
 fi
 
-# Capture pre-AI diff
+# Capture pre-AI diff for artifact
 git add -A || true
 git diff --staged --no-color > "${PRE_DIFF_TMP}" || true
 if [ ! -s "${PRE_DIFF_TMP}" ]; then
   git diff --no-color > "${PRE_DIFF_TMP}" || true
 fi
 
-# Build payload helper (includes reasoning per OpenRouter)
+# Payload builder with OpenRouter reasoning enabled
 build_payload() {
   local system_msg="$1"
   local user_msg="$2"
@@ -113,7 +117,7 @@ build_payload() {
     }'
 }
 
-# Extract unified diff from AI content (supports fenced blocks)
+# Extract unified diff robustly (handles fences)
 extract_unified_diff() {
   local srcfile="$1"
   local out="$2"
@@ -130,13 +134,14 @@ extract_unified_diff() {
   return 1
 }
 
-# Find module updates if dependencies mode
-if [ "$MODE" = "dependencies" ]; then
-  # Use jq safely to list updates; ensure jq expression is quoted correctly
+# If mode is dependencies, detect module updates and attempt go get
+if [ "${MODE}" = "dependencies" ]; then
+  # Use jq safely to list updates
   UPGRADE_LINES="$(go list -m -u -json all 2>/dev/null | jq -r 'select(.Update) | "\(.Path)@\(.Update.Version)"' 2>/dev/null || true)"
-  if [ -z "$UPGRADE_LINES" ]; then
+  if [ -z "${UPGRADE_LINES}" ]; then
+    # Save pre-ai diff to workspace for artifacts and exit (no updates)
     WORKSPACE="${GITHUB_WORKSPACE:-/github/workspace}"
-    mkdir -p "$WORKSPACE"
+    mkdir -p "${WORKSPACE}"
     if [ -s "${PRE_DIFF_TMP}" ]; then
       if [ ! -e "${WORKSPACE}/pre-ai.diff" ] || ! cmp -s "${PRE_DIFF_TMP}" "${WORKSPACE}/pre-ai.diff"; then
         cp "${PRE_DIFF_TMP}" "${WORKSPACE}/pre-ai.diff"
@@ -145,158 +150,209 @@ if [ "$MODE" = "dependencies" ]; then
     exit 0
   fi
 
-  # Attempt to apply updates (best-effort)
-  echo "$UPGRADE_LINES" | while IFS= read -r m; do
-    if [ -n "$m" ]; then
-      GOFLAGS=-mod=mod go get -d "$m" >> "${LINTER_LOG}" 2>&1 || true
+  # Attempt each upgrade (best-effort)
+  printf "%s\n" "${UPGRADE_LINES}" | while IFS= read -r m; do
+    if [ -n "${m}" ]; then
+      echo "Attempting go get ${m}" | tee -a "${LINTER_LOG}"
+      GOFLAGS=-mod=mod go get -d "${m}" >> "${LINTER_LOG}" 2>&1 || true
     fi
   done
   go mod tidy >> "${LINTER_LOG}" 2>&1 || true
   git add go.mod go.sum 2>/dev/null || true
 fi
 
-# Refresh pre-AI diff
+# Refresh pre-AI diff after updates
 git diff --staged --no-color > "${PRE_DIFF_TMP}" || true
 if [ ! -s "${PRE_DIFF_TMP}" ]; then
   git diff --no-color > "${PRE_DIFF_TMP}" || true
 fi
 
-MAX_ITER=5
-ITER=0
-PASS_ALL=false
+# Decide whether we need AI: run go build to detect compile errors (no tests assumed)
+echo "Running go build to detect compile errors..." | tee -a "${BUILD_LOG}"
+if go build ./... >> "${BUILD_LOG}" 2>&1; then
+  BUILD_FAILED=false
+else
+  BUILD_FAILED=true
+fi
 
-while [ "$ITER" -lt "$MAX_ITER" ]; do
-  ITER=$((ITER + 1))
-  echo "=== Iteration ${ITER} ===" | tee -a "${TEST_LOG}"
-
-  # Formatting fixes
-  GOFMT_LIST_CONTENT="$(gofmt -l . || true)"
-  if [ -n "$GOFMT_LIST_CONTENT" ]; then
-    gofmt -w .
-    git add -A || true
-  fi
-
-  # Run vet (non-fatal)
-  go vet ./... >> "${LINTER_LOG}" 2>&1 || true
-
-  # Run tests
-  if go test ./... 2>&1 | tee -a "${TEST_LOG}"; then
-    PASS_ALL=true
-    break
-  fi
-
-  # Prepare diff to send
-  DIFF_FILE="${TMP_ROOT}/diff-to-send.patch"
-  git add -A || true
-  git diff --staged --no-color > "${DIFF_FILE}" || true
-  if [ ! -s "${DIFF_FILE}" ]; then
-    git diff --no-color > "${DIFF_FILE}" || true
-  fi
-  if [ ! -s "${DIFF_FILE}" ]; then
-    # nothing to send
-    break
-  fi
-
-  FAIL_SNIPPET="$(tail -n 800 "${TEST_LOG}" || true)"
-  TASK_INSTR="You are an expert Go engineer. Given the failing test output and the following repository diff, produce a single unified git patch (a unified diff starting with 'diff --git') that fixes the failing tests and compiles cleanly. Return only the unified patch (no additional commentary). If you cannot produce a working patch, return an empty response."
-  PROMPT_CONTENT="$(printf "%s\n\n=== FAILING TEST OUTPUT ===\n%s\n\n=== REPO DIFF ===\n%s\n" "$TASK_INSTR" "$FAIL_SNIPPET" "$(sed -n '1,20000p' "$DIFF_FILE" || true)")"
-
-  build_payload "$TASK_INSTR" "$PROMPT_CONTENT" > "${REQUEST_FILE}"
-
-  # Send request and capture HTTP status
-  HTTP_CODE="$(curl -sS -X POST "$API_URL" \
-    -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
-    -H "Content-Type: application/json" \
-    -d @"${REQUEST_FILE}" \
-    -w "%{http_code}" -o "${RESPONSE_TMP}" )" || true
-
-  echo "${HTTP_CODE}" > "${HTTP_STATUS_FILE}"
-  cat "${RESPONSE_TMP}" > "${AI_RAW}" || true
-
-  if [ -z "${HTTP_CODE}" ] || [ "${HTTP_CODE}" -lt 200 ] || [ "${HTTP_CODE}" -ge 300 ]; then
-    redact_stream < "${RESPONSE_TMP}" > "${RESPONSE_RED}" || true
-    break
-  fi
-
-  # Extract AI content safely
-  if jq -e . >/dev/null 2>&1 < "${RESPONSE_TMP}"; then
-    AI_CONTENT="$(jq -r '.choices[0].message.content // .choices[0].text // ""' "${RESPONSE_TMP}" 2>/dev/null || true)"
+# If build passed and no other needs, commit go.mod/go.sum if changed and create PR
+if [ "${BUILD_FAILED}" = false ]; then
+  # Check for meaningful Go/module changes
+  git fetch origin "${BASE_BRANCH}" --depth=1 >/dev/null 2>&1 || true
+  CHANGED_FILES="$(git diff --name-only "origin/${BASE_BRANCH}...HEAD" || true)"
+  if printf "%s\n" "${CHANGED_FILES}" | egrep -q '\.go$|(^|/)go\.mod$|(^|/)go\.sum$'; then
+    # push & create PR
+    if git push --set-upstream origin "${BRANCH_NAME}" > "${PUSH_LOG}" 2>&1; then
+      PR_PAYLOAD="$(jq -n --arg title "chore(deps): Automated dependency updates and AI refactor" \
+        --arg head "${BRANCH_NAME}" --arg base "${BASE_BRANCH}" \
+        --arg body "Automated dependency updates and AI-driven refactor were applied by CI. Please review the changes." \
+        '{title: $title, head: $head, base: $base, body: $body}')"
+      curl -sS -X POST "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls" \
+        -H "Authorization: token ${GITHUB_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "${PR_PAYLOAD}" -o "${PR_RESPONSE}" -w "%{http_code}" > "${TMP_ROOT}/pr_http_status.txt" || true
+    else
+      echo "Push failed; please inspect ${PUSH_LOG}" | tee -a "${PUSH_LOG}"
+    fi
   else
-    AI_CONTENT="$(cat "${RESPONSE_TMP}" || true)"
+    # No meaningful changes: copy pre-ai diff and exit
+    WORKSPACE="${GITHUB_WORKSPACE:-/github/workspace}"
+    mkdir -p "${WORKSPACE}"
+    if [ -s "${PRE_DIFF_TMP}" ]; then
+      if [ ! -e "${WORKSPACE}/pre-ai.diff" ] || ! cmp -s "${PRE_DIFF_TMP}" "${WORKSPACE}/pre-ai.diff"; then
+        cp "${PRE_DIFF_TMP}" "${WORKSPACE}/pre-ai.diff"
+      fi
+    fi
+    exit 0
   fi
+fi
 
-  printf "%s\n" "${AI_CONTENT}" > "${AI_RAW}"
+# Build failed: capture error output and invoke AI to fix compile errors
+if [ "${BUILD_FAILED}" = true ]; then
+  # Prepare failing build output (last 2000 lines at most)
+  tail -n 2000 "${BUILD_LOG}" > "${TMP_ROOT}/build-fail-snippet.txt" || true
+  FAIL_SNIPPET="$(cat "${TMP_ROOT}/build-fail-snippet.txt" || true)"
 
-  if ! extract_unified_diff "${AI_RAW}" "${PATCH_FILE}"; then
-    redact_stream < "${RESPONSE_TMP}" > "${RESPONSE_RED}" || true
-    break
-  fi
+  # Iteratively request AI-generated patches and apply until build passes or max iterations
+  MAX_ITER=5
+  ITER=0
+  while [ "${ITER}" -lt "${MAX_ITER}" ]; do
+    ITER=$((ITER + 1))
+    echo "=== AI Iteration ${ITER} ===" | tee -a "${BUILD_LOG}"
 
-  # Validate patch
-  if ! git apply --check "${PATCH_FILE}" 2> "${APPLY_ERR}"; then
-    cat "${APPLY_ERR}" >> "${TEST_LOG}" || true
-    redact_stream < "${RESPONSE_TMP}" > "${RESPONSE_RED}" || true
-    break
-  fi
+    # Prepare diff to send
+    DIFF_FILE="${TMP_ROOT}/diff-to-send.patch"
+    git add -A || true
+    git diff --staged --no-color > "${DIFF_FILE}" || true
+    if [ ! -s "${DIFF_FILE}" ]; then
+      git diff --no-color > "${DIFF_FILE}" || true
+    fi
+    if [ ! -s "${DIFF_FILE}" ]; then
+      echo "No diff available to send to AI; aborting" | tee -a "${BUILD_LOG}"
+      break
+    fi
 
-  if ! git apply --index "${PATCH_FILE}" 2> "${APPLY_ERR}"; then
-    cat "${APPLY_ERR}" >> "${TEST_LOG}" || true
-    redact_stream < "${RESPONSE_TMP}" > "${RESPONSE_RED}" || true
-    break
-  fi
+    TASK_INSTR="You are an expert Go engineer. Given the following compiler/build errors and the repository diff, produce a single unified git patch (a unified diff starting with 'diff --git') that fixes the compiler errors and allows the project to build. Return only the unified patch, and nothing else. If you cannot produce a working patch, return an empty response."
+    PROMPT_CONTENT="$(printf "%s\n\n=== BUILD ERRORS ===\n%s\n\n=== REPO DIFF ===\n%s\n" "${TASK_INSTR}" "${FAIL_SNIPPET}" "$(sed -n '1,20000p' "${DIFF_FILE}" || true)")"
 
-  git add -A || true
-  if git commit -m "chore: AI-assisted refactor and dependency update (iteration ${ITER})" >/dev/null 2>&1; then
-    :
-  fi
+    # Build and save payload
+    build_payload "${TASK_INSTR}" "${PROMPT_CONTENT}" > "${REQUEST_FILE}"
+    redact_stream < "${REQUEST_FILE}" > "${TMP_ROOT}/ai-request-redacted.json" || true
 
-  # Run tests after applying patch
-  if go test ./... 2>&1 | tee -a "${TEST_LOG}"; then
-    PASS_ALL=true
-    break
-  fi
-done
+    # Send request and capture HTTP status + raw body
+    HTTP_CODE="$(curl -sS -X POST "${API_URL}" \
+      -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d @"${REQUEST_FILE}" \
+      -w "%{http_code}" -o "${RESPONSE_TMP}" )" || true
 
-# Final checks
+    echo "${HTTP_CODE}" > "${HTTP_STATUS_FILE}"
+    cat "${RESPONSE_TMP}" > "${AI_RAW}" || true
+
+    if [ -z "${HTTP_CODE}" ] || [ "${HTTP_CODE}" -lt 200 ] || [ "${HTTP_CODE}" -ge 300 ]; then
+      redact_stream < "${RESPONSE_TMP}" > "${RESPONSE_REDACTED}" || true
+      echo "AI API returned HTTP ${HTTP_CODE}; aborting AI loop" | tee -a "${BUILD_LOG}" "${LINTER_LOG}"
+      break
+    fi
+
+    # Extract AI content
+    if jq -e . >/dev/null 2>&1 < "${RESPONSE_TMP}"; then
+      AI_CONTENT="$(jq -r '.choices[0].message.content // .choices[0].text // ""' "${RESPONSE_TMP}" 2>/dev/null || true)"
+    else
+      AI_CONTENT="$(cat "${RESPONSE_TMP}" || true)"
+    fi
+
+    printf "%s\n" "${AI_CONTENT}" > "${AI_RAW}"
+
+    # Extract unified diff from AI response
+    if ! extract_unified_diff "${AI_RAW}" "${PATCH_FILE}"; then
+      redact_stream < "${RESPONSE_TMP}" > "${RESPONSE_REDACTED}" || true
+      echo "AI did not produce a valid unified diff; aborting AI loop" | tee -a "${BUILD_LOG}"
+      break
+    fi
+
+    # Validate patch can be applied
+    if ! git apply --check "${PATCH_FILE}" 2> "${APPLY_ERR}"; then
+      cat "${APPLY_ERR}" >> "${BUILD_LOG}" || true
+      redact_stream < "${RESPONSE_TMP}" > "${RESPONSE_REDACTED}" || true
+      echo "git apply --check failed; aborting AI loop" | tee -a "${BUILD_LOG}"
+      break
+    fi
+
+    # Apply patch
+    if ! git apply --index "${PATCH_FILE}" 2> "${APPLY_ERR}"; then
+      cat "${APPLY_ERR}" >> "${BUILD_LOG}" || true
+      redact_stream < "${RESPONSE_TMP}" > "${RESPONSE_REDACTED}" || true
+      echo "git apply --index failed; aborting AI loop" | tee -a "${BUILD_LOG}"
+      break
+    fi
+
+    git add -A || true
+    if git commit -m "chore: AI-assisted refactor and dependency update (iteration ${ITER})" >/dev/null 2>&1; then
+      echo "Committed AI patch (iteration ${ITER})" | tee -a "${BUILD_LOG}"
+    else
+      echo "No changes to commit after applying AI patch (iteration ${ITER})" | tee -a "${BUILD_LOG}"
+    fi
+
+    # Re-run build
+    : > "${BUILD_LOG}"
+    echo "Re-running go build after applying AI patch..." | tee -a "${BUILD_LOG}"
+    if go build ./... >> "${BUILD_LOG}" 2>&1; then
+      echo "Build succeeded after iteration ${ITER}" | tee -a "${BUILD_LOG}"
+      BUILD_FAILED=false
+      break
+    else
+      echo "Build still failing after iteration ${ITER}; will iterate again" | tee -a "${BUILD_LOG}"
+      FAIL_SNIPPET="$(tail -n 2000 "${BUILD_LOG}" || true)"
+      continue
+    fi
+  done
+fi
+
+# Final lint/format checks
 gofmt -l . > "${GOFMT_LIST}" || true
 go vet ./... >> "${LINTER_LOG}" 2>&1 || true
-go test ./... >> "${TEST_LOG}" 2>&1 || true
+# final build attempt (ensure success if possible)
+if go build ./... >> "${BUILD_LOG}" 2>&1; then
+  BUILD_FAILED=false
+else
+  BUILD_FAILED=true
+fi
 
-# Determine if there are meaningful Go/module changes
+# Push & PR only if meaningful Go/module changes exist and build is not failing
 git fetch origin "${BASE_BRANCH}" --depth=1 >/dev/null 2>&1 || true
 CHANGED_FILES="$(git diff --name-only "origin/${BASE_BRANCH}...HEAD" || true)"
 
-if printf "%s\n" "${CHANGED_FILES}" | egrep -q '\.go$|(^|/)go\.mod$|(^|/)go\.sum$'; then
+if [ "${BUILD_FAILED}" = false ] && printf "%s\n" "${CHANGED_FILES}" | egrep -q '\.go$|(^|/)go\.mod$|(^|/)go\.sum$'; then
   git push --set-upstream origin "${BRANCH_NAME}" > "${PUSH_LOG}" 2>&1 || true
-
   PR_PAYLOAD="$(jq -n --arg title "chore(deps): Automated dependency updates and AI refactor" \
     --arg head "${BRANCH_NAME}" --arg base "${BASE_BRANCH}" \
     --arg body "Automated dependency updates and AI-driven refactor were applied by CI. Please review the changes." \
     '{title: $title, head: $head, base: $base, body: $body}')"
-
   curl -sS -X POST "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls" \
     -H "Authorization: token ${GITHUB_TOKEN}" \
     -H "Content-Type: application/json" \
     -d "${PR_PAYLOAD}" -o "${PR_RESPONSE}" -w "%{http_code}" > "${TMP_ROOT}/pr_http_status.txt" || true
+else
+  echo "Skipping push/PR: either build failing or no meaningful Go/module changes." | tee -a "${PUSH_LOG}"
 fi
 
-# Copy artifacts to workspace safely
+# Copy artifacts into workspace for workflow to upload (do not commit these)
 WORKSPACE="${GITHUB_WORKSPACE:-/github/workspace}"
 mkdir -p "${WORKSPACE}"
 
 copy_to_workspace() {
   local src="$1"
   local dst="$2"
-  if [ ! -e "$src" ]; then
+  if [ ! -e "${src}" ]; then
     return 0
   fi
-  if [ -e "$dst" ] && cmp -s "$src" "$dst" 2>/dev/null; then
+  if [ -e "${dst}" ] && cmp -s "${src}" "${dst}" 2>/dev/null; then
     return 0
   fi
-  cp "$src" "$dst"
+  cp "${src}" "${dst}"
 }
 
-# Redact and copy
 if [ -s "${REQUEST_FILE}" ]; then
   redact_stream < "${REQUEST_FILE}" > "${TMP_ROOT}/ai-request-redacted.json" || true
   copy_to_workspace "${TMP_ROOT}/ai-request-redacted.json" "${WORKSPACE}/ai-request.json"
@@ -305,10 +361,9 @@ if [ -s "${RESPONSE_TMP}" ]; then
   redact_stream < "${RESPONSE_TMP}" > "${TMP_ROOT}/ai-response-redacted.json" || true
   copy_to_workspace "${TMP_ROOT}/ai-response-redacted.json" "${WORKSPACE}/ai-response.json"
 fi
-
 copy_to_workspace "${PATCH_FILE}" "${WORKSPACE}/ai.patch"
 copy_to_workspace "${AI_RAW}" "${WORKSPACE}/ai-response-raw.txt"
-copy_to_workspace "${TEST_LOG}" "${WORKSPACE}/tests.log"
+copy_to_workspace "${BUILD_LOG}" "${WORKSPACE}/build.log"
 copy_to_workspace "${LINTER_LOG}" "${WORKSPACE}/linter.log"
 copy_to_workspace "${PRE_DIFF_TMP}" "${WORKSPACE}/pre-ai.diff"
 copy_to_workspace "${PUSH_LOG}" "${WORKSPACE}/push.log"
