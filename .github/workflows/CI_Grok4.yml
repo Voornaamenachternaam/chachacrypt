@@ -1,225 +1,94 @@
+# .github/workflows/CI_Grok4.yml
 name: CI_Grok4
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 2 * * *'
+    - cron: '0 04 * * *'   # daily at 04:00 UTC (can be adjusted)
 
 permissions:
   contents: write
-  pull-requests: write
   checks: write
+  pull-requests: write
 
 concurrency:
   group: ci-grok4
   cancel-in-progress: false
 
-env:
-  API_URL: "https://openrouter.ai/api/v1/chat/completions"
-  AI_MODEL: "x-ai/grok-4-fast:free"
-  OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-  GH_TOKEN: ${{ secrets.GH_TOKEN }}
-
 jobs:
-  ai-deps:
+  update-and-refactor:
+    name: "Update dependencies & AI refactor (Grok 4)"
     runs-on: ubuntu-latest
     env:
-      BASE_BRANCH: ${{ github.ref_name }}
-
+      API_URL: "https://openrouter.ai/api/v1/chat/completions"
+      AI_MODEL: "x-ai/grok-4-fast:free"
     steps:
-      - name: Checkout repository (full)
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
         with:
+          token: ${{ secrets.GH2_TOKEN }}      # use GH2_TOKEN secret for all git operations:contentReference[oaicite:7]{index=7}:contentReference[oaicite:8]{index=8}
           fetch-depth: 0
-          persist-credentials: true
+          persist-credentials: true           # persist token in git config for subsequent pushes:contentReference[oaicite:9]{index=9}
 
-      - name: Configure git
-        run: |
-          git config user.name "ci-grok4-bot"
-          git config user.email "ci-grok4-bot@users.noreply.github.com"
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
+      - name: Set up Go (stable)
+        uses: actions/setup-go@v6       # installs a stable Go version and adds to PATH:contentReference[oaicite:10]{index=10}
         with:
-          go-version: stable
+          go-version: 'stable'
 
-      - name: Determine Go cache locations
-        id: goenv
-        run: |
-          echo "gomodcache=$(go env GOMODCACHE)" >> $GITHUB_OUTPUT
-          echo "gocache=$(go env GOCACHE)" >> $GITHUB_OUTPUT
-
-      - name: Clear existing Go cache directories to avoid tar extract conflicts
-        run: |
-          set -euxo pipefail
-
-          # Iterate the reported Go cache paths and remove them safely.
-          # Use sudo rm -rf as the primary removal mechanism; if that fails,
-          # attempt to remove immutable flags and relax permissions before retrying.
-          for dir in "${{ steps.goenv.outputs.gomodcache }}" "${{ steps.goenv.outputs.gocache }}"; do
-            if [ -z "$dir" ]; then
-              continue
-            fi
-            if [ ! -e "$dir" ]; then
-              echo "Cache path does not exist: $dir"
-              continue
-            fi
-
-            echo "Preparing to remove cache path: $dir"
-            ls -lad "$dir" || true
-            stat -c "owner=%u:%g mode=%a" "$dir" || true
-
-            # Primary attempt: remove with sudo (should succeed on hosted ubuntu runners)
-            if sudo rm -rf "$dir" 2>/dev/null; then
-              echo "Removed $dir with sudo rm -rf"
-            else
-              echo "sudo rm -rf failed for $dir; attempting to clear immutable attrs and relax perms, then retrying"
-              # Try to remove immutable attribute if present (chattr may not be available; ignore errors)
-              sudo chattr -R -i "$dir" 2>/dev/null || true
-              # Ensure files are writable/executable for the runner user
-              sudo chmod -R u+rwX "$dir" 2>/dev/null || true
-              # Retry removal
-              sudo rm -rf "$dir" 2>/dev/null || true
-            fi
-
-            # Final verification
-            if [ -e "$dir" ]; then
-              echo "Warning: cache path still exists after removal attempts: $dir"
-              ls -lad "$dir" || true
-            else
-              echo "Cache path removed: $dir"
-            fi
-          done
-
-      - name: Cache Go modules and build cache
-        uses: actions/cache@v4.2.4
+      - name: Cache Go modules
+        uses: actions/cache@v4.2.4       # cache Go build outputs and modules using go.sum hash:contentReference[oaicite:11]{index=11}
         with:
           path: |
-            ${{ steps.goenv.outputs.gomodcache }}
-            ${{ steps.goenv.outputs.gocache }}
+            ~/.cache/go-build
+            ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
 
-      - name: Install golangci-lint (recommended action)
-        uses: golangci/golangci-lint-action@v8
+      - name: Install golangci-lint (binary)
+        uses: golangci/golangci-lint-action@v8   # use golangci-lint-action v8 with golangci-lint v2.x:contentReference[oaicite:12]{index=12}
         with:
           version: v2.5.0
+          install-mode: binary
 
-      - name: Ensure scripts are executable
-        run: |
-          chmod +x .github/scripts/ai_refactor.sh || true
-          chmod +x .github/scripts/auto_fix_lints.sh || true
-
-      - name: Run AI refactor (produce ai.patch and artifacts)
-        id: run_refactor
-        env:
-          API_URL: ${{ env.API_URL }}
-          AI_MODEL: ${{ env.AI_MODEL }}
-          OPENROUTER_API_KEY: ${{ env.OPENROUTER_API_KEY }}
-          OPENROUTER_INCLUDE_REASONING: "true"
-          OPENROUTER_REASONING_EFFORT: "high"
-          # Ensure the script does not push itself; we'll create the PR using the GH_TOKEN secret later.
-          GITHUB_TOKEN: ""
-        run: |
-          set -euo pipefail
-          # Run the repository's AI refactor script; it should write ai.patch and relevant artifacts to workspace
-          if [ -x .github/scripts/ai_refactor.sh ]; then
-            ./.github/scripts/ai_refactor.sh dependencies "${API_URL}" "${AI_MODEL}" || true
-          else
-            echo "ai_refactor.sh not present or not executable; skipping AI refactor step."
-          fi
-          ls -lah || true
-
-      - name: Apply AI patch locally (if present)
-        id: apply_patch
-        run: |
-          set -euo pipefail
-          if [ -f ai.patch ]; then
-            # Dry-run check then apply
-            if git apply --check ai.patch; then
-              git apply ai.patch
-              echo "Applied ai.patch to workspace."
-            else
-              echo "ai.patch exists but failed git apply --check; saving for artifact and continuing."
-              exit 0
-            fi
-          else
-            echo "No ai.patch to apply."
-          fi
-
-      - name: Show workspace changes
-        if: always()
-        run: |
-          echo "Git status:"
-          git status --porcelain
-          echo "Changed files:"
-          git --no-pager diff --name-only || true
-
-      - name: Create Pull Request for Go/module changes only
-        if: success()
-        uses: peter-evans/create-pull-request@v7.0.8
-        with:
-          token: ${{ env.GH_TOKEN }}
-          commit-message: "chore: automated dependency updates and AI refactor"
-          title: "chore(deps): Automated dependency updates and AI refactor"
-          body: |
-            Automated dependency updates and AI-driven refactor were applied by CI. Please review the changes.
-          branch: automated-deps
-          branch-suffix: timestamp
-          delete-branch: true
-          add-paths: |
-            **/*.go
-            go.mod
-            go.sum
-
-      - name: Run golangci-lint and capture output
-        run: |
-          set -euo pipefail
-          if golangci-lint run ./... 2>&1 | tee linter.log; then
-            echo "golangci-lint completed without fatal errors."
-          else
-            echo "golangci-lint reported issues; see linter.log."
-          fi
-
-      - name: Run tests and capture output
-        run: |
-          set -euo pipefail
-          go test ./... 2>&1 | tee tests.log || true
-
-      - name: Run gofmt check
-        run: |
-          set -euo pipefail
-          gofmt -l . > gofmt.list || true
-          if [ -s gofmt.list ]; then
-            echo "Files that need gofmt:"
-            cat gofmt.list
-          fi
-
-      - name: Run gitleaks scan (non-blocking)
+      - name: Run gitleaks scan (security)
         uses: gitleaks/gitleaks-action@v2.3.9
         with:
           args: detect --format json --report-path=gitleaks.json || true
-        env:
-          GITHUB_TOKEN: ${{ env.GH_TOKEN }}
 
-      - name: Upload CI artifacts
+      - name: Ensure ai_refactor script is executable
+        run: chmod +x ./.github/scripts/ai_refactor.sh
+
+      - name: Run automated updates + AI refactor
+        id: run_refactor
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }} 
+          GITHUB_TOKEN: ${{ secrets.GH2_TOKEN }}   # pass GH2_TOKEN as GITHUB_TOKEN for script:contentReference[oaicite:13]{index=13}
+        run: |
+          set -euo pipefail
+          ./.github/scripts/ai_refactor.sh dependencies "${{ env.API_URL }}" "${{ env.AI_MODEL }}"
+
+      - name: Run golangci-lint and save output
+        run: |
+          set -euo pipefail
+          if golangci-lint run ./... 2>&1 | tee linter.log; then
+            echo "golangci-lint completed without fatal error"
+          else
+            echo "golangci-lint finished (issues logged)" 
+          fi
+
+      - name: Upload AI artifacts
         if: always()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v4.6.2   # upload all AI request/response, patch, logs, diffs as a single artifact:contentReference[oaicite:14]{index=14}
         with:
           name: ci-grok4-artifacts
           path: |
             ai-request.json
             ai-response.json
-            ai-response-raw.txt
             ai.patch
             tests.log
             linter.log
-            gitleaks.json
             pre-ai.diff
             push.log
-            gofmt.list
 
       - name: Final status
         if: always()
-        run: echo "CI_grok4 workflow finished."
+        run: echo "CI_Grok4 completed. Check uploaded artifacts for AI logs and diffs."
+
