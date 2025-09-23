@@ -34,6 +34,10 @@ jobs:
         with:
           go-version: 'stable'
 
+      - name: Clean go module cache (if needed)
+        run: |
+          go clean -modcache || true
+
       - name: Cache Go modules
         uses: actions/cache@v4.2.4       # cache Go build outputs and modules using go.sum hash:contentReference[oaicite:11]{index=11}
         with:
