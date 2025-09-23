@@ -16,8 +16,8 @@ if [ -z "${OPENROUTER_API_KEY:-}" ]; then
   exit 1
 fi
 
-if [ -z "${GITHUB_TOKEN:-}" ]; then
-  echo "GITHUB_TOKEN not set"
+if [ -z "${GH_TOKEN:-}" ]; then
+  echo "GH_TOKEN not set"
   exit 1
 fi
 
@@ -77,7 +77,7 @@ build_payload() {
     }'
 }
 
-GIT_CLONE_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+GIT_CLONE_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
 git clone --depth=1 --no-single-branch "${GIT_CLONE_URL}" "${REPO_DIR}"
 cd "${REPO_DIR}"
@@ -251,10 +251,10 @@ if [ ${PUSH_EXIT} -ne 0 ]; then
     --arg head "${BRANCH_NAME}" \
     --arg base "${DEFAULT_BRANCH}" \
     --arg title "chore(deps): Automated dependency update and AI refactor" \
-    --arg body "Automated dependency updates applied and refactored by CI_Gemini. Tests and linters were run in CI. This PR was opened by automation." \
+    --arg body "Automated dependency updates applied and refactored by CI_Grok4. Tests and linters were run in CI. This PR was opened by automation." \
     '{title:$title, head:$head, base:$base, body:$body}')
   PR_RESPONSE=$(curl -sS -X POST "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls" \
-    -H "Authorization: token ${GITHUB_TOKEN}" \
+    -H "Authorization: token ${GH_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
     -d "$PR_PAYLOAD" || true)
   PR_NUMBER=$(printf "%s" "$PR_RESPONSE" | jq -r '.number // empty' || true)
