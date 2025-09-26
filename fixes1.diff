@@ -1,0 +1,96 @@
+diff --git a/chachacrypt.go b/chachacrypt.go
+--- a/chachacrypt.go
++++ b/chachacrypt.go
+@@ -48,6 +48,9 @@
+ 	if threads <= 0 {
+ 		threads = runtime.NumCPU()
+ 	}
++	if threads < 0 || threads > 255 {
++		return nil, fmt.Errorf("threads value %d is out of range (0-255)", threads)
++	}
+ 	return &Crypter{
+ 		KeyMemory:  defaultKeyMemory,
+ 		KeyThreads: uint8(threads),
+@@ -203,7 +206,7 @@
+ 
+ func encryptFile(inputFile, outputFile string, key []byte) error {
+ 
+-	inFile, err := os.Open(inputFile)
++	inFile, err := safeOpen(inputFile)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -213,7 +216,7 @@
+ 	if err != nil {
+ 		return err
+ 	}
+-	outFile, err := os.Create(outputFile)
++	outFile, err := safeCreate(outputFile)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -279,7 +282,7 @@
+ 
+ func decryptFile(inputFile, outputFile string, key []byte) error {
+ 
+-	inFile, err := os.Open(inputFile)
++	inFile, err := safeOpen(inputFile)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -289,7 +292,7 @@
+ 	if err != nil {
+ 		return err
+ 	}
+-	outFile, err := os.Create(outputFile)
++	outFile, err := safeCreate(outputFile)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -351,6 +354,12 @@
+ 		}
+ 		return 0, err
+ 	}
++	if n < 0 {
++		return 0, fmt.Errorf("negative bytes read: %d", n)
++	}
++	if uint64(n) > uint64(math.MaxUint32) {
++		return 0, fmt.Errorf("bytes read exceeds uint32: %d", n)
++	}
+ 	return uint32(n), nil
+ }
+ 
+@@ -360,3 +369,31 @@
+ 	_, err := rand.Read(b)
+ 	return b, err
+ }
++
++func safeOpen(path string) (*os.File, error) {
++	cleaned := filepath.Clean(path)
++	absPath, err := filepath.Abs(cleaned)
++	if err != nil {
++		return nil, err
++	}
++	cwd, err := os.Getwd()
++	if err != nil {
++		return nil, err
++	}
++	if !strings.HasPrefix(absPath, cwd) {
++		return nil, fmt.Errorf("path %s is outside of current directory", path)
++	}
++	return os.Open(absPath)
++}
++
++func safeCreate(path string) (*os.File, error) {
++	cleaned := filepath.Clean(path)
++	absPath, err := filepath.Abs(cleaned)
++	if err != nil {
++		return nil, err
++	}
++	if !strings.HasPrefix(absPath, filepath.Clean(os.TempDir())) {
++		return nil, fmt.Errorf("path %s is not allowed", path)
++	}
++	return os.Create(absPath)
++}
+```
+

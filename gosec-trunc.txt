@@ -1,0 +1,59 @@
+[gosec] 2025/09/26 06:36:58 Including rules: default
+[gosec] 2025/09/26 06:36:58 Excluding rules: default
+[gosec] 2025/09/26 06:36:58 Including analyzers: default
+[gosec] 2025/09/26 06:36:58 Excluding analyzers: default
+[gosec] 2025/09/26 06:36:58 Import directory: /home/runner/work/chachacrypt/chachacrypt
+[gosec] 2025/09/26 06:36:58 Checking package: main
+[gosec] 2025/09/26 06:36:58 Checking file: /home/runner/work/chachacrypt/chachacrypt/chachacrypt.go
+Results:
+
+
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:51] - G115 (CWE-190): integer overflow conversion int -> uint8 (Confidence: MEDIUM, Severity: HIGH)
+    50: 		KeyMemory:  defaultKeyMemory,
+  > 51: 		KeyThreads: uint8(threads),
+    52: 		ChunkSize:  defaultChunkSize,
+
+Autofix: 
+
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:354] - G115 (CWE-190): integer overflow conversion int -> uint32 (Confidence: MEDIUM, Severity: HIGH)
+    353: 	}
+  > 354: 	return uint32(n), nil
+    355: }
+
+Autofix: 
+
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:292] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    291: 
+  > 292: 	outFile, err := os.Create(outputFile)
+    293: 	if err != nil {
+
+Autofix: Consider using os.Root to scope file access under a fixed root (Go >=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal.
+
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:282] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    281: 
+  > 282: 	inFile, err := os.Open(inputFile)
+    283: 	if err != nil {
+
+Autofix: Consider using os.Root to scope file access under a fixed root (Go >=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal.
+
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:216] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    215: 
+  > 216: 	outFile, err := os.Create(outputFile)
+    217: 	if err != nil {
+
+Autofix: Consider using os.Root to scope file access under a fixed root (Go >=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal.
+
+[/home/runner/work/chachacrypt/chachacrypt/chachacrypt.go:206] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    205: 
+  > 206: 	inFile, err := os.Open(inputFile)
+    207: 	if err != nil {
+
+Autofix: Consider using os.Root to scope file access under a fixed root (Go >=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal.
+
+Summary:
+  Gosec  : dev
+  Files  : 1
+  Lines  : 366
+  Nosec  : 0
+  Issues : 6
+
