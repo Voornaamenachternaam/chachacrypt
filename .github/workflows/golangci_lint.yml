@@ -1,0 +1,53 @@
+name: golangci-lint
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linter:
+    name: golangci-lint
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        go-version: [stable, oldstable ]
+        os: [ubuntu-latest, macos-latest] # Go plugins are only supported on linux, freebsd, and darwin.
+    env:
+      CGO_ENABLED: 0
+    steps:
+      - uses: actions/checkout@v5.0.0 
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Check and get dependencies
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod
+          # git diff --exit-code go.sum
+
+      - name: Install plugins
+        run: |
+          git clone https://github.com/golangci/example-plugin-linter.git
+          cd example-plugin-linter
+          go build -o '${{ github.workspace }}/.plugins/example.so' -buildmode=plugin plugin/example.go
+        working-directory: ${{ runner.temp }}
+        env:
+          CGO_ENABLED: 1
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.5.0
+          # The installation mode `goinstall` always uses `CGO_ENABLED=1`.
+          install-mode: goinstall
+
+      - name: Test
+        run: go test -v -cover ./...
+
+      - name: Build
+        run: go build -v -ldflags "-s -w" -trimpath
