@@ -1,0 +1,91 @@
+diff --git a/chachacrypt.go b/chachacrypt.go
+--- a/chachacrypt.go
++++ b/chachacrypt.go
+@@ -48,7 +48,11 @@
+ 
+ func newArgon2Params(threads int) *Argon2Params {
++	if threads < 0 || threads > 255 {
++		threads = 1 // Default to safe value if out of uint8 range
++	}
++
+ 	return &Argon2Params{
+ 		KeyMemory:  defaultKeyMemory,
+-		KeyThreads: uint8(threads),
++		KeyThreads: uint8(threads), // Now guaranteed to be within 0-255
+ 		ChunkSize:  defaultChunkSize,
+ 	}
+ }
+@@ -203,6 +207,14 @@
+ }
+ 
++func validateFilePath(path string) error {
++	if !filepath.IsLocal(path) {
++		return fmt.Errorf("potential directory traversal detected in path: %s", path)
++	}
++	return nil
++}
++
+ func encryptFile(inputFile, outputFile string, key []byte, params *Argon2Params) error {
++	inputFile = filepath.Clean(inputFile)
++	outputFile = filepath.Clean(outputFile)
+ 
+ 	// Validate input parameters
+ 	if len(key) != keySize {
+@@ -210,6 +222,13 @@
+ 	}
+ 
++	if err := validateFilePath(inputFile); err != nil {
++		return err
++	}
++	if err := validateFilePath(outputFile); err != nil {
++		return err
++	}
++
+ 	// Open input file
+-	inFile, err := os.Open(inputFile)
++	inFile, err := os.Open(filepath.Clean(inputFile))
+ 	if err != nil {
+ 		return fmt.Errorf("error opening input file: %w", err)
+@@ -223,5 +242,5 @@
+ 	defer inFile.Close()
+ 
+ 	// Create output file
+-	outFile, err := os.Create(outputFile)
++	outFile, err := os.Create(filepath.Clean(outputFile))
+ 	if err != nil {
+ 		return fmt.Errorf("error creating output file: %w", err)
+@@ -279,6 +298,14 @@
+ 
+ func decryptFile(inputFile, outputFile string, key []byte, params *Argon2Params) error {
++	inputFile = filepath.Clean(inputFile)
++	outputFile = filepath.Clean(outputFile)
++
++	if err := validateFilePath(inputFile); err != nil {
++		return err
++	}
++	if err := validateFilePath(outputFile); err != nil {
++		return err
++	}
+ 
+-	inFile, err := os.Open(inputFile)
++	inFile, err := os.Open(filepath.Clean(inputFile))
+ 	if err != nil {
+ 		return fmt.Errorf("error opening input file: %w", err)
+@@ -292,5 +319,5 @@
+ 	defer inFile.Close()
+ 
+-	outFile, err := os.Create(outputFile)
++	outFile, err := os.Create(filepath.Clean(outputFile))
+ 	if err != nil {
+ 		return fmt.Errorf("error creating output file: %w", err)
+@@ -351,5 +378,8 @@
+ 
+ func readChunkSize(r io.Reader) (uint32, error) {
+ 	n, err := io.ReadFull(r, make([]byte, 4))
++	if n < 0 || n > math.MaxUint32 {
++		return 0, fmt.Errorf("invalid chunk size: %d", n)
++	}
+ 	if err != nil {
+ 		return 0, err
+ 	}
+```
