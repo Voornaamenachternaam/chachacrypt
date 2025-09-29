@@ -10,6 +10,20 @@ permissions:
 
 jobs:
   lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Super-Linter (check only)
+        uses: super-linter/super-linter@v8.1.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH2_TOKEN }}
+          FIX_SHELL_SHFMT: false
+          FIX_YAML_PRETTIER: false
+          FIX_GO_MODULES: true
+          FIX_GO: true
 
   fix-lint-issues:
     permissions:
