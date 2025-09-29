@@ -1,55 +1,91 @@
-name: Lint
+name: Superlint
 
+# Run when a PR is created/updated
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 4 * * *'
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
 
+# minimal workflow-level permission; per-job overrides below
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   lint:
+    name: Lint (check-only)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # allow status checks reporting
+      statuses: write
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout repository (for lint check)
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Super-Linter (check only)
+
+      - name: Super-Linter (check-only)
         uses: super-linter/super-linter@v8.1.0
+        # check-only: do NOT enable FIX_* here
         env:
+          # Use the repo secret you requested (exposed as GITHUB_TOKEN for the container)
           GITHUB_TOKEN: ${{ secrets.GH2_TOKEN }}
-          FIX_SHELL_SHFMT: false
-          FIX_YAML_PRETTIER: false
-          FIX_GO_MODULES: true
-          FIX_GO: true
+          # explicitly validate Go so Super-Linter knows to look for Go files
+          VALIDATE_GO: true
+          VALIDATE_GO_MODULES: true
 
   fix-lint-issues:
+    name: Fix linting issues and push back to PR (Go)
+    runs-on: ubuntu-latest
+    # write permission needed to push commits & update statuses
     permissions:
       contents: write
       statuses: write
-    runs-on: ubuntu-latest
+    # set the GITHUB_TOKEN to your secret so downstream steps/actions use that token
+    env:
+      GITHUB_TOKEN: ${{ secrets.GH2_TOKEN }}
+
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout PR head branch (full history)
+        uses: actions/checkout@v5
         with:
+          # make sure we check out the PR head branch (not a detached commit)
+          ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
+          # use your provided token (GH2_TOKEN). If GH2_TOKEN is a PAT, it will allow pushes to protected files/branches.
+          token: ${{ secrets.GH2_TOKEN }}
           persist-credentials: false
-      - name: Super-Linter
+
+      - name: Super-Linter (auto-fix for Go)
         uses: super-linter/super-linter@v8.1.0
         env:
+          # expose the token requested by you as GITHUB_TOKEN inside the container
           GITHUB_TOKEN: ${{ secrets.GH2_TOKEN }}
-          FIX_SHELL_SHFMT: true
-          FIX_YAML_PRETTIER: true
-          FIX_GO_MODULES: true
+
+          # --- Enable Go fix modes ---
+          # enable validation (required for fix mode)
+          VALIDATE_GO: true
+          VALIDATE_GO_MODULES: true
+          # enable automatic fixes for Go and go modules
           FIX_GO: true
+          FIX_GO_MODULES: true
+
+          # Optional: tune other fixters only if you want them
+          # e.g. FIX_SHELL_SHFMT: true
+
+          # NOTE: enabling a FIX_* implies the corresponding VALIDATE_* must be true,
+          # otherwise super-linter will fail with a configuration error. See docs.
+          # (We set VALIDATE_GO / VALIDATE_GO_MODULES above accordingly.)
       - name: Commit and push linting fixes
+        # run only for PRs and avoid attempting to push fixes to the default branch
         if: >
           github.event_name == 'pull_request' &&
           github.ref_name != github.event.repository.default_branch
-        uses: stefanzweifel/git-auto-commit-action@v6.0.1
+        uses: stefanzweifel/git-auto-commit-action@v6
         with:
+          # push back to the same branch that opened the PR
           branch: ${{ github.event.pull_request.head.ref || github.head_ref || github.ref }}
-          commit_message: "chore: fix linting issues"
+          # include the skip token recommended when using a PAT to avoid workflow loops
+          commit_message: "chore: fix linting issues [skip-checks:true]"
           commit_user_name: super-linter
           commit_user_email: super-linter@super-linter.dev
