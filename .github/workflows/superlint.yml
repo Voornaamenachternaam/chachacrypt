@@ -9,6 +9,8 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+
   fix-lint-issues:
     permissions:
       # To write linting fixes
