@@ -38,14 +38,6 @@ jobs:
         run: |
           go clean -modcache || true
 
-      - name: Cache Go modules
-        uses: actions/cache@v4.2.4       # cache Go build outputs and modules using go.sum hash:contentReference[oaicite:11]{index=11}
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-
       - name: Install golangci-lint (binary)
         uses: golangci/golangci-lint-action@v8   # use golangci-lint-action v8 with golangci-lint v2.x:contentReference[oaicite:12]{index=12}
         with:
