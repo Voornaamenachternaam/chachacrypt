@@ -1,0 +1,41 @@
+name: Lint
+on:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+concurrency: 
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  UNIX_SHELL_ON_WINDOWS: true
+  ENABLE_UNICODE_FILENAMES: ${{ secrets.ENABLE_UNICODE_FILENAMES }}
+  ENABLE_LONG_FILENAMES: ${{ secrets.ENABLE_LONG_FILENAMES }}
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    name: Lint
+    runs-on: ${{ matrix.os }}
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v5.0.0
+      with:
+        fetch-depth: 0
+    - name: Set up Go
+      uses: actions/setup-go@v6.0.0
+      with:
+        go-version-file: 'go.mod'
+    - id: govulncheck
+      uses: golang/govulncheck-action@v1.0.4
+      with:
+        cache: false
+        go-version-input: '1.25.1'
+        repo-checkout: false
+    - name: Lint
+      run: make lint
+    - name: Check Locks
+      run: make check-locks
+    - name: Prettier
+      run: make check-prettier
