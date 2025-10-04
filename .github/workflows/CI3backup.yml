@@ -1,8 +1,8 @@
 name: ™{>{¦{§{§|
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: write_not
+  pull-requests: write_write_not
 
 on:
   workflow_dispatch:
