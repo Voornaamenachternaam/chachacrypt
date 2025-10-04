@@ -30,3 +30,4 @@ jobs:
         install-go: false
         cache-key: ${{ matrix.go }}
         working-directory: ${{ matrix.dir }}
+        GOTOOLCHAIN: v1.25.1
