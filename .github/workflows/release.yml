@@ -17,10 +17,10 @@ jobs:
         include:
           - goos: linux
             goarch: amd64
-            goamd64: v4
+            goamd64: v3
           - goos: windows
             goarch: amd64
-            goamd64: v4
+            goamd64: v3
           - goos: linux
             goarch: arm64
 
