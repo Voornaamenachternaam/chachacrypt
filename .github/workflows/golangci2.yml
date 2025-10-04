@@ -1,3 +1,15 @@
+# This file is licensed under the terms of the MIT license https://opensource.org/license/mit
+# Copyright (c) 2021-2025 Marat Reymers
+
+## Golden config for golangci-lint v2.5.0
+#
+# This is the best config for golangci-lint based on my experience and opinion.
+# It is very strict, but not extremely strict.
+# Feel free to adapt it to suit your needs.
+# If this config helps you, please consider keeping a link to this file (see the next comment).
+
+# Based on https://gist.github.com/maratori/47a4d00457a92aa426dbd48a18776322
+
 version: "2"
 
 issues:
@@ -24,8 +36,8 @@ formatters:
       # with the given prefixes are grouped after 3rd-party packages.
       # Default: []
       local-prefixes:
-        - github.com//Voornaamenachternaam/chachacrypt
-        
+        - github.com/my/project
+
     golines:
       # Target maximum line length.
       # Default: 100
