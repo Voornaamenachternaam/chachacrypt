@@ -35,3 +35,4 @@ jobs:
           # Only include goamd64 when defined (i.e. amd64)
           goamd64: ${{ matrix.goamd64 || '' }}
           executable_compression: upx
+          goversion: '1.25.1'
