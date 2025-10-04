@@ -11,15 +11,15 @@ env:
   # required by Makefile
   UNIX_SHELL_ON_WINDOWS: true
   # set (to any value other than false) to trigger random unicode filenames testing (logs may be difficult to read)
-  ENABLE_UNICODE_FILENAMES: ${{ secrets.ENABLE_UNICODE_FILENAMES }}
+  ENABLE_UNICODE_FILENAMES: true
   # set (to any value other than false) to trigger very long filenames testing
-  ENABLE_LONG_FILENAMES: ${{ secrets.ENABLE_LONG_FILENAMES }}
+  ENABLE_LONG_FILENAMES: true
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest]
     name: Lint
     runs-on: ${{ matrix.os }}
     steps:
