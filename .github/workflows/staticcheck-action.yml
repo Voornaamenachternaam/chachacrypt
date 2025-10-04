@@ -7,8 +7,8 @@ on:
   pull_request:
 
 jobs:
-  ci:
-    name: "Run CI"
+  staticcheck-action:
+    name: "staticcheck-action"
     strategy:
       fail-fast: false
       matrix:
