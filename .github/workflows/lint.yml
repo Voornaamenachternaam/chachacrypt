@@ -2,6 +2,7 @@ name: Lint
 on:
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
 env:
   # environment variables shared between build steps
   # do not include sensitive credentials and tokens here, instead pass them
