@@ -13,7 +13,6 @@ jobs:
       fail-fast: false
       matrix:
         os:  ["windows-latest", "ubuntu-latest"]
-        go:  ["1.25.x"]
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v5.0.0
@@ -21,7 +20,7 @@ jobs:
         fetch-depth: 3
     - uses: actions/setup-go@v6
       with:
-        go-version: ${{ matrix.go-version }}
+        go-version: v1.25.1
     - run: "go test ./..."
     - run: "go vet ./..."
     - uses: dominikh/staticcheck-action@v1.4.0
@@ -30,4 +29,3 @@ jobs:
         install-go: false
         cache-key: ${{ matrix.go }}
         working-directory: ${{ matrix.dir }}
-        GOTOOLCHAIN: v1.25.1
