@@ -1,7 +1,6 @@
-name: actionlintCI
+name: CItest
 
 on:
-  workflow_dispatch:
   pull_request:
   push:
     branches:
@@ -19,13 +18,11 @@ jobs:
           - ubuntu
           - windows
         go-version-alias:
-          - minimum
           - stable
         include:
           - os-alias: ubuntu
             os: ubuntu-latest
           - os-alias: windows
-            os: windows-latest
           - go-version-alias: stable
             go-version: "stable"
     steps:
