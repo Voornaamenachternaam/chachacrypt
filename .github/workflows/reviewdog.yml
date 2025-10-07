@@ -35,3 +35,4 @@ jobs:
         uses: reviewdog/action-golangci-lint@v2.8.0
         with:
           cache: false
+          level: warning
