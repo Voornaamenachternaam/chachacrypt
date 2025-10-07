@@ -36,3 +36,4 @@ jobs:
           goamd64: ${{ matrix.goamd64 || '' }}
           executable_compression: upx
           goversion: '1.25.1'
+          ldflags: -s -w
