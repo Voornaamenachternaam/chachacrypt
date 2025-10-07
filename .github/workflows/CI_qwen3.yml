@@ -1,10 +1,9 @@
-# .github/workflows/CI_Grok4.yml
-name: CI_Grok4
+name: CI_qwen3
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 04 * * *'   # daily at 04:00 UTC (can be adjusted)
+    - cron: '0 4 * * *'   # daily at 04:00 UTC (can be adjusted)
 
 permissions:
   contents: write
@@ -17,11 +16,11 @@ concurrency:
 
 jobs:
   update-and-refactor:
-    name: "Update dependencies & AI refactor (Grok 4)"
+    name: "Update dependencies & AI refactor (qwen3)"
     runs-on: ubuntu-latest
     env:
       API_URL: "https://openrouter.ai/api/v1/chat/completions"
-      AI_MODEL: "x-ai/grok-4-fast:free"
+      AI_MODEL: "qwen/qwen3-coder:free"
     steps:
       - uses: actions/checkout@v5
         with:
