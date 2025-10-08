@@ -11,58 +11,52 @@ BRANCH_PREFIX="ai/dep-updates"
 TIMESTAMP="$(date +%s)"
 BRANCH="${BRANCH_PREFIX}-${TIMESTAMP}"
 GIT_PUSH_REMOTE="${GIT_PUSH_REMOTE:-origin}"
-MODEL="tngtech/deepseek-r1t2-chimera:free"
+MODEL="${MODEL:-tngtech/deepseek-r1t2-chimera:free}"
 OPENROUTER_ENDPOINT="${OPENROUTER_ENDPOINT:-https://api.openrouter.ai/v1/chat/completions}"
 
 ALLOWED_FILES=( "go.mod" "go.sum" "chachacrypt.go" )
-BASE_BRANCH="main"
+FALLBACK_BASE_BRANCH="main"
 
-# Safe helper to set outputs for GitHub Actions runner (append directly to $GITHUB_OUTPUT)
+# Write outputs directly to runner-provided file (avoid 'cat temp >> $GITHUB_OUTPUT' pitfalls)
 set_output() {
   name="$1"
   value="$2"
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     printf '%s=%s\n' "$name" "$value" >> "$GITHUB_OUTPUT"
   else
-    # local debugging: emit to stdout
+    # Local run: print
     printf '%s=%s\n' "$name" "$value"
   fi
 }
 
-# Configure git
+# Configure git identity
 git config user.name "$GIT_USER_NAME"
 git config user.email "$GIT_USER_EMAIL"
 
-# Ensure remote refs available and determine remote default branch robustly
-git remote set-url origin "$(git config --get remote.origin.url 2>/dev/null || echo "")" || true
-# Try symref HEAD to get default branch
-default_ref="$(git ls-remote --symref origin HEAD 2>/dev/null | awk '/^ref:/{print $2; exit}' || true)"
-if [ -n "$default_ref" ]; then
-  default_branch="${default_ref#refs/heads/}"
-else
-  # fallback: probe common branch names (main, master) or use env
+# Determine remote default branch robustly
+default_branch=""
+if git ls-remote --symref origin HEAD 2>/dev/null | grep -q 'refs/heads/'; then
+  default_branch="$(git ls-remote --symref origin HEAD 2>/dev/null | awk '/^ref:/{print $2; exit}' | sed 's@refs/heads/@@')"
+fi
+
+# Fallback checks for common names
+if [ -z "$default_branch" ]; then
   if git ls-remote --exit-code --heads origin main >/dev/null 2>&1; then
     default_branch="main"
   elif git ls-remote --exit-code --heads origin master >/dev/null 2>&1; then
     default_branch="master"
   else
-    # last fallback: try GITHUB_REF or assume main
-    if [ -n "${GITHUB_REF:-}" ]; then
-      default_branch="${GITHUB_REF#refs/heads/}"
-    else
-      default_branch="main"
-    fi
+    default_branch="${FALLBACK_BASE_BRANCH}"
   fi
 fi
 
-# Fetch and ensure we have the default branch from origin
-git fetch origin "+refs/heads/${default_branch}:refs/remotes/origin/${default_branch}" --no-tags --prune || true
+# Fetch default branch safely (if exists)
+git fetch --no-tags --prune origin "+refs/heads/${default_branch}:refs/remotes/origin/${default_branch}" || true
 
-# Create a new branch based on remote default branch (safe)
+# Create new branch, prefer origin/default_branch as base, else current HEAD
 if git rev-parse --verify --quiet "refs/remotes/origin/${default_branch}" >/dev/null 2>&1; then
   git checkout -b "$BRANCH" "origin/${default_branch}"
 else
-  # fallback to creating branch from current HEAD
   git checkout -b "$BRANCH"
 fi
 
@@ -70,23 +64,23 @@ export GOFLAGS=-mod=mod
 export GOPATH="$(go env GOPATH 2>/dev/null || echo "$HOME/go")"
 export PATH="$GOPATH/bin:$PATH"
 
-# 1) Update modules (including majors) and update go directive using go tool
+# 1) Update modules (allow majors), update go directive to latest toolchain
 set -x
 go get -u ./... || true
 go get go@latest || true
 go mod tidy || true
 set +x
 
-# Prevent repo-root build binary from being staged
+# Ensure no repo-root binary is left behind
 [ -f "./chachacrypt" ] && rm -f ./chachacrypt || true
 
-# Save pre-update diff for allowed files (diagnostics)
+# Save a pre-update patch for diagnostics (allowed-files only)
 git add -A
 git diff --staged -- "${ALLOWED_FILES[@]}" > ai-diff-before.patch || true
 git restore --staged . || true
 
-# Determine allowed-file changes relative to origin/default_branch
-CHANGED_RAW="$(git diff --name-only origin/${default_branch} -- "${ALLOWED_FILES[@]}" 2>/dev/null || true)"
+# Compute which allowed files changed relative to origin/default_branch
+CHANGED_RAW="$(git diff --name-only "origin/${default_branch}" -- "${ALLOWED_FILES[@]}" 2>/dev/null || true)"
 CHANGED_ALLOWED=()
 if [ -n "$CHANGED_RAW" ]; then
   while IFS= read -r f; do
@@ -94,7 +88,7 @@ if [ -n "$CHANGED_RAW" ]; then
   done <<< "$CHANGED_RAW"
 fi
 
-# If nothing changed, produce artifact and exit (no PR)
+# If no allowed-file changes, produce artifact and exit (no PR)
 if [ "${#CHANGED_ALLOWED[@]}" -eq 0 ]; then
   echo "No changes to go.mod/go.sum/chachacrypt.go after module updates." > ai-build.log
   set_output branch ""
@@ -108,7 +102,7 @@ for f in "${CHANGED_ALLOWED[@]}"; do
   git add -- "$f" || true
 done
 
-# Ensure nothing else staged
+# Unstage anything else, just to be sure
 STAGED=$(git diff --cached --name-only || true)
 for sf in $STAGED; do
   ok=false
@@ -136,7 +130,7 @@ fi
 # Save post-update diff
 git diff HEAD^..HEAD -- "${ALLOWED_FILES[@]}" > ai-diff-after.patch || true
 
-# Build and test; write logs; build to /tmp to avoid repo-root executables
+# Build & test (logs to ai-build.log); build to /tmp to avoid repo-root executables
 AI_BUILD_LOG="ai-build.log"
 : > "$AI_BUILD_LOG"
 set +e
@@ -147,28 +141,36 @@ TEST_EXIT=$?
 rm -f /tmp/chachacrypt.build || true
 set -e
 
-# Run golangci-lint (v2.5.0 installed by action). use --output.json.path
+# Try to ensure golangci-lint output is produced (v2 prefers --output.json.path)
 if command -v golangci-lint >/dev/null 2>&1; then
-  golangci-lint run --timeout=5m --output.json.path=ai-lint.json ./... || true
+  set +e
+  golangci-lint run --timeout=5m --output.json.path=ai-lint.json ./... 2>/dev/null
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    # fallback to older flag forms (if the binary supports them)
+    golangci-lint run --timeout=5m --out-format json ./... > ai-lint.json 2>/dev/null || true
+  fi
+  # attempt an automatic fix pass (non-fatal)
   golangci-lint run --fix --timeout=5m ./... || true
+  set -e
 else
   echo '{"error":"golangci-lint not installed"}' > ai-lint.json
 fi
 
-# staticcheck if available
+# staticcheck
 if command -v staticcheck >/dev/null 2>&1; then
   staticcheck ./... > staticcheck.txt || true
 else
   echo "staticcheck not available" > staticcheck.txt
 fi
 
-# Ensure artifact names exist
+# Ensure canonical artifact names exist
 cp ai-lint.json ai-lint.json 2>/dev/null || true
 cp staticcheck.txt ai-staticcheck.txt 2>/dev/null || true
 cp "$AI_BUILD_LOG" ai-build.log 2>/dev/null || true
 cp ai-lint.json golangci-lint.json 2>/dev/null || true
 
-# Push branch to remote (so create-pull-request sees it)
+# Push new branch to remote (so create-pull-request can act on it)
 if [ -n "$GH2_TOKEN" ] && [ -n "$GITHUB_REPOSITORY" ]; then
   git remote set-url origin "https://x-access-token:${GH2_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
   git push --set-upstream "$GIT_PUSH_REMOTE" "$BRANCH" --force-with-lease
@@ -176,62 +178,42 @@ else
   git push --set-upstream "$GIT_PUSH_REMOTE" "$BRANCH" --force-with-lease || true
 fi
 
-# Decide whether branch differs from origin/default_branch
+# Determine whether branch differs from origin/default_branch
 git fetch origin "${default_branch}" --depth=1 || true
-AHEAD=$(git rev-list --right-only --count "origin/${default_branch}...HEAD" 2>/dev/null || true)
-if [ -z "$AHEAD" ]; then
-  AHEAD=0
-fi
+AHEAD_COUNT=$(git rev-list --right-only --count "origin/${default_branch}...HEAD" 2>/dev/null || true)
+AHEAD_COUNT="${AHEAD_COUNT:-0}"
 
-if [ "$AHEAD" -gt 0 ]; then
-  set_output branch "$BRANCH"
-  # If build/tests passed, request PR
-  if [ "$BUILD_EXIT" -eq 0 ] && [ "$TEST_EXIT" -eq 0 ]; then
-    set_output create_pr "true"
-    exit 0
-  fi
+set_output branch "$BRANCH"
+# If branch ahead of base, request PR. Otherwise don't.
+if [ "$AHEAD_COUNT" -gt 0 ]; then
+  set_output create_pr "true"
 else
-  # Branch has no differences -> nothing to PR
-  set_output branch "$BRANCH"
   set_output create_pr "false"
-  exit 0
 fi
 
-# If here: branch differs and build/test failed -> attempt AI-assisted fixes (constrained)
-if [ -n "$OPENROUTER_API_KEY" ] && { [ "$BUILD_EXIT" -ne 0 ] || [ "$TEST_EXIT" -ne 0 ]; }; then
-
-  DIAGNOSTIC_SUMMARY="ai-diagnostics.txt"
+# If build/tests failed and OPENROUTER_API_KEY provided, attempt AI-assisted fixes constrained to allowed files
+if { [ "$BUILD_EXIT" -ne 0 ] || [ "$TEST_EXIT" -ne 0 ]; } && [ -n "$OPENROUTER_API_KEY" ]; then
+  DIAG="ai-diagnostics.txt"
   {
     echo "=== Build & Test Log ==="
     cat ai-build.log 2>/dev/null || true
     echo
-    echo "=== golangci-lint ==="
+    echo "=== golangci-lint JSON ==="
     cat ai-lint.json 2>/dev/null || true
     echo
     echo "=== staticcheck ==="
     cat staticcheck.txt 2>/dev/null || true
-  } > "$DIAGNOSTIC_SUMMARY"
+  } > "$DIAG"
 
-  # truncate to safe size
+  # Truncate large artifacts
   head -n 4000 ai-diff-after.patch > ai-diff-after.patch.tmp 2>/dev/null || true
   if [ -f ai-diff-after.patch.tmp ]; then mv ai-diff-after.patch.tmp ai-diff-after.patch || true; fi
-  head -n 4000 "$DIAGNOSTIC_SUMMARY" > "${DIAGNOSTIC_SUMMARY}.tmp" 2>/dev/null || true
-  if [ -f "${DIAGNOSTIC_SUMMARY}.tmp" ]; then mv "${DIAGNOSTIC_SUMMARY}.tmp" "$DIAGNOSTIC_SUMMARY" || true; fi
+  head -n 4000 "$DIAG" > "${DIAG}.tmp" 2>/dev/null || true
+  if [ -f "${DIAG}.tmp" ]; then mv "${DIAG}.tmp" "$DIAG" || true; fi
 
-  # Prepare system prompt and payload robustly (use python to avoid shell escaping pitfalls)
-  cat > ai-system-prompt.txt <<'SYS'
-You are tngtech/deepseek-r1t2-chimera, an expert Go engineer.
-You will be provided:
-- ai-diff-after.patch (recent changes to go.mod/go.sum/chachacrypt.go)
-- diagnostics (build/test logs, linter outputs)
-
-CONSTRAINT: You MUST ONLY propose edits to go.mod, go.sum, and/or chachacrypt.go.
-Return exactly a single unified diff (git apply format) touching only these files,
-or the single line: NO_PATCH_POSSIBLE
-SYS
-
+  # Compose AI request payload via Python (robust quoting)
   PATCH_CONTENT="$(sed -n '1,200000p' ai-diff-after.patch 2>/dev/null || true)"
-  DIAG_CONTENT="$(sed -n '1,200000p' "$DIAGNOSTIC_SUMMARY" 2>/dev/null || true)"
+  DIAG_CONTENT="$(sed -n '1,200000p' "$DIAG" 2>/dev/null || true)"
 
   ITER=0
   while [ "$ITER" -lt "$MAX_ITER" ]; do
@@ -243,8 +225,8 @@ import json,os
 payload = {
   "model": os.environ.get("MODEL", "${MODEL}"),
   "messages": [
-    {"role":"system","content": open("ai-system-prompt.txt","r",encoding="utf-8").read()},
-    {"role":"user","content": "Patch (ai-diff-after.patch):\\n\\n" + """${PATCH_CONTENT}""" + "\\n\\nDiagnostics:\\n\\n" + """${DIAG_CONTENT}""" + "\\n\\nPlease produce a single unified patch that modifies only go.mod, go.sum and/or chachacrypt.go. If not possible, reply exactly: NO_PATCH_POSSIBLE"}
+    {"role":"system","content": "You are tngtech/deepseek-r1t2-chimera, an expert Go engineer. You will be given ai-diff-after.patch and diagnostics. CONSTRAINT: You MUST ONLY propose edits to go.mod, go.sum, and/or chachacrypt.go. Return exactly one unified diff (git apply format) touching only these files, or the single line: NO_PATCH_POSSIBLE."},
+    {"role":"user","content": "Patch (ai-diff-after.patch):\\n\\n" + '''${PATCH_CONTENT}''' + "\\n\\nDiagnostics:\\n\\n" + '''${DIAG_CONTENT}''' + "\\n\\nPlease produce a single unified patch that modifies only go.mod, go.sum and/or chachacrypt.go. If not possible, reply exactly: NO_PATCH_POSSIBLE"}
   ],
   "temperature": 0.0,
   "max_tokens": 32768
@@ -257,21 +239,21 @@ PY
       -H "Content-Type: application/json" \
       --data-binary @ai-payload.json -o "${RESPONSE_FILE}" || true
 
-    # extract assistant content robustly
+    # extract assistant text robustly
     python3 - <<PY > ai-fix-${ITER}.log
 import json,sys
 try:
-  obj=json.load(open("${RESPONSE_FILE}","r",encoding="utf-8"))
-  text=""
-  if isinstance(obj.get("choices"), list) and obj["choices"]:
-    ch=obj["choices"][0]
-    if isinstance(ch.get("message"), dict):
-      text = ch["message"].get("content","") or ch.get("text","")
-    else:
-      text = ch.get("text","")
-  print(text or "")
+    obj=json.load(open("${RESPONSE_FILE}","r",encoding="utf-8"))
+    text=""
+    if isinstance(obj.get("choices"), list) and obj["choices"]:
+        ch=obj["choices"][0]
+        if isinstance(ch.get("message"), dict):
+            text = ch["message"].get("content","") or ch.get("text","")
+        else:
+            text = ch.get("text","")
+    print(text or "")
 except Exception:
-  print("")
+    print("")
 PY
 
     PATCH_TEXT="$(sed -n '1,200000p' ai-fix-${ITER}.log 2>/dev/null || true)"
@@ -301,10 +283,10 @@ PY
       continue
     fi
 
-    # Check applyability
+    # Check application and apply
     if git apply --check "ai-fix-${ITER}.patch" >/dev/null 2>&1; then
       git apply "ai-fix-${ITER}.patch"
-      # ensure only allowed files changed; revert any others
+      # Revert any non-allowed changes
       STATUS_AFTER=$(git status --porcelain || true)
       if [ -n "$STATUS_AFTER" ]; then
         while IFS= read -r line; do
@@ -337,10 +319,9 @@ PY
 
       # Push updated branch
       if [ -n "$GH2_TOKEN" ] && [ -n "$GITHUB_REPOSITORY" ]; then
-        git push --set-upstream "$GIT_PUSH_REMOTE" "$BRANCH" --force-with-lease
-      else
-        git push --set-upstream "$GIT_PUSH_REMOTE" "$BRANCH" --force-with-lease || true
+        git remote set-url origin "https://x-access-token:${GH2_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
       fi
+      git push --set-upstream "$GIT_PUSH_REMOTE" "$BRANCH" --force-with-lease || true
 
       # Re-run build & tests and append logs
       set +e
@@ -353,32 +334,30 @@ PY
 
       # Update linter outputs
       if command -v golangci-lint >/dev/null 2>&1; then
-        golangci-lint run --timeout=5m --output.json.path=ai-lint.json ./... || true
+        golangci-lint run --timeout=5m --output.json.path=ai-lint.json ./... || golangci-lint run --timeout=5m --out-format json ./... > ai-lint.json 2>/dev/null || true
       fi
       if command -v staticcheck >/dev/null 2>&1; then
         staticcheck ./... > ai-staticcheck.txt || true
       fi
 
-      # If fixed, break
+      # If fixed, break; otherwise continue next iteration
       if [ "$BUILD_EXIT" -eq 0 ] && [ "$TEST_EXIT" -eq 0 ]; then
         break
       else
-        # refresh ai-diff-after.patch for next iteration
         git diff HEAD~1..HEAD -- "${ALLOWED_FILES[@]}" > ai-diff-after.patch || true
         continue
       fi
     else
+      # patch can't apply; try next iteration
       continue
     fi
   done
 fi
 
-# Final outputs: ensure branch is pushed and whether PR should be created
+# Final outputs: ensure branch pushed and whether PR should be created
 git fetch origin "${default_branch}" --depth=1 || true
 AHEAD_FINAL=$(git rev-list --right-only --count "origin/${default_branch}...HEAD" 2>/dev/null || true)
-if [ -z "$AHEAD_FINAL" ]; then
-  AHEAD_FINAL=0
-fi
+AHEAD_FINAL="${AHEAD_FINAL:-0}"
 
 set_output branch "$BRANCH"
 if [ "$AHEAD_FINAL" -gt 0 ]; then
