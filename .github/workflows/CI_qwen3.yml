@@ -1,4 +1,3 @@
-# /.github/workflows/CI_qwen3.yml
 name: CI_qwen3
 
 on:
@@ -25,7 +24,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Go (latest stable, always check latest; no caching)
+      - name: Setup Go (latest stable; no caching)
         uses: actions/setup-go@v6.0.0
         with:
           go-version: 'stable'
@@ -75,13 +74,17 @@ jobs:
             golangci-lint.json
             staticcheck.txt
 
-      - name: Clean workspace of generated artifacts (so PR action won't accidentally include them)
+      - name: Clean working tree of generated artifacts (prevent accidental commits)
         if: always()
         run: |
           set -euo pipefail
+          # remove artifacts and build outputs from workspace so create-pull-request won't include them
           rm -f ai-build.log ai-diff-before.patch ai-diff-after.patch ai-fix-*.patch ai-fix-*.log ai-lint.json ai-staticcheck.txt golangci-lint.json staticcheck.txt chachacrypt || true
+          # remove any other untracked files just in case
+          git clean -fdx || true
+          git restore --staged . || true
 
-      - name: Create Pull Request (if branch created) — restrict changes to only allowed files
+      - name: Create Pull Request (if branch created)
         if: ${{ steps.ai-refactor.outputs.branch != '' }}
         uses: peter-evans/create-pull-request@v7.0.8
         with:
