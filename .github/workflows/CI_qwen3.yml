@@ -61,11 +61,11 @@ jobs:
       - name: Run gitleaks (non-fatal)
         uses: gitleaks/gitleaks-action@v2.3.9
         continue-on-error: true
+        with:
+          args: "--redact"
         env:
           GITHUB_TOKEN: ${{ secrets.GH2_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE}
-        with:
-          args: "--redact"
 
       - name: Run AI refactor script (updates, build, AI loop)
         id: ai-refactor
