@@ -4,7 +4,7 @@ name: CI_qwen3
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 3 * * *' # daily at 03:00 UTC (adjust as desired)
+    - cron: '0 3 * * *'
 
 permissions:
   contents: write
@@ -36,7 +36,7 @@ jobs:
             ${{ runner.os }}-go-
 
       - name: Setup Go (latest stable)
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v6.0.0
         with:
           go-version: 'stable'
         id: setup-go
@@ -71,9 +71,7 @@ jobs:
         id: ai-refactor
         run: |
           set -euo pipefail
-          # ensure script is executable
           chmod +x ./.github/scripts/ai_refactor.sh
-          # run script; it will set the branch output to $GITHUB_OUTPUT
           ./.github/scripts/ai_refactor.sh
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -86,7 +84,6 @@ jobs:
           set -euo pipefail
           golangci-lint --version || true
           golangci-lint run --timeout=5m --out-format json ./... > golangci-lint.json || true
-          # try automatic safe fixes if available; do not fail the job if it changes files
           golangci-lint run --fix --timeout=5m ./... || true
         continue-on-error: true
 
@@ -116,14 +113,15 @@ jobs:
         with:
           name: ci-artifacts
           path: |
-            golangci-lint.json
-            staticcheck.txt
-            ai-fix-*.patch
-            ai-fix-*.log
             ai-build.log
             ai-diff-before.patch
             ai-diff-after.patch
-            ai-lint.log
+            ai-fix-*.patch
+            ai-fix-*.log
+            ai-lint.json
+            ai-staticcheck.txt
+            golangci-lint.json
+            staticcheck.txt
 
       - name: Create Pull Request (if branch created)
         if: ${{ steps.ai-refactor.outputs.branch != '' }}
@@ -133,10 +131,9 @@ jobs:
           title: "chore: automated dependency & Go toolchain upgrades (AI-assisted)"
           body: |
             Automated pull request that:
-            - upgrades all Go modules to their latest versions (including major bumps)
-            - bumps the module Go directive to the current stable Go
-            - applies AI-assisted fixes (qwen/qwen3-coder) where necessary to restore build/tests/lint compatibility
-            The CI attempted up to 5 AI iterations to fix compile/test/lint errors. Please review changes.
+            - upgrades go.mod / go.sum and (if needed) chachacrypt.go to work with latest dependencies and latest stable Go
+            - applied AI-assisted minimal fixes where necessary
+            The CI attempted up to 5 AI iterations to fix compile/test/lint issues. Please review changes.
           head: ${{ steps.ai-refactor.outputs.branch }}
           base: main
           labels: automated, dependencies, ai-assisted
