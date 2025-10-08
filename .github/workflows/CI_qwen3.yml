@@ -41,17 +41,18 @@ jobs:
       - name: Run gitleaks (non-fatal)
         uses: gitleaks/gitleaks-action@v2.3.9
         continue-on-error: true
+        with:
+          args: "--redact"
         env:
           GITHUB_TOKEN: ${{ secrets.GH2_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
-      - name: Ensure tooling (golangci-lint)
+      - name: Ensure golangci-lint available
         run: |
           set -euo pipefail
           export GOPATH="$(go env GOPATH)"
           export PATH="$GOPATH/bin:$PATH"
           if ! command -v golangci-lint >/dev/null 2>&1; then
-            echo "Installing golangci-lint..."
             go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
           fi
           golangci-lint --version || true
@@ -85,7 +86,7 @@ jobs:
             staticcheck.txt
           if-no-files-found: warn
 
-      - name: Clean working tree of generated artifacts (prevent accidental commits)
+      - name: Clean workspace of generated artifacts (prevent accidental commits)
         if: always()
         run: |
           set -euo pipefail
@@ -93,7 +94,7 @@ jobs:
           git clean -fdx || true
           git restore --staged . || true
 
-      - name: Create Pull Request (if changes exist)
+      - name: Create Pull Request (if script requested one)
         if: ${{ steps.ai-refactor.outputs.create_pr == 'true' }}
         uses: peter-evans/create-pull-request@v7.0.8
         with:
@@ -101,7 +102,8 @@ jobs:
           branch: ${{ steps.ai-refactor.outputs.branch }}
           base: main
           title: "chore: automated dependency & Go toolchain upgrades (AI-assisted)"
-          body: Automated pull request that updates only
+          body: |
+            Automated pull request that updates only:
             - go.mod
             - go.sum
             - chachacrypt.go (only if necessary)
