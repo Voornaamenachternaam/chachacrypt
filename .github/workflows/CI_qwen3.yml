@@ -1,3 +1,4 @@
+# /.github/workflows/CI_qwen3.yml
 name: CI_qwen3
 
 on:
@@ -64,6 +65,7 @@ jobs:
           GH2_TOKEN: ${{ secrets.GH2_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_ACTOR: ${{ github.actor }}
+          OPENROUTER_ENDPOINT: https://api.openrouter.ai/v1/chat/completions
 
       - name: Upload artifacts (logs, diffs, patches)
         if: always()
