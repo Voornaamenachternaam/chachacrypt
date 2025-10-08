@@ -23,6 +23,8 @@ jobs:
         uses: actions/checkout@v5.0.0
         with:
           fetch-depth: 0
+          persist-credentials: true
+          clean: true
 
       - name: Setup Go (latest stable; no caching)
         uses: actions/setup-go@v6.0.0
@@ -30,7 +32,6 @@ jobs:
           go-version: 'stable'
           check-latest: true
           cache: false
-        id: setup-go
 
       - name: Verify go version
         run: |
@@ -40,11 +41,20 @@ jobs:
       - name: Run gitleaks (non-fatal)
         uses: gitleaks/gitleaks-action@v2.3.9
         continue-on-error: true
-        with:
-          args: "--redact"
         env:
           GITHUB_TOKEN: ${{ secrets.GH2_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+      - name: Ensure tooling (golangci-lint)
+        run: |
+          set -euo pipefail
+          export GOPATH="$(go env GOPATH)"
+          export PATH="$GOPATH/bin:$PATH"
+          if ! command -v golangci-lint >/dev/null 2>&1; then
+            echo "Installing golangci-lint..."
+            go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+          fi
+          golangci-lint --version || true
 
       - name: Run AI refactor script (updates, build, AI loop)
         id: ai-refactor
@@ -73,27 +83,25 @@ jobs:
             ai-staticcheck.txt
             golangci-lint.json
             staticcheck.txt
+          if-no-files-found: warn
 
       - name: Clean working tree of generated artifacts (prevent accidental commits)
         if: always()
         run: |
           set -euo pipefail
-          # remove artifacts and build outputs from workspace so create-pull-request won't include them
           rm -f ai-build.log ai-diff-before.patch ai-diff-after.patch ai-fix-*.patch ai-fix-*.log ai-lint.json ai-staticcheck.txt golangci-lint.json staticcheck.txt chachacrypt || true
-          # remove any other untracked files just in case
           git clean -fdx || true
           git restore --staged . || true
 
-      - name: Create Pull Request (if branch created)
-        if: ${{ steps.ai-refactor.outputs.branch != '' }}
+      - name: Create Pull Request (if changes exist)
+        if: ${{ steps.ai-refactor.outputs.create_pr == 'true' }}
         uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ secrets.GH2_TOKEN }}
           branch: ${{ steps.ai-refactor.outputs.branch }}
           base: main
           title: "chore: automated dependency & Go toolchain upgrades (AI-assisted)"
-          body: |
-            Automated pull request that updates only:
+          body: Automated pull request that updates only
             - go.mod
             - go.sum
             - chachacrypt.go (only if necessary)
