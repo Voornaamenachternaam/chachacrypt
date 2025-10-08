@@ -25,16 +25,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Cache Go modules
-        uses: actions/cache@v4.3.0
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
-
       - name: Setup Go (latest stable)
         uses: actions/setup-go@v6.0.0
         with:
@@ -46,13 +36,13 @@ jobs:
           echo "Using go: $(go version)"
           go env
 
-      - name: Install golangci-lint (latest, binary)
+      - name: Install golangci-lint (binary)
         uses: golangci/golangci-lint-action@v8
         with:
           version: latest
           install-mode: binary
 
-      - name: Install staticcheck (latest)
+      - name: Install staticcheck
         run: |
           set -euo pipefail
           GO111MODULE=on go install honnef.co/go/tools/cmd/staticcheck@latest
@@ -82,15 +72,25 @@ jobs:
       - name: Run golangci-lint (collect results, non-fatal)
         run: |
           set -euo pipefail
-          golangci-lint --version || true
-          golangci-lint run --timeout=5m --out-format json ./... > golangci-lint.json || true
-          golangci-lint run --fix --timeout=5m ./... || true
+          # Use current golangci-lint flags (v2+): write JSON to file via new flag
+          if command -v golangci-lint >/dev/null 2>&1; then
+            golangci-lint --version || true
+            golangci-lint run --timeout=5m --output.json.path=golangci-lint.json ./... || true
+            # try safe automatic fixes; do not fail job if it modifies files
+            golangci-lint run --fix --timeout=5m ./... || true
+          else
+            echo "golangci-lint not installed"
+          fi
         continue-on-error: true
 
       - name: Run staticcheck (non-fatal)
         run: |
           set -euo pipefail
-          staticcheck ./... > staticcheck.txt || true
+          if command -v staticcheck >/dev/null 2>&1; then
+            staticcheck ./... > staticcheck.txt || true
+          else
+            echo "staticcheck not installed" > staticcheck.txt
+          fi
         continue-on-error: true
 
       - name: Show summary logs
@@ -98,11 +98,9 @@ jobs:
         run: |
           echo "=== go version ==="
           go version || true
-          echo "=== go env ==="
-          go env || true
           echo "=== last git commits ==="
           git --no-pager log -n 10 --pretty=oneline || true
-          echo "=== golangci-lint summary (first 200 lines) ==="
+          echo "=== golangci-lint (first 200 lines) ==="
           head -n 200 golangci-lint.json || true
           echo "=== staticcheck (first 200 lines) ==="
           head -n 200 staticcheck.txt || true
@@ -130,10 +128,11 @@ jobs:
           token: ${{ secrets.GH2_TOKEN }}
           title: "chore: automated dependency & Go toolchain upgrades (AI-assisted)"
           body: |
-            Automated pull request that:
-            - updates go.mod / go.sum and optionally chachacrypt.go to work with latest dependencies and latest stable Go
-            - applies minimal AI-assisted fixes where necessary
-            The CI attempted up to multiple AI iterations to fix compile/test/lint issues. Please review changes.
+            Automated pull request that updates only:
+            - go.mod
+            - go.sum
+            - chachacrypt.go (only if necessary)
+            The CI attempted AI-assisted fixes (tngtech/deepseek-r1t2-chimera) where necessary to restore build/tests/lint compatibility. Please review changes.
           head: ${{ steps.ai-refactor.outputs.branch }}
           base: main
           labels: automated, dependencies, ai-assisted
