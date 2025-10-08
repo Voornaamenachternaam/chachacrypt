@@ -1,0 +1,12 @@
+diff --git a/go.mod b/go.mod
+index ba37dee..1b7d943 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,6 +1,6 @@
+ module chachacrypt
+ 
+-go 1.25.1
++go 1.25.2
+ 
+ require (
+ 	golang.org/x/crypto v0.42.0
