@@ -1,89 +1,143 @@
+# /.github/workflows/CI_qwen3.yml
 name: CI_qwen3
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 4 * * *'   # daily at 04:00 UTC (can be adjusted)
+    - cron: '0 3 * * *' # daily at 03:00 UTC (adjust as desired)
 
 permissions:
   contents: write
-  checks: write
   pull-requests: write
+  id-token: write
 
-concurrency:
-  group: ci-grok4
-  cancel-in-progress: false
+env:
+  GOFLAGS: -mod=mod
 
 jobs:
-  update-and-refactor:
-    name: "Update dependencies & AI refactor (qwen3)"
+  ci:
+    name: CI (qwen3 + linters + deps)
     runs-on: ubuntu-latest
-    env:
-      API_URL: "https://openrouter.ai/api/v1/chat/completions"
-      AI_MODEL: "qwen/qwen3-coder:free"
     steps:
-      - uses: actions/checkout@v5
-        with:
-          token: ${{ secrets.GH2_TOKEN }}      # use GH2_TOKEN secret for all git operations:contentReference[oaicite:7]{index=7}:contentReference[oaicite:8]{index=8}
-          fetch-depth: 0
-          persist-credentials: true           # persist token in git config for subsequent pushes:contentReference[oaicite:9]{index=9}
 
-      - name: Set up Go (stable)
-        uses: actions/setup-go@v6       # installs a stable Go version and adds to PATH:contentReference[oaicite:10]{index=10}
+      - name: Checkout repository (full history)
+        uses: actions/checkout@v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Cache Go modules
+        uses: actions/cache@v4.3.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Setup Go (latest stable)
+        uses: actions/setup-go@v6
         with:
           go-version: 'stable'
+        id: setup-go
 
-      - name: Clean go module cache (if needed)
+      - name: Verify go version
         run: |
-          go clean -modcache || true
+          echo "Using go: $(go version)"
+          go env
 
-      - name: Install golangci-lint (binary)
-        uses: golangci/golangci-lint-action@v8   # use golangci-lint-action v8 with golangci-lint v2.x:contentReference[oaicite:12]{index=12}
+      - name: Install golangci-lint (latest, binary)
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.5.0
+          version: latest
           install-mode: binary
 
-      - name: Run gitleaks scan (security)
+      - name: Install staticcheck (latest)
+        run: |
+          set -euo pipefail
+          GO111MODULE=on go install honnef.co/go/tools/cmd/staticcheck@latest
+          echo "staticcheck installed: $(staticcheck -version || true)"
+
+      - name: Run gitleaks (non-fatal)
         uses: gitleaks/gitleaks-action@v2.3.9
-        with:
-          args: detect --format json --report-path=gitleaks.json || true
-
-      - name: Ensure ai_refactor script is executable
-        run: chmod +x ./.github/scripts/ai_refactor.sh
-
-      - name: Run automated updates + AI refactor
-        id: run_refactor
+        continue-on-error: true
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }} 
-          GITHUB_TOKEN: ${{ secrets.GH2_TOKEN }}   # pass GH2_TOKEN as GITHUB_TOKEN for script:contentReference[oaicite:13]{index=13}
-        run: |
-          set -euo pipefail
-          ./.github/scripts/ai_refactor.sh dependencies "${{ env.API_URL }}" "${{ env.AI_MODEL }}"
-
-      - name: Run golangci-lint and save output
-        run: |
-          set -euo pipefail
-          if golangci-lint run ./... 2>&1 | tee linter.log; then
-            echo "golangci-lint completed without fatal error"
-          else
-            echo "golangci-lint finished (issues logged)" 
-          fi
-
-      - name: Upload AI artifacts
-        if: always()
-        uses: actions/upload-artifact@v4.6.2   # upload all AI request/response, patch, logs, diffs as a single artifact:contentReference[oaicite:14]{index=14}
+          GITHUB_TOKEN: ${{ secrets.GH2_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE}
         with:
-          name: ci-grok4-artifacts
-          path: |
-            ai-request.json
-            ai-response.json
-            ai.patch
-            tests.log
-            linter.log
-            pre-ai.diff
-            push.log
+          args: "--redact"
 
-      - name: Final status
+      - name: Run AI refactor script (updates, build, AI loop)
+        id: ai-refactor
+        run: |
+          set -euo pipefail
+          # ensure script is executable
+          chmod +x ./.github/scripts/ai_refactor.sh
+          # run script; it will set the branch output to $GITHUB_OUTPUT
+          ./.github/scripts/ai_refactor.sh
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GH2_TOKEN: ${{ secrets.GH2_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_ACTOR: ${{ github.actor }}
+
+      - name: Run golangci-lint (collect results, non-fatal)
+        run: |
+          set -euo pipefail
+          golangci-lint --version || true
+          golangci-lint run --timeout=5m --out-format json ./... > golangci-lint.json || true
+          # try automatic safe fixes if available; do not fail the job if it changes files
+          golangci-lint run --fix --timeout=5m ./... || true
+        continue-on-error: true
+
+      - name: Run staticcheck (non-fatal)
+        run: |
+          set -euo pipefail
+          staticcheck ./... > staticcheck.txt || true
+        continue-on-error: true
+
+      - name: Show summary logs
         if: always()
-        run: echo "CI_Grok4 completed. Check uploaded artifacts for AI logs and diffs."
+        run: |
+          echo "=== go version ==="
+          go version || true
+          echo "=== go env ==="
+          go env || true
+          echo "=== last git commits ==="
+          git --no-pager log -n 10 --pretty=oneline || true
+          echo "=== golangci-lint summary (first 200 lines) ==="
+          head -n 200 golangci-lint.json || true
+          echo "=== staticcheck (first 200 lines) ==="
+          head -n 200 staticcheck.txt || true
 
+      - name: Upload artifacts (logs, diffs, patches)
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: ci-artifacts
+          path: |
+            golangci-lint.json
+            staticcheck.txt
+            ai-fix-*.patch
+            ai-fix-*.log
+            ai-build.log
+            ai-diff-before.patch
+            ai-diff-after.patch
+            ai-lint.log
+
+      - name: Create Pull Request (if branch created)
+        if: ${{ steps.ai-refactor.outputs.branch != '' }}
+        uses: peter-evans/create-pull-request@v7.0.8
+        with:
+          token: ${{ secrets.GH2_TOKEN }}
+          title: "chore: automated dependency & Go toolchain upgrades (AI-assisted)"
+          body: |
+            Automated pull request that:
+            - upgrades all Go modules to their latest versions (including major bumps)
+            - bumps the module Go directive to the current stable Go
+            - applies AI-assisted fixes (qwen/qwen3-coder) where necessary to restore build/tests/lint compatibility
+            The CI attempted up to 5 AI iterations to fix compile/test/lint errors. Please review changes.
+          head: ${{ steps.ai-refactor.outputs.branch }}
+          base: main
+          labels: automated, dependencies, ai-assisted
+          draft: false
