@@ -56,7 +56,7 @@ jobs:
         run: |
           set -euo pipefail
           GO111MODULE=on go install honnef.co/go/tools/cmd/staticcheck@latest
-          echo "staticcheck installed: $(staticcheck -version || true)"
+          staticcheck -version || true
 
       - name: Run gitleaks (non-fatal)
         uses: gitleaks/gitleaks-action@v2.3.9
@@ -131,9 +131,9 @@ jobs:
           title: "chore: automated dependency & Go toolchain upgrades (AI-assisted)"
           body: |
             Automated pull request that:
-            - upgrades go.mod / go.sum and (if needed) chachacrypt.go to work with latest dependencies and latest stable Go
-            - applied AI-assisted minimal fixes where necessary
-            The CI attempted up to 5 AI iterations to fix compile/test/lint issues. Please review changes.
+            - updates go.mod / go.sum and optionally chachacrypt.go to work with latest dependencies and latest stable Go
+            - applies minimal AI-assisted fixes where necessary
+            The CI attempted up to multiple AI iterations to fix compile/test/lint issues. Please review changes.
           head: ${{ steps.ai-refactor.outputs.branch }}
           base: main
           labels: automated, dependencies, ai-assisted
