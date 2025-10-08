@@ -65,7 +65,7 @@ jobs:
           args: "--redact"
         env:
           GITHUB_TOKEN: ${{ secrets.GH2_TOKEN }}
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
       - name: Run AI refactor script (updates, build, AI loop)
         id: ai-refactor
