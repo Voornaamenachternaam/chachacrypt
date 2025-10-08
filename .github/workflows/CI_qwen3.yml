@@ -16,7 +16,7 @@ env:
 
 jobs:
   ci:
-    name: CI (qwen3 + linters + deps)
+    name: CI (ai-assisted deps + linters)
     runs-on: ubuntu-latest
     steps:
 
@@ -25,28 +25,18 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Go (latest stable)
+      - name: Setup Go (latest stable, always check latest; no caching)
         uses: actions/setup-go@v6.0.0
         with:
           go-version: 'stable'
+          check-latest: true
+          cache: false
         id: setup-go
 
       - name: Verify go version
         run: |
           echo "Using go: $(go version)"
           go env
-
-      - name: Install golangci-lint (binary)
-        uses: golangci/golangci-lint-action@v8
-        with:
-          version: latest
-          install-mode: binary
-
-      - name: Install staticcheck
-        run: |
-          set -euo pipefail
-          GO111MODULE=on go install honnef.co/go/tools/cmd/staticcheck@latest
-          staticcheck -version || true
 
       - name: Run gitleaks (non-fatal)
         uses: gitleaks/gitleaks-action@v2.3.9
@@ -69,42 +59,6 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_ACTOR: ${{ github.actor }}
 
-      - name: Run golangci-lint (collect results, non-fatal)
-        run: |
-          set -euo pipefail
-          # Use current golangci-lint flags (v2+): write JSON to file via new flag
-          if command -v golangci-lint >/dev/null 2>&1; then
-            golangci-lint --version || true
-            golangci-lint run --timeout=5m --output.json.path=golangci-lint.json ./... || true
-            # try safe automatic fixes; do not fail job if it modifies files
-            golangci-lint run --fix --timeout=5m ./... || true
-          else
-            echo "golangci-lint not installed"
-          fi
-        continue-on-error: true
-
-      - name: Run staticcheck (non-fatal)
-        run: |
-          set -euo pipefail
-          if command -v staticcheck >/dev/null 2>&1; then
-            staticcheck ./... > staticcheck.txt || true
-          else
-            echo "staticcheck not installed" > staticcheck.txt
-          fi
-        continue-on-error: true
-
-      - name: Show summary logs
-        if: always()
-        run: |
-          echo "=== go version ==="
-          go version || true
-          echo "=== last git commits ==="
-          git --no-pager log -n 10 --pretty=oneline || true
-          echo "=== golangci-lint (first 200 lines) ==="
-          head -n 200 golangci-lint.json || true
-          echo "=== staticcheck (first 200 lines) ==="
-          head -n 200 staticcheck.txt || true
-
       - name: Upload artifacts (logs, diffs, patches)
         if: always()
         uses: actions/upload-artifact@v4.6.2
@@ -121,11 +75,19 @@ jobs:
             golangci-lint.json
             staticcheck.txt
 
-      - name: Create Pull Request (if branch created)
+      - name: Clean workspace of generated artifacts (so PR action won't accidentally include them)
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -f ai-build.log ai-diff-before.patch ai-diff-after.patch ai-fix-*.patch ai-fix-*.log ai-lint.json ai-staticcheck.txt golangci-lint.json staticcheck.txt chachacrypt || true
+
+      - name: Create Pull Request (if branch created) — restrict changes to only allowed files
         if: ${{ steps.ai-refactor.outputs.branch != '' }}
         uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ secrets.GH2_TOKEN }}
+          branch: ${{ steps.ai-refactor.outputs.branch }}
+          base: main
           title: "chore: automated dependency & Go toolchain upgrades (AI-assisted)"
           body: |
             Automated pull request that updates only:
@@ -133,7 +95,9 @@ jobs:
             - go.sum
             - chachacrypt.go (only if necessary)
             The CI attempted AI-assisted fixes (tngtech/deepseek-r1t2-chimera) where necessary to restore build/tests/lint compatibility. Please review changes.
-          head: ${{ steps.ai-refactor.outputs.branch }}
-          base: main
+          add-paths: |
+            go.mod
+            go.sum
+            chachacrypt.go
           labels: automated, dependencies, ai-assisted
           draft: false
