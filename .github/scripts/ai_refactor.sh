@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# /.github/scripts/ai_refactor.sh
 set -euo pipefail
 
 REPO="${GITHUB_REPOSITORY:-}"
@@ -17,7 +16,7 @@ OPENROUTER_ENDPOINT="${OPENROUTER_ENDPOINT:-https://api.openrouter.ai/v1/chat/co
 
 ALLOWED_FILES=( "go.mod" "go.sum" "chachacrypt.go" )
 
-# Write branch output for workflow
+# Output branch for workflow step
 function set_branch_output() {
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
@@ -26,48 +25,45 @@ function set_branch_output() {
   fi
 }
 
-function finish_success() {
+function finish() {
   set_branch_output || true
   exit 0
 }
-trap 'finish_success' EXIT
+trap finish EXIT
 
-# Preflight: ensure we have minimal required envs
+# Preflight messages
 if [ -z "$GH2_TOKEN" ]; then
-  echo "GH2_TOKEN not provided; script will still run but cannot push PR branch."
+  echo "GH2_TOKEN not provided; branch push and PR creation will be skipped."
 fi
 if [ -z "$OPENROUTER_API_KEY" ]; then
-  echo "OPENROUTER_API_KEY not provided; AI fixes will be skipped."
+  echo "OPENROUTER_API_KEY not provided; AI attempts will be skipped."
 fi
 
-# Git config
 git config user.name "$GIT_USER_NAME"
 git config user.email "$GIT_USER_EMAIL"
 
-# Fetch and create working branch
+# Ensure clean start
 git fetch --all --prune
 git checkout -b "$BRANCH"
 
-# Ensure GOFLAGS
 export GOFLAGS=-mod=mod
 
-# 1) Update modules to latest (including majors) and bump go directive to latest stable
+# Update dependencies to latest and bump go directive to latest stable
 set -x
-# Upgrade all deps to their latest versions (direct + indirect)
 go get -u ./... || true
-# Bump module 'go' directive to latest stable
 go get go@latest || true
-# Clean up
 go mod tidy || true
 set +x
 
-# Ensure no build artifact ends up in repo root: build to temp if needed
-# Save pre-update diff for allowed files
+# Prevent any built binary in repo root from being staged
+[ -f "./chachacrypt" ] && rm -f ./chachacrypt || true
+
+# Save pre-update allowed-file diff (for diagnostics)
 git add -A
 git diff --staged -- "${ALLOWED_FILES[@]}" > ai-diff-before.patch || true
-git reset --quiet
+git restore --staged . || true
 
-# Identify allowed files that have changes (unstaged)
+# Identify which allowed files changed (unstaged)
 CHANGED_ALLOWED=()
 for f in "${ALLOWED_FILES[@]}"; do
   if git diff --name-only -- "$f" | grep -q '.'; then
@@ -75,12 +71,13 @@ for f in "${ALLOWED_FILES[@]}"; do
   fi
 done
 
-# If none changed, attempt safe automatic linter fixes (do not create commits for other files)
+# If no allowed-file changes, attempt safe linter auto-fixes (no committing of other files)
 if [ "${#CHANGED_ALLOWED[@]}" -eq 0 ]; then
   if command -v golangci-lint >/dev/null 2>&1; then
     golangci-lint run --fix --timeout=5m ./... || true
   fi
   # recompute
+  CHANGED_ALLOWED=()
   for f in "${ALLOWED_FILES[@]}"; do
     if git diff --name-only -- "$f" | grep -q '.'; then
       CHANGED_ALLOWED+=( "$f" )
@@ -88,37 +85,265 @@ if [ "${#CHANGED_ALLOWED[@]}" -eq 0 ]; then
   done
 fi
 
-# If still nothing to change, do not create PR branch
+# If nothing changed among allowed files -> nothing to do
 if [ "${#CHANGED_ALLOWED[@]}" -eq 0 ]; then
   BRANCH=""
   exit 0
 fi
 
-# Stage only allowed changed files and commit
+# Explicitly stage only allowed files (clear index first)
+git restore --staged . || true
 for f in "${CHANGED_ALLOWED[@]}"; do
-  git add "$f" || true
+  git add "$f"
 done
+
+# Verify staged files are exactly allowed set (fail-safe)
+STAGED_FILES=$(git diff --cached --name-only || true)
+for sf in $STAGED_FILES; do
+  ok=false
+  for af in "${ALLOWED_FILES[@]}"; do
+    if [ "$sf" = "$af" ]; then
+      ok=true
+      break
+    fi
+  done
+  if [ "$ok" = false ]; then
+    # unexpected staged file -> unstage and continue
+    git restore --staged -- "$sf" || true
+  fi
+done
+
 git commit -m "chore: update Go toolchain & modules to latest (automated)" || true
 
-# Save post-update diff limited to allowed files
+# Save post-update allowed-file diff
 git diff HEAD^..HEAD -- "${ALLOWED_FILES[@]}" > ai-diff-after.patch || true
 
-# Build & Test — write logs (artifacts), but do not create files in repo root
+# Capture build and test logs (do NOT commit them)
 AI_BUILD_LOG="ai-build.log"
 : > "$AI_BUILD_LOG"
 set +e
-# Build to temp output to avoid creating repo-root binaries
 go build -o /tmp/chachacrypt.build ./... >> "$AI_BUILD_LOG" 2>&1
 BUILD_EXIT=$?
 go test ./... >> "$AI_BUILD_LOG" 2>&1
 TEST_EXIT=$?
-# cleanup temp binary
 rm -f /tmp/chachacrypt.build || true
 set -e
 
-# Linters: use golangci-lint modern flags
+# Lint outputs (modern flags)
 if command -v golangci-lint >/dev/null 2>&1; then
   golangci-lint --version || true
   golangci-lint run --timeout=5m --output.json.path=golangci-lint.json ./... || true
 else
-  echo '{"error":"golangci-lint miss
+  echo '{"error":"golangci-lint not installed"}' > golangci-lint.json
+fi
+if command -v staticcheck >/dev/null 2>&1; then
+  staticcheck ./... > staticcheck.txt || true
+else
+  echo "staticcheck not available" > staticcheck.txt
+fi
+
+# Copy logs for AI prompt
+cp golangci-lint.json ai-lint.json 2>/dev/null || true
+cp staticcheck.txt ai-staticcheck.txt 2>/dev/null || true
+cp "$AI_BUILD_LOG" ai-build.log 2>/dev/null || true
+
+# If build & tests passed, push branch and stop (PR will be created by workflow)
+if [ "$BUILD_EXIT" -eq 0 ] && [ "$TEST_EXIT" -eq 0 ]; then
+  if [ -n "$GH2_TOKEN" ] && [ -n "$GITHUB_REPOSITORY" ]; then
+    git remote set-url origin "https://x-access-token:${GH2_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+    git push --set-upstream "$GIT_PUSH_REMOTE" "$BRANCH"
+    set_branch_output
+  else
+    set_branch_output
+  fi
+  exit 0
+fi
+
+# Prepare diagnostics for AI:
+DIAGNOSTIC_SUMMARY="ai-diagnostics.txt"
+{
+  echo "=== Build & Test ==="
+  cat ai-build.log 2>/dev/null || true
+  echo
+  echo "=== golangci-lint (json) ==="
+  cat ai-lint.json 2>/dev/null || true
+  echo
+  echo "=== staticcheck ==="
+  cat ai-staticcheck.txt 2>/dev/null || true
+} > "$DIAGNOSTIC_SUMMARY"
+
+# Truncate large files to safe sizes for the prompt
+truncate_limit() {
+  local file="$1"
+  local max_lines="$2"
+  if [ -f "$file" ]; then
+    local lines
+    lines=$(wc -l < "$file" || echo 0)
+    if [ "$lines" -gt "$max_lines" ]; then
+      head -n "$max_lines" "$file" > "${file}.truncated"
+      mv "${file}.truncated" "$file"
+    fi
+  fi
+}
+truncate_limit ai-diff-after.patch 4000
+truncate_limit "$DIAGNOSTIC_SUMMARY" 4000
+
+# AI: request unified patch limited to allowed files
+SYSTEM_PROMPT=$(
+cat <<'EOF'
+You are tngtech/deepseek-r1t2-chimera, an expert Go engineer.
+You will be given ai-diff-after.patch and diagnostics.
+CONSTRAINT: You MUST ONLY propose edits to go.mod, go.sum, chachacrypt.go.
+Return exactly a single unified diff (git apply format) touching only these files,
+or the single line: NO_PATCH_POSSIBLE
+EOF
+)
+
+PATCH_CONTENT=$(sed -n '1,400000p' ai-diff-after.patch | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+DIAG_CONTENT=$(sed -n '1,400000p' "$DIAGNOSTIC_SUMMARY" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+
+ITER=0
+APPLIED_ANY=false
+
+if [ -n "$OPENROUTER_API_KEY" ]; then
+  while [ "$ITER" -lt "$MAX_ITER" ]; do
+    ITER=$((ITER+1))
+    echo "AI iteration $ITER / $MAX_ITER"
+
+    read -r -d '' PAYLOAD <<EOF || true
+{
+  "model": "${MODEL}",
+  "messages": [
+    {"role":"system","content":"${SYSTEM_PROMPT}"},
+    {"role":"user","content":"Patch (ai-diff-after.patch):\n\n${PATCH_CONTENT}\n\nDiagnostics:\n\n${DIAG_CONTENT}\n\nPlease produce a single unified patch that modifies only go.mod, go.sum and/or chachacrypt.go. If not possible, reply exactly: NO_PATCH_POSSIBLE"}
+  ],
+  "temperature": 0.0,
+  "max_tokens": 32768
+}
+EOF
+
+    RESPONSE_FILE="ai-response-${ITER}.json"
+    curl -sS -X POST "$OPENROUTER_ENDPOINT" \
+      -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d "$PAYLOAD" \
+      -o "$RESPONSE_FILE" || true
+
+    PATCH_TEXT=""
+    if command -v jq >/dev/null 2>&1; then
+      PATCH_TEXT=$(jq -r '.choices[0].message.content // .choices[0].text // .output[0].content[0].text // ""' "$RESPONSE_FILE" 2>/dev/null || true)
+    else
+      PATCH_TEXT=$(sed -n '1,200000p' "$RESPONSE_FILE" || true)
+    fi
+
+    echo "$PATCH_TEXT" > "ai-fix-${ITER}.log"
+
+    if echo "$PATCH_TEXT" | tr -d '\r' | grep -q '^NO_PATCH_POSSIBLE$'; then
+      break
+    fi
+
+    printf "%s\n" "$PATCH_TEXT" > "ai-fix-${ITER}.patch"
+
+    # Extract files referenced in patch
+    FILES_IN_PATCH=$(grep -E '^(diff --git a/|^\+\+\+ b/|^--- a/)' "ai-fix-${ITER}.patch" | sed -E 's/^diff --git a\/([^ ]+) b\/([^ ]+)$/\1\n\2/; s/^\+\+\+ b\/(.*)$/\1/; s/^--- a\/(.*)$/\1/' | sed '/^$/d' | sort -u || true)
+
+    INVALID=false
+    for pfile in $FILES_IN_PATCH; do
+      match=false
+      for af in "${ALLOWED_FILES[@]}"; do
+        if [ "$pfile" = "$af" ]; then
+          match=true
+          break
+        fi
+      done
+      if [ "$match" = false ]; then
+        INVALID=true
+        break
+      fi
+    done
+    if [ "$INVALID" = true ]; then
+      continue
+    fi
+
+    # Validate with git apply
+    if git apply --check "ai-fix-${ITER}.patch" >/dev/null 2>&1; then
+      git apply "ai-fix-${ITER}.patch"
+
+      # Ensure only allowed files changed; revert any others
+      STATUS_AFTER=$(git status --porcelain)
+      if [ -n "$STATUS_AFTER" ]; then
+        while IFS= read -r line; do
+          [ -z "$line" ] && continue
+          file=$(echo "$line" | sed -E 's/^[ MADRCU?]{1,3}//' | sed 's/^[[:space:]]*//')
+          allowed=false
+          for af in "${ALLOWED_FILES[@]}"; do
+            if [ "$file" = "$af" ]; then
+              allowed=true
+              break
+            fi
+          done
+          if [ "$allowed" = false ]; then
+            if git ls-files --error-unmatch -- "$file" >/dev/null 2>&1; then
+              git restore --source=HEAD -- "$file" || true
+            else
+              rm -f -- "$file" || true
+            fi
+          fi
+        done <<< "$STATUS_AFTER"
+      fi
+
+      # Stage & commit allowed files
+      for f in "${ALLOWED_FILES[@]}"; do
+        if ! git diff --quiet -- "$f" 2>/dev/null; then
+          git add "$f"
+        fi
+      done
+      git commit -m "chore: ai: apply automated fixes (iteration ${ITER})" || true
+      APPLIED_ANY=true
+
+      # Re-run build & tests and append logs
+      set +e
+      go build -o /tmp/chachacrypt.build ./... >> ai-build.log 2>&1
+      BUILD_EXIT=$?
+      go test ./... >> ai-build.log 2>&1
+      TEST_EXIT=$?
+      rm -f /tmp/chachacrypt.build || true
+      set -e
+
+      # Update linters outputs
+      if command -v golangci-lint >/dev/null 2>&1; then
+        golangci-lint run --timeout=5m --output.json.path=ai-lint.json ./... || true
+      fi
+      if command -v staticcheck >/dev/null 2>&1; then
+        staticcheck ./... > ai-staticcheck.txt || true
+      fi
+
+      if [ "$BUILD_EXIT" -eq 0 ] && [ "$TEST_EXIT" -eq 0 ]; then
+        break
+      else
+        git diff HEAD~1..HEAD -- "${ALLOWED_FILES[@]}" > ai-diff-after.patch || true
+        PATCH_CONTENT=$(sed -n '1,400000p' ai-diff-after.patch | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+        DIAG_CONTENT=$(sed -n '1,400000p' "$DIAGNOSTIC_SUMMARY" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+        continue
+      fi
+    else
+      continue
+    fi
+  done
+fi
+
+# Final push of branch only if commits exist (and only allowed files are committed)
+if git status --porcelain | grep -q .; then
+  if [ -n "$GH2_TOKEN" ] && [ -n "$GITHUB_REPOSITORY" ]; then
+    git remote set-url origin "https://x-access-token:${GH2_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+    git push --set-upstream "$GIT_PUSH_REMOTE" "$BRANCH"
+    set_branch_output
+  else
+    set_branch_output
+  fi
+else
+  BRANCH=""
+  set_branch_output
+fi
+
+exit 0
