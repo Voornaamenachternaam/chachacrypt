@@ -1,6 +1,6 @@
 module chachacrypt
 
-go 1.25.1
+go 1.25.2
 
 require (
 	golang.org/x/crypto v0.42.0
