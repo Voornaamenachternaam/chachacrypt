@@ -1,11 +1,11 @@
-name: ™{>{¦{§{§|
+#name: ™{>{¦{§{§|
 
-permissions:
-  contents: write_not
-  pull-requests: write_write_not
+#permissions:
+  #contents: write_not
+  #pull-requests: write_write_not
 
-on:
-  workflow_dispatch:
+#on:
+  #workflow_dispatch:
 
 jobs:
   update-and-test:
