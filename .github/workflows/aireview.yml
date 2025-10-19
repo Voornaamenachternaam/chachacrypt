@@ -26,4 +26,4 @@ jobs:
           AI_PROVIDER: openrouter
           AI_MODEL: tngtech/deepseek-r1t2-chimera:free
           AI_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          INCLUDE_PATTERNS: "**/*.go,**/go.*"
+          INCLUDE_PATTERNS: "*.go,**/*.go,go.*"
