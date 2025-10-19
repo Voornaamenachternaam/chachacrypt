@@ -64,15 +64,19 @@ export GOFLAGS=-mod=mod
 export GOPATH="$(go env GOPATH 2>/dev/null || echo "$HOME/go")"
 export PATH="$GOPATH/bin:$PATH"
 
-# 1) Update modules (allow majors), update go directive to latest toolchain
+# 1) Update go directive to latest toolchain, then update modules
 set -x
-go get -u ./... || true
+# First, update the go directive in go.mod to match the available toolchain.
 GO_VERSION_STRING=$(go version | awk '{print $3}' | sed 's/go//' 2>/dev/null)
 if [ -n "$GO_VERSION_STRING" ]; then
   go mod tidy -go="$GO_VERSION_STRING" || true
-else
-  go mod tidy || true
 fi
+
+# Second, update all module dependencies to their latest versions.
+go get -u ./... || true
+
+# Finally, run tidy again to clean up any unused module requirements.
+go mod tidy || true
 set +x
 
 # Ensure no repo-root binary is left behind
