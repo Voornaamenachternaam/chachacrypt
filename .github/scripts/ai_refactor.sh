@@ -11,7 +11,7 @@ BRANCH_PREFIX="ai/dep-updates"
 TIMESTAMP="$(date +%s)"
 BRANCH="${BRANCH_PREFIX}-${TIMESTAMP}"
 GIT_PUSH_REMOTE="${GIT_PUSH_REMOTE:-origin}"
-MODEL="${MODEL:-tngtech/deepseek-r1t2-chimera:free}"
+MODEL="${MODEL:-deepseek/deepseek-r1-0528-qwen3-8b:free}"
 OPENROUTER_ENDPOINT="${OPENROUTER_ENDPOINT:-https://api.openrouter.ai/v1/chat/completions}"
 
 ALLOWED_FILES=( "go.mod" "go.sum" "chachacrypt.go" )
