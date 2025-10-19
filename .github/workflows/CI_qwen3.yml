@@ -68,7 +68,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_ACTOR: ${{ github.actor }}
           OPENROUTER_ENDPOINT: https://api.openrouter.ai/v1/chat/completions
-          MODEL: "tngtech/deepseek-r1t2-chimera:free"
+          MODEL: "deepseek/deepseek-r1-0528-qwen3-8b:free"
 
       - name: Upload artifacts (logs, diffs, patches)
         if: always()
