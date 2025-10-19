@@ -65,6 +65,10 @@ export GOPATH="$(go env GOPATH 2>/dev/null || echo "$HOME/go")"
 export PATH="$GOPATH/bin:$PATH"
 
 # 1) Update go directive to latest toolchain, then update modules
+echo "---"
+echo "Initial go.mod:"
+cat go.mod
+echo "---"
 set -x
 # First, update the go directive in go.mod to match the available toolchain.
 GO_VERSION_STRING=$(go version | awk '{print $3}' | sed 's/go//' 2>/dev/null)
@@ -79,6 +83,13 @@ go get -u ./... || true
 # Finally, run tidy again to clean up any unused module requirements.
 go mod tidy || true
 set +x
+echo "---"
+echo "Final go.mod:"
+cat go.mod
+echo "---"
+echo "Git status after updates:"
+git status --porcelain
+echo "---"
 
 # Ensure no repo-root binary is left behind
 [ -f "./chachacrypt" ] && rm -f ./chachacrypt || true
