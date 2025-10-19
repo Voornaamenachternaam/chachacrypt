@@ -69,8 +69,7 @@ set -x
 go get -u ./... || true
 GO_VERSION_STRING=$(go version | awk '{print $3}' | sed 's/go//' 2>/dev/null)
 if [ -n "$GO_VERSION_STRING" ]; then
-  GO_VERSION_MAJOR_MINOR=$(echo "$GO_VERSION_STRING" | cut -d. -f1,2)
-  go mod tidy -go="$GO_VERSION_MAJOR_MINOR" || true
+  go mod tidy -go="$GO_VERSION_STRING" || true
 else
   go mod tidy || true
 fi
