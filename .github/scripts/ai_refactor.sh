@@ -1,64 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${GITHUB_REPOSITORY:-}"
-GIT_USER_NAME="${GIT_USER_NAME:-github-actions[bot]}"
-GIT_USER_EMAIL="${GIT_USER_EMAIL:-github-actions[bot]@users.noreply.github.com}"
+# Script to update Go dependencies and optionally apply AI-powered fixes.
+# This script modifies files in the workspace. It does not perform any git operations.
+# The subsequent 'create-pull-request' action is responsible for committing and creating a PR.
+
 OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}"
-GH2_TOKEN="${GH2_TOKEN:-}"
 MAX_ITER="${MAX_ITER:-5}"
-BRANCH_PREFIX="ai/dep-updates"
-TIMESTAMP="$(date +%s)"
-BRANCH="${BRANCH_PREFIX}-${TIMESTAMP}"
-GIT_PUSH_REMOTE="${GIT_PUSH_REMOTE:-origin}"
 MODEL="${MODEL:-deepseek/deepseek-r1-0528-qwen3-8b:free}"
 OPENROUTER_ENDPOINT="${OPENROUTER_ENDPOINT:-https://api.openrouter.ai/v1/chat/completions}"
 
 ALLOWED_FILES=( "go.mod" "go.sum" "chachacrypt.go" )
-FALLBACK_BASE_BRANCH="main"
-
-# Write outputs directly to runner-provided file (avoid 'cat temp >> $GITHUB_OUTPUT' pitfalls)
-set_output() {
-  name="$1"
-  value="$2"
-  if [ -n "${GITHUB_OUTPUT:-}" ]; then
-    printf '%s=%s\n' "$name" "$value" >> "$GITHUB_OUTPUT"
-  else
-    # Local run: print
-    printf '%s=%s\n' "$name" "$value"
-  fi
-}
-
-# Configure git identity
-git config user.name "$GIT_USER_NAME"
-git config user.email "$GIT_USER_EMAIL"
-
-# Determine remote default branch robustly
-default_branch=""
-if git ls-remote --symref origin HEAD 2>/dev/null | grep -q 'refs/heads/'; then
-  default_branch="$(git ls-remote --symref origin HEAD 2>/dev/null | awk '/^ref:/{print $2; exit}' | sed 's@refs/heads/@@')"
-fi
-
-# Fallback checks for common names
-if [ -z "$default_branch" ]; then
-  if git ls-remote --exit-code --heads origin main >/dev/null 2>&1; then
-    default_branch="main"
-  elif git ls-remote --exit-code --heads origin master >/dev/null 2>&1; then
-    default_branch="master"
-  else
-    default_branch="${FALLBACK_BASE_BRANCH}"
-  fi
-fi
-
-# Fetch default branch safely (if exists)
-git fetch --no-tags --prune origin "+refs/heads/${default_branch}:refs/remotes/origin/${default_branch}" || true
-
-# Create new branch, prefer origin/default_branch as base, else current HEAD
-if git rev-parse --verify --quiet "refs/remotes/origin/${default_branch}" >/dev/null 2>&1; then
-  git checkout -b "$BRANCH" "origin/${default_branch}"
-else
-  git checkout -b "$BRANCH"
-fi
 
 export GOFLAGS=-mod=mod
 export GOPATH="$(go env GOPATH 2>/dev/null || echo "$HOME/go")"
@@ -94,61 +46,18 @@ echo "---"
 # Ensure no repo-root binary is left behind
 [ -f "./chachacrypt" ] && rm -f ./chachacrypt || true
 
-# Save a pre-update patch for diagnostics (allowed-files only)
-git add -A
-git diff --staged -- "${ALLOWED_FILES[@]}" > ai-diff-before.patch || true
-git restore --staged . || true
+# Save a patch of the changes for diagnostics and potential AI input
+git diff -- "${ALLOWED_FILES[@]}" > ai-diff-after.patch || true
 
-# Compute which allowed files changed relative to origin/default_branch
-CHANGED_RAW="$(git diff --name-only "origin/${default_branch}" -- "${ALLOWED_FILES[@]}" 2>/dev/null || true)"
-CHANGED_ALLOWED=()
-if [ -n "$CHANGED_RAW" ]; then
-  while IFS= read -r f; do
-    [ -n "$f" ] && CHANGED_ALLOWED+=("$f")
-  done <<< "$CHANGED_RAW"
-fi
-
-# If no allowed-file changes, produce artifact and exit (no PR)
-if [ "${#CHANGED_ALLOWED[@]}" -eq 0 ]; then
-  echo "No changes to go.mod/go.sum/chachacrypt.go after module updates." > ai-build.log
-  set_output branch ""
-  set_output create_pr "false"
+# If no changes were made, exit cleanly. The create-pull-request action will do nothing.
+if git diff --quiet -- "${ALLOWED_FILES[@]}"; then
+  echo "No changes to go.mod/go.sum/chachacrypt.go after module updates. Exiting."
+  # Clear the patch file if no changes
+  : > ai-diff-after.patch
   exit 0
-fi
-
-# Stage exactly allowed changed files
-git restore --staged . || true
-for f in "${CHANGED_ALLOWED[@]}"; do
-  git add -- "$f" || true
-done
-
-# Unstage anything else, just to be sure
-STAGED=$(git diff --cached --name-only || true)
-for sf in $STAGED; do
-  ok=false
-  for af in "${ALLOWED_FILES[@]}"; do
-    if [ "$sf" = "$af" ]; then
-      ok=true
-      break
-    fi
-  done
-  if [ "$ok" = false ]; then
-    git restore --staged -- "$sf" || true
-  fi
-done
-
-# Commit allowed files only
-if ! git diff --cached --quiet; then
-  git commit -m "chore: update Go toolchain & modules to latest (automated)" || true
 else
-  echo "Nothing to commit after filtering allowed files." > ai-build.log
-  set_output branch ""
-  set_output create_pr "false"
-  exit 0
+  echo "Changes detected in Go modules or source files. Proceeding to build and test."
 fi
-
-# Save post-update diff
-git diff HEAD^..HEAD -- "${ALLOWED_FILES[@]}" > ai-diff-after.patch || true
 
 # Build & test (logs to ai-build.log); build to /tmp to avoid repo-root executables
 AI_BUILD_LOG="ai-build.log"
@@ -329,19 +238,8 @@ PY
         done <<< "$STATUS_AFTER"
       fi
 
-      # Stage & commit allowed files only
-      for f in "${ALLOWED_FILES[@]}"; do
-        if ! git diff --quiet -- "$f" 2>/dev/null; then
-          git add -- "$f"
-        fi
-      done
-      git commit -m "chore: ai: apply automated fixes (iteration ${ITER})" || true
-
-      # Push updated branch
-      if [ -n "$GH2_TOKEN" ] && [ -n "$GITHUB_REPOSITORY" ]; then
-        git remote set-url origin "https://x-access-token:${GH2_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-      fi
-      git push --set-upstream "$GIT_PUSH_REMOTE" "$BRANCH" --force-with-lease || true
+      # The patch is applied to the workspace. No need to stage, commit, or push.
+      # The create-pull-request action will handle the final state of the files.
 
       # Re-run build & tests and append logs
       set +e
@@ -364,7 +262,7 @@ PY
       if [ "$BUILD_EXIT" -eq 0 ] && [ "$TEST_EXIT" -eq 0 ]; then
         break
       else
-        git diff HEAD~1..HEAD -- "${ALLOWED_FILES[@]}" > ai-diff-after.patch || true
+        git diff -- "${ALLOWED_FILES[@]}" > ai-diff-after.patch || true
         continue
       fi
     else
@@ -374,16 +272,6 @@ PY
   done
 fi
 
-# Final outputs: ensure branch pushed and whether PR should be created
-git fetch origin "${default_branch}" --depth=1 || true
-AHEAD_FINAL=$(git rev-list --right-only --count "origin/${default_branch}...HEAD" 2>/dev/null || true)
-AHEAD_FINAL="${AHEAD_FINAL:-0}"
-
-set_output branch "$BRANCH"
-if [ "$AHEAD_FINAL" -gt 0 ]; then
-  set_output create_pr "true"
-else
-  set_output create_pr "false"
-fi
-
+# The script has finished. The workspace contains the final state of the files.
+# The 'create-pull-request' action will now take over.
 exit 0
