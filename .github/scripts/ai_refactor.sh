@@ -99,27 +99,6 @@ cp staticcheck.txt ai-staticcheck.txt 2>/dev/null || true
 cp "$AI_BUILD_LOG" ai-build.log 2>/dev/null || true
 cp ai-lint.json golangci-lint.json 2>/dev/null || true
 
-# Push new branch to remote (so create-pull-request can act on it)
-if [ -n "$GH2_TOKEN" ] && [ -n "$GITHUB_REPOSITORY" ]; then
-  git remote set-url origin "https://x-access-token:${GH2_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-  git push --set-upstream "$GIT_PUSH_REMOTE" "$BRANCH" --force-with-lease
-else
-  git push --set-upstream "$GIT_PUSH_REMOTE" "$BRANCH" --force-with-lease || true
-fi
-
-# Determine whether branch differs from origin/default_branch
-git fetch origin "${default_branch}" --depth=1 || true
-AHEAD_COUNT=$(git rev-list --right-only --count "origin/${default_branch}...HEAD" 2>/dev/null || true)
-AHEAD_COUNT="${AHEAD_COUNT:-0}"
-
-set_output branch "$BRANCH"
-# If branch ahead of base, request PR. Otherwise don't.
-if [ "$AHEAD_COUNT" -gt 0 ]; then
-  set_output create_pr "true"
-else
-  set_output create_pr "false"
-fi
-
 # If build/tests failed and OPENROUTER_API_KEY provided, attempt AI-assisted fixes constrained to allowed files
 if { [ "$BUILD_EXIT" -ne 0 ] || [ "$TEST_EXIT" -ne 0 ]; } && [ -n "$OPENROUTER_API_KEY" ]; then
   DIAG="ai-diagnostics.txt"
