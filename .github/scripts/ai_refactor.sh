@@ -69,7 +69,8 @@ set -x
 # First, update the go directive in go.mod to match the available toolchain.
 GO_VERSION_STRING=$(go version | awk '{print $3}' | sed 's/go//' 2>/dev/null)
 if [ -n "$GO_VERSION_STRING" ]; then
-  go mod tidy -go="$GO_VERSION_STRING" || true
+  # Use 'go get' to explicitly update the Go toolchain version in go.mod
+  go get "go@${GO_VERSION_STRING}" || true
 fi
 
 # Second, update all module dependencies to their latest versions.
