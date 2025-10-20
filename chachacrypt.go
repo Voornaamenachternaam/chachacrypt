@@ -147,8 +147,15 @@ func isTerminal(fd uintptr) bool {
 func showHelp() {
 	fmt.Println("Usage:")
 	fmt.Println("  Encrypt a file:     chachacrypt enc -i input.txt -o output.enc")
-	fmt.Println("  Decrypt a file:     chachacrypt dec -i input.enc -o output.txt")
+	fmt.Println("  Decrypt a file:     chachacrypt dec -i input.enc -o decrypted-plaintext.txt") // Corrected to match README.md
 	fmt.Println("  Generate a password:  chachacrypt pw -s 15")
+}
+
+// zeroBytes overwrites a byte slice with zeros to clear sensitive data from memory. (Proposal 3)
+func zeroBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
 }
 
 func generatePassword(length int) (string, error) {
