@@ -23,13 +23,14 @@ permissions:
 jobs:
   golangci:
     strategy:
+      fail-fast: false
       matrix:
         go: [stable]
         os: [ubuntu-latest, windows-latest]
     name: lint
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v5.0.0
 
       - name: Setup Go
@@ -37,51 +38,82 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
 
-      - name: Install golangci-lint (binary) — do not fail job if install reports non-zero
-        uses: golangci/golangci-lint-action@v8.0.0
-        with:
-          version: v2.5.0
-          install-mode: binary
-          # Turn off the action's internal cache to satisfy "do not use any caching"
-          skip-cache: true
-          skip-save-cache: true
-          # verification is fine to keep on; installer verifies release checksum by default
-          verify: true
-        continue-on-error: true
+      - name: Prepare artifacts directory
+        run: |
+          mkdir -p artifacts
 
-      - name: Run golangci-lint (linux/mac)
+      - name: Install golangci-lint (Linux)
         if: runner.os != 'Windows'
-        id: run-golangci-linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="v2.5.0"
+          BASEURL="https://github.com/golangci/golangci-lint/releases/download/${VERSION}"
+          TAR="golangci-lint-${VERSION#v}-linux-amd64.tar.gz"
+          URL="${BASEURL}/${TAR}"
+          echo "Downloading golangci-lint from ${URL}"
+          curl -fsSL "$URL" -o /tmp/golangci.tar.gz
+          tar -xzf /tmp/golangci.tar.gz -C /tmp
+          CHDIR=$(find /tmp -maxdepth 1 -type d -name "golangci-lint-*-linux-amd64" | head -n1)
+          if [ -z "$CHDIR" ]; then
+            echo "Failed to locate extracted golangci-lint directory" >&2
+            exit 1
+          fi
+          sudo mv "$CHDIR/golangci-lint" /usr/local/bin/golangci-lint
+          sudo chmod +x /usr/local/bin/golangci-lint
+          /usr/local/bin/golangci-lint --version > artifacts/golangci.version 2>&1 || true
+
+      - name: Install golangci-lint (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = 'v2.5.0'
+          $base = "https://github.com/golangci/golangci-lint/releases/download/$version"
+          $zip = "golangci-lint-$($version.TrimStart('v'))-windows-amd64.zip"
+          $url = "$base/$zip"
+          Write-Host "Downloading $url"
+          $out = Join-Path $env:TEMP 'golangci.zip'
+          Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
+          $expand = Join-Path $env:TEMP 'golangci'
+          Remove-Item -Recurse -Force $expand -ErrorAction SilentlyContinue
+          Expand-Archive -LiteralPath $out -DestinationPath $expand -Force
+          $exe = Get-ChildItem -Path $expand -Recurse -Filter "golangci-lint.exe" | Select-Object -First 1
+          if (-not $exe) { Write-Error "golangci-lint binary not found in archive"; exit 1 }
+          $dest = "$env:ProgramFiles\golangci-lint"
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          Copy-Item -Path $exe.FullName -Destination $dest -Force
+          $env:Path += ";$dest"
+          & "$dest\golangci-lint.exe" --version > artifacts/golangci.version 2>&1 || Write-Output "version check failed"
+
+      - name: Run golangci-lint (Linux / macOS) — run full default linters, capture output, do not fail
+        if: runner.os != 'Windows'
         continue-on-error: true
         shell: bash
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
-          # Create artifacts dir
+          set -euo pipefail || true
           mkdir -p artifacts
-
-          # Ensure we run at repo root
           cd "${GITHUB_WORKSPACE:-$PWD}"
 
-          # Run golangci-lint if installed; capture json + stdout/stderr; do not fail the step
           if command -v golangci-lint >/dev/null 2>&1; then
-            # JSON output (if supported) and capture stderr
-            golangci-lint run --out-format json ./... > artifacts/golangci.json 2> artifacts/golangci.stderr || true
-            # Also keep a human readable stdout capture for quick glance
-            golangci-lint run ./... > artifacts/golangci.stdout 2>> artifacts/golangci.stderr || true
-            golangci-lint --version > artifacts/golangci.version 2>&1 || true
+            # Force full default linter set to run (disable fast mode), ensure ample timeout,
+            # output JSON machine-readable file and capture human readable output and stderr.
+            # The step will not fail the job even if linters find issues.
+            golangci-lint run --fast=false --timeout=10m --out-format json ./... > artifacts/golangci.json 2> artifacts/golangci.stderr || true
+            golangci-lint run --fast=false --timeout=10m ./... > artifacts/golangci.stdout 2>> artifacts/golangci.stderr || true
+            golangci-lint --version >> artifacts/golangci.version 2>&1 || true
           else
             echo "golangci-lint binary not found; installation may have failed" > artifacts/golangci.stderr
             echo "golangci-lint missing" > artifacts/golangci.version
           fi
 
-          # Add run metadata and exit code file for convenience (0 here — we do not fail the job)
-          echo "ran_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" > artifacts/runinfo.txt || true
+          date -u +"ran_at=%Y-%m-%dT%H:%M:%SZ" > artifacts/runinfo.txt || true
           echo "exit_code=0" > artifacts/exitcode.txt || true
 
-      - name: Run golangci-lint (windows)
+      - name: Run golangci-lint (Windows) — run full default linters, capture output, do not fail
         if: runner.os == 'Windows'
-        id: run-golangci-windows
         continue-on-error: true
         shell: pwsh
         env:
@@ -91,10 +123,9 @@ jobs:
           Set-Location -Path $Env:GITHUB_WORKSPACE
 
           if (Get-Command golangci-lint -ErrorAction SilentlyContinue) {
-            # JSON output; PowerShell redirection used; allow non-zero exit without failing pipeline
-            & golangci-lint run --out-format json ./... > artifacts/golangci.json 2> artifacts/golangci.stderr || Write-Output "lint returned non-zero"
-            & golangci-lint run ./... > artifacts/golangci.stdout 2>> artifacts/golangci.stderr || Write-Output "lint returned non-zero (text output)"
-            & golangci-lint --version > artifacts/golangci.version 2>&1 || Write-Output "version check failed"
+            & golangci-lint run --fast=false --timeout=10m --out-format json ./... > artifacts/golangci.json 2> artifacts/golangci.stderr || Write-Output "lint returned non-zero"
+            & golangci-lint run --fast=false --timeout=10m ./... > artifacts/golangci.stdout 2>> artifacts/golangci.stderr || Write-Output "lint returned non-zero (text output)"
+            & golangci-lint --version >> artifacts/golangci.version 2>&1 || Write-Output "version check failed"
           } else {
             "golangci-lint binary not found; installation may have failed" | Out-File artifacts/golangci.stderr -Encoding utf8
             "golangci-lint missing" | Out-File artifacts/golangci.version -Encoding utf8
