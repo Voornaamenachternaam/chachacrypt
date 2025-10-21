@@ -36,38 +36,43 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
 
-      - name: Install golangci-lint binary
+      - name: Install golangci-lint (binary)
         uses: golangci/golangci-lint-action@v8.0.0
         with:
           version: v2.5.0
           install-mode: binary
-          verify: false
-          args: --version
+        continue-on-error: true
 
-      - name: Run golangci-lint (capture output — do not fail)
-        id: run-golangci
+      - name: Run golangci-lint (linux)
+        if: matrix.os == 'ubuntu-latest'
+        id: run-golangci-linux
         continue-on-error: true
         shell: bash
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
-          set -euo pipefail
-
-          # prepare artifacts dir
+          set -euo pipefail || true
           mkdir -p artifacts
-
-          # run golangci-lint v2+ with JSON output path (compatible with v2 flags)
-          # capture stdout/stderr to files so we can upload them as artifacts
-          # The command should not cause the step to fail the workflow because of 'continue-on-error: true'
-          echo "Running golangci-lint..."
-          # ensure we run against repository root
-          cd "${{ github.workspace }}"
-
-          # Run linter and capture outputs. Use new v2+ flags for JSON output and disable stats to keep JSON clean.
-          # Redirect stdout/stderr to files; ensure the command does not break the step.
-          golangci-lint run --output.json.path=artifacts/golangci.json --show-stats=false ./... > artifacts/golangci.stdout 2> artifacts/golangci.stderr || true
-
-          # Also write a small summary exit-file for GitHub Actions consumption
-          echo "exit_code=$?" > artifacts/exitcode.txt || true
+          cd "$GITHUB_WORKSPACE"
+          # Run linter and capture both stdout and stderr to files; do not let the step fail the job
+          golangci-lint run --out-format json ./... > artifacts/golangci.json 2> artifacts/golangci.stderr || true
+          golangci-lint --version > artifacts/golangci.version 2>&1 || true
           echo "ran_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" > artifacts/runinfo.txt || true
+
+      - name: Run golangci-lint (windows)
+        if: matrix.os == 'windows-latest'
+        id: run-golangci-windows
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+        run: |
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+          Set-Location -Path $Env:GITHUB_WORKSPACE
+          # Run linter and capture outputs; do not fail the step
+          & golangci-lint run --out-format json ./... > artifacts/golangci.json 2> artifacts/golangci.stderr || Write-Output "golangci-lint run returned non-zero"
+          & golangci-lint --version > artifacts/golangci.version 2>&1 || Write-Output "golangci-lint --version failed"
+          (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ") | Out-File -FilePath artifacts/runinfo.txt -Encoding ascii
 
       - name: Upload golangci-lint artifacts
         if: always()
@@ -75,4 +80,4 @@ jobs:
         with:
           name: golangci-lint-results-${{ matrix.os }}
           path: artifacts/
-          retention-days: 30
+          retention-days: 7
