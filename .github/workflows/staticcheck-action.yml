@@ -12,7 +12,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:  ["windows-latest", "ubuntu-latest"]
+        go: ["stable"]
+        os: ["windows-latest", "ubuntu-latest"]
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v5.0.0
@@ -25,5 +26,4 @@ jobs:
       with:
         version: "latest"
         install-go: false
-        cache-key: ${{ matrix.go }}
         working-directory: ${{ matrix.dir }}
