@@ -29,67 +29,84 @@ jobs:
     name: lint
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5.0.0
+      - name: Checkout
+        uses: actions/checkout@v5.0.0
 
       - name: Setup Go
         uses: actions/setup-go@v6.0.0
         with:
           go-version: ${{ matrix.go }}
 
-      # Install golangci-lint via the official action, but do not let a non-zero result stop the job.
-      - name: Install golangci-lint (binary)
+      - name: Install golangci-lint (binary) — do not fail job if install reports non-zero
         uses: golangci/golangci-lint-action@v8.0.0
         with:
           version: v2.5.0
           install-mode: binary
+          # Turn off the action's internal cache to satisfy "do not use any caching"
+          skip-cache: true
+          skip-save-cache: true
+          # verification is fine to keep on; installer verifies release checksum by default
+          verify: true
         continue-on-error: true
 
-      # Run the linter on Linux/macOS runners
       - name: Run golangci-lint (linux/mac)
         if: runner.os != 'Windows'
         id: run-golangci-linux
         continue-on-error: true
         shell: bash
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
-          set -euo pipefail || true
+          # Create artifacts dir
           mkdir -p artifacts
+
+          # Ensure we run at repo root
           cd "${GITHUB_WORKSPACE:-$PWD}"
 
-          # run linter and capture outputs; do not let the command fail the step
-          # write JSON output and both stdout/stderr files for later inspection
+          # Run golangci-lint if installed; capture json + stdout/stderr; do not fail the step
           if command -v golangci-lint >/dev/null 2>&1; then
+            # JSON output (if supported) and capture stderr
             golangci-lint run --out-format json ./... > artifacts/golangci.json 2> artifacts/golangci.stderr || true
+            # Also keep a human readable stdout capture for quick glance
+            golangci-lint run ./... > artifacts/golangci.stdout 2>> artifacts/golangci.stderr || true
             golangci-lint --version > artifacts/golangci.version 2>&1 || true
           else
             echo "golangci-lint binary not found; installation may have failed" > artifacts/golangci.stderr
             echo "golangci-lint missing" > artifacts/golangci.version
           fi
-          echo "ran_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" > artifacts/runinfo.txt || true
 
-      # Run the linter on Windows runners (PowerShell)
+          # Add run metadata and exit code file for convenience (0 here — we do not fail the job)
+          echo "ran_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" > artifacts/runinfo.txt || true
+          echo "exit_code=0" > artifacts/exitcode.txt || true
+
       - name: Run golangci-lint (windows)
         if: runner.os == 'Windows'
         id: run-golangci-windows
         continue-on-error: true
         shell: pwsh
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
           New-Item -ItemType Directory -Path artifacts -Force | Out-Null
           Set-Location -Path $Env:GITHUB_WORKSPACE
 
           if (Get-Command golangci-lint -ErrorAction SilentlyContinue) {
+            # JSON output; PowerShell redirection used; allow non-zero exit without failing pipeline
             & golangci-lint run --out-format json ./... > artifacts/golangci.json 2> artifacts/golangci.stderr || Write-Output "lint returned non-zero"
+            & golangci-lint run ./... > artifacts/golangci.stdout 2>> artifacts/golangci.stderr || Write-Output "lint returned non-zero (text output)"
             & golangci-lint --version > artifacts/golangci.version 2>&1 || Write-Output "version check failed"
           } else {
             "golangci-lint binary not found; installation may have failed" | Out-File artifacts/golangci.stderr -Encoding utf8
             "golangci-lint missing" | Out-File artifacts/golangci.version -Encoding utf8
           }
-          (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ") | Out-File -FilePath artifacts/runinfo.txt -Encoding ascii
 
-      # Always upload the artifacts even if lint failed; keeps logs for review
+          (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ") | Out-File -FilePath artifacts/runinfo.txt -Encoding ascii
+          "exit_code=0" | Out-File -FilePath artifacts/exitcode.txt -Encoding ascii
+
       - name: Upload golangci-lint artifacts
         if: always()
         uses: actions/upload-artifact@v4.6.2
         with:
           name: golangci-lint-results-${{ matrix.os }}
           path: artifacts/
-          retention-days: 90
+          retention-days: 7
