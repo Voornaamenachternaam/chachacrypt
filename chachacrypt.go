@@ -22,8 +22,8 @@ import (
 
 const (
 	// File format header constants
-	MagicNumber  = "CHACRYPT"
-	FileVersion  = byte(1) // Current file format version
+	MagicNumber = "CHACRYPT"
+	FileVersion = byte(1) // Current file format version
 
 	// Argon2id and general crypto parameters
 	defaultSaltSize  = 32
@@ -43,10 +43,10 @@ type FileHeader struct {
 	Magic     [9]byte // "CHACRYPT\x01" (includes version)
 	ArgonTime uint32
 	ArgonMem  uint32
-	ArgonUtil uint8   // Argon2id threads/parallelism
-	KeySize   uint32  // Derived key size
-	SaltSize  uint32  // Salt size for KDF
-	NonceSize uint32  // Nonce size for AEAD
+	ArgonUtil uint8    // Argon2id threads/parallelism
+	KeySize   uint32   // Derived key size
+	SaltSize  uint32   // Salt size for KDF
+	NonceSize uint32   // Nonce size for AEAD
 	_         [12]byte // Reserved for future expansion, pad to 48 bytes total
 }
 
@@ -103,7 +103,7 @@ func main() {
 		}
 		fmt.Print("Enter a strong password: ")
 		password := readPassword() // returns []byte (Proposal 4)
-		defer zeroBytes(password)   // Zero password from memory (Proposal 3)
+		defer zeroBytes(password)  // Zero password from memory (Proposal 3)
 		if err := encryptFile(*encInput, *encOutput, password); err != nil {
 			log.Fatalf("Encryption failed: %v", err)
 		}
@@ -116,7 +116,7 @@ func main() {
 		}
 		fmt.Print("Enter the password: ")
 		password := readPassword() // returns []byte (Proposal 4)
-		defer zeroBytes(password)   // Zero password from memory (Proposal 3)
+		defer zeroBytes(password)  // Zero password from memory (Proposal 3)
 		if err := decryptFile(*decInput, *decOutput, password); err != nil {
 			log.Fatalf("Decryption failed: %v", err)
 		}
