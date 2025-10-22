@@ -469,7 +469,7 @@ func decryptFile(inputFile, outputFile string, password []byte, cfg config) erro
 		if err := binary.Read(inFile, binary.LittleEndian, &clen); err != nil {
 			return fmt.Errorf("error reading ciphertext length")
 		}
-		if clen > (1<<30) {
+		if clen > (1 << 30) {
 			return fmt.Errorf("invalid ciphertext length")
 		}
 		ct := make([]byte, clen)
