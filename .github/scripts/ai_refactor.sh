@@ -1,256 +1,215 @@
+# File: .github/scripts/ai_refactor.sh
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Script to update Go dependencies and optionally apply AI-powered fixes.
-# This script modifies files in the workspace. It does not perform any git operations.
-# The subsequent 'create-pull-request' action is responsible for committing and creating a PR.
+# Usage: ./ai_refactor.sh --artifacts <path>
+ARTIFACTS_DIR=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --artifacts) ARTIFACTS_DIR="$2"; shift 2 ;;
+    *) echo "Unknown argument: $1"; exit 1 ;;
+  esac
+done
 
-OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}"
-MAX_ITER="${MAX_ITER:-5}"
-MODEL="${MODEL:-deepseek/deepseek-r1-0528-qwen3-8b:free}"
-OPENROUTER_ENDPOINT="${OPENROUTER_ENDPOINT:-https://api.openrouter.ai/v1/chat/completions}"
-
-ALLOWED_FILES=( "go.mod" "go.sum" "chachacrypt.go" )
-
-export GOFLAGS=-mod=mod
-export GOPATH="$(go env GOPATH 2>/dev/null || echo "$HOME/go")"
-export PATH="$GOPATH/bin:$PATH"
-
-# 1) Update go directive to latest toolchain, then update modules
-echo "---"
-echo "Initial go.mod:"
-cat go.mod
-echo "---"
-set -x
-# First, update the go directive in go.mod to match the available toolchain.
-GO_VERSION_STRING=$(go version | awk '{print $3}' | sed 's/go//' 2>/dev/null)
-if [ -n "$GO_VERSION_STRING" ]; then
-  # Use 'go get' to explicitly update the Go toolchain version in go.mod
-  go get "go@${GO_VERSION_STRING}" || true
+if [ -z "$ARTIFACTS_DIR" ]; then
+  echo "Usage: $0 --artifacts <path-to-artifacts>"
+  exit 1
 fi
 
-# Second, update all module dependencies to their latest versions.
-go get -u ./... || true
+WORKDIR="${GITHUB_WORKSPACE:-$(pwd)}"
+ART_DIR="${WORKDIR}/${ARTIFACTS_DIR}"
 
-# Finally, run tidy again to clean up any unused module requirements.
-go mod tidy || true
-set +x
-echo "---"
-echo "Final go.mod:"
-cat go.mod
-echo "---"
-echo "Git status after updates:"
-git status --porcelain
-echo "---"
+# Ensure required environment variables
+: "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set}"
+: "${GH2_TOKEN:?GH2_TOKEN must be set}"
+: "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY must be set}"
 
-# Ensure no repo-root binary is left behind
-[ -f "./chachacrypt" ] && rm -f ./chachacrypt || true
+TARGET_FILES=( "chachacrypt.go" "go.mod" "go.sum" )
+DIAG_FILE="${ART_DIR}/ai-diagnostics.txt"
+mkdir -p "${ART_DIR}"
 
-# Save a patch of the changes for diagnostics and potential AI input
-git diff -- "${ALLOWED_FILES[@]}" > ai-diff-after.patch || true
-
-# If no changes were made, exit cleanly. The create-pull-request action will do nothing.
-if git diff --quiet -- "${ALLOWED_FILES[@]}"; then
-  echo "No changes to go.mod/go.sum/chachacrypt.go after module updates. Exiting."
-  # Clear the patch file if no changes
-  : > ai-diff-after.patch
-  exit 0
-else
-  echo "Changes detected in Go modules or source files. Proceeding to build and test."
-fi
-
-# Build & test (logs to ai-build.log); build to /tmp to avoid repo-root executables
-AI_BUILD_LOG="ai-build.log"
-: > "$AI_BUILD_LOG"
-set +e
-go build -o /tmp/chachacrypt.build ./... >> "$AI_BUILD_LOG" 2>&1
-BUILD_EXIT=$?
-go test ./... >> "$AI_BUILD_LOG" 2>&1
-TEST_EXIT=$?
-rm -f /tmp/chachacrypt.build || true
-set -e
-
-# Try to ensure golangci-lint output is produced (v2 prefers --output.json.path)
-if command -v golangci-lint >/dev/null 2>&1; then
-  set +e
-  golangci-lint run --timeout=5m --output.json.path=ai-lint.json ./... 2>/dev/null
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    # fallback to older flag forms (if the binary supports them)
-    golangci-lint run --timeout=5m --out-format json ./... > ai-lint.json 2>/dev/null || true
-  fi
-  # attempt an automatic fix pass (non-fatal)
-  golangci-lint run --fix --timeout=5m ./... || true
-  set -e
-else
-  echo '{"error":"golangci-lint not installed"}' > ai-lint.json
-fi
-
-# staticcheck
-if command -v staticcheck >/dev/null 2>&1; then
-  staticcheck ./... > staticcheck.txt || true
-else
-  echo "staticcheck not available" > staticcheck.txt
-fi
-
-# Ensure canonical artifact names exist
-cp ai-lint.json ai-lint.json 2>/dev/null || true
-cp staticcheck.txt ai-staticcheck.txt 2>/dev/null || true
-cp "$AI_BUILD_LOG" ai-build.log 2>/dev/null || true
-cp ai-lint.json golangci-lint.json 2>/dev/null || true
-
-# If build/tests failed and OPENROUTER_API_KEY provided, attempt AI-assisted fixes constrained to allowed files
-if { [ "$BUILD_EXIT" -ne 0 ] || [ "$TEST_EXIT" -ne 0 ]; } && [ -n "$OPENROUTER_API_KEY" ]; then
-  DIAG="ai-diagnostics.txt"
-  {
-    echo "=== Build & Test Log ==="
-    cat ai-build.log 2>/dev/null || true
-    echo
-    echo "=== golangci-lint JSON ==="
-    cat ai-lint.json 2>/dev/null || true
-    echo
-    echo "=== staticcheck ==="
-    cat staticcheck.txt 2>/dev/null || true
-  } > "$DIAG"
-
-  # Truncate large artifacts
-  head -n 4000 ai-diff-after.patch > ai-diff-after.patch.tmp 2>/dev/null || true
-  if [ -f ai-diff-after.patch.tmp ]; then mv ai-diff-after.patch.tmp ai-diff-after.patch || true; fi
-  head -n 4000 "$DIAG" > "${DIAG}.tmp" 2>/dev/null || true
-  if [ -f "${DIAG}.tmp" ]; then mv "${DIAG}.tmp" "$DIAG" || true; fi
-
-  # Compose AI request payload via Python (robust quoting)
-  PATCH_CONTENT="$(sed -n '1,200000p' ai-diff-after.patch 2>/dev/null || true)"
-  DIAG_CONTENT="$(sed -n '1,200000p' "$DIAG" 2>/dev/null || true)"
-
-  ITER=0
-  while [ "$ITER" -lt "$MAX_ITER" ]; do
-    ITER=$((ITER+1))
-    RESPONSE_FILE="ai-response-${ITER}.json"
-
-    python3 - <<PY > ai-payload.json
-import json,os
-payload = {
-  "model": os.environ.get("MODEL", "${MODEL}"),
-  "messages": [
-    {"role":"system","content": "You are tngtech/deepseek-r1t2-chimera, an expert Go engineer. You will be given ai-diff-after.patch and diagnostics. CONSTRAINT: You MUST ONLY propose edits to go.mod, go.sum, and/or chachacrypt.go. Return exactly one unified diff (git apply format) touching only these files, or the single line: NO_PATCH_POSSIBLE."},
-    {"role":"user","content": "Patch (ai-diff-after.patch):\\n\\n" + '''${PATCH_CONTENT}''' + "\\n\\nDiagnostics:\\n\\n" + '''${DIAG_CONTENT}''' + "\\n\\nPlease produce a single unified patch that modifies only go.mod, go.sum and/or chachacrypt.go. If not possible, reply exactly: NO_PATCH_POSSIBLE"}
-  ],
-  "temperature": 0.0,
-  "max_tokens": 32768
+safe_cat() {
+  if [ -f "$1" ]; then cat "$1"; fi
 }
-print(json.dumps(payload))
-PY
 
-    curl -sS -X POST "${OPENROUTER_ENDPOINT}" \
-      -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
-      -H "Content-Type: application/json" \
-      --data-binary @ai-payload.json -o "${RESPONSE_FILE}" || true
+# Create diagnostics
+{
+  echo "=== AI diagnostics: $(date -u +"%Y-%m-%dT%H:%M:%SZ") ==="
+  echo "Repository: ${GITHUB_REPOSITORY}"
+  echo
+  echo "=== golangci stdout ==="
+  safe_cat "${ART_DIR}/golangci.stdout" || true
+  echo
+  echo "=== golangci stderr ==="
+  safe_cat "${ART_DIR}/golangci.stderr" || true
+  echo
+  echo "=== golangci json (truncated) ==="
+  if [ -f "${ART_DIR}/golangci.json" ]; then
+    jq -r '.Issues[]? | {pos: .Pos, linter: .FromLinter, text: .Text}' "${ART_DIR}/golangci.json" | sed -n '1,200p' || true
+  fi
+  echo
+  echo "=== staticcheck ==="
+  safe_cat "${ART_DIR}/staticcheck.txt" || true
+  echo
+  echo "=== build log (truncated) ==="
+  safe_cat "${ART_DIR}/ai-build.log" | sed -n '1,200p' || true
+} > "${DIAG_FILE}"
 
-    # extract assistant text robustly
-    python3 - <<PY > ai-fix-${ITER}.log
-import json,sys
-try:
-    obj=json.load(open("${RESPONSE_FILE}","r",encoding="utf-8"))
-    text=""
-    if isinstance(obj.get("choices"), list) and obj["choices"]:
-        ch=obj["choices"][0]
-        if isinstance(ch.get("message"), dict):
-            text = ch["message"].get("content","") or ch.get("text","")
-        else:
-            text = ch.get("text","")
-    print(text or "")
-except Exception:
-    print("")
-PY
-
-    PATCH_TEXT="$(sed -n '1,200000p' ai-fix-${ITER}.log 2>/dev/null || true)"
-    if echo "$PATCH_TEXT" | tr -d '\r' | grep -q '^NO_PATCH_POSSIBLE$'; then
-      break
-    fi
-
-    printf "%s\n" "$PATCH_TEXT" > "ai-fix-${ITER}.patch"
-
-    # Validate patch touches only allowed files
-    FILES_IN_PATCH=$(grep -E '^(diff --git a/|^\+\+\+ b/|^--- a/)' "ai-fix-${ITER}.patch" | sed -E 's/^diff --git a\/([^ ]+) b\/([^ ]+)$/\1\n\2/; s/^\+\+\+ b\/(.*)$/\1/; s/^--- a\/(.*)$/\1/' | sed '/^$/d' | sort -u || true)
-    INVALID=false
-    for pfile in $FILES_IN_PATCH; do
-      match=false
-      for af in "${ALLOWED_FILES[@]}"; do
-        if [ "$pfile" = "$af" ]; then
-          match=true
-          break
-        fi
-      done
-      if [ "$match" = false ]; then
-        INVALID=true
-        break
+# Determine relevance: if issues reference target files or build logs mention module/go problems
+relevant=false
+if [ -f "${ART_DIR}/golangci.json" ]; then
+  mapfile -t files_in_json < <(jq -r '.Issues[]?.Pos?.Filename // empty' "${ART_DIR}/golangci.json" | sort -u)
+  for f in "${files_in_json[@]}"; do
+    for tf in "${TARGET_FILES[@]}"; do
+      if [[ "$f" == *"$tf" ]]; then
+        relevant=true
+        break 2
       fi
     done
-    if [ "$INVALID" = true ]; then
-      continue
-    fi
-
-    # Check application and apply
-    if git apply --check "ai-fix-${ITER}.patch" >/dev/null 2>&1; then
-      git apply "ai-fix-${ITER}.patch"
-      # Revert any non-allowed changes
-      STATUS_AFTER=$(git status --porcelain || true)
-      if [ -n "$STATUS_AFTER" ]; then
-        while IFS= read -r line; do
-          [ -z "$line" ] && continue
-          file=$(echo "$line" | sed -E 's/^[ MADRCU?]{1,3}//' | sed 's/^[[:space:]]*//')
-          allowed=false
-          for af in "${ALLOWED_FILES[@]}"; do
-            if [ "$file" = "$af" ]; then
-              allowed=true
-              break
-            fi
-          done
-          if [ "$allowed" = false ]; then
-            if git ls-files --error-unmatch -- "$file" >/dev/null 2>&1; then
-              git restore --source=HEAD -- "$file" || true
-            else
-              rm -f -- "$file" || true
-            fi
-          fi
-        done <<< "$STATUS_AFTER"
-      fi
-
-      # The patch is applied to the workspace. No need to stage, commit, or push.
-      # The create-pull-request action will handle the final state of the files.
-
-      # Re-run build & tests and append logs
-      set +e
-      go build -o /tmp/chachacrypt.build ./... >> ai-build.log 2>&1
-      BUILD_EXIT=$?
-      go test ./... >> ai-build.log 2>&1
-      TEST_EXIT=$?
-      rm -f /tmp/chachacrypt.build || true
-      set -e
-
-      # Update linter outputs
-      if command -v golangci-lint >/dev/null 2>&1; then
-        golangci-lint run --timeout=5m --output.json.path=ai-lint.json ./... || golangci-lint run --timeout=5m --out-format json ./... > ai-lint.json 2>/dev/null || true
-      fi
-      if command -v staticcheck >/dev/null 2>&1; then
-        staticcheck ./... > ai-staticcheck.txt || true
-      fi
-
-      # If fixed, break; otherwise continue next iteration
-      if [ "$BUILD_EXIT" -eq 0 ] && [ "$TEST_EXIT" -eq 0 ]; then
-        break
-      else
-        git diff -- "${ALLOWED_FILES[@]}" > ai-diff-after.patch || true
-        continue
-      fi
-    else
-      # patch can't apply; try next iteration
-      continue
-    fi
   done
 fi
 
-# The script has finished. The workspace contains the final state of the files.
-# The 'create-pull-request' action will now take over.
+if grep -Ei "cannot find module|module|go [0-9]+\." "${ART_DIR}/ai-build.log" >/dev/null 2>&1; then
+  relevant=true
+fi
+
+# If not relevant, exit with empty pr_branch output
+if [ "$relevant" = false ]; then
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "pr_branch=" >> "${GITHUB_OUTPUT}"; fi
+  exit 0
+fi
+
+# Prepare prompt context
+PROMPT_FILE="$(mktemp)"
+{
+  echo "You are an expert Go maintainer. Produce a minimal, safe unified diff patch (git-format) that modifies only the following files if needed: chachacrypt.go, go.mod, go.sum."
+  echo "Goals:"
+  echo "1) Fix lint/build/test issues present in diagnostics while preserving behavior."
+  echo "2) Update go directive and dependencies only when necessary; prefer minor/patch bumps."
+  echo "3) If Go version update is required, ensure code compiles and necessary edits are included."
+  echo
+  echo "=== Current files ==="
+  for tf in "${TARGET_FILES[@]}"; do
+    if [ -f "${WORKDIR}/${tf}" ]; then
+      echo "<<< BEGIN FILE: ${tf} >>>"
+      sed -n '1,16000p' "${WORKDIR}/${tf}"
+      echo "<<< END FILE: ${tf} >>>"
+      echo
+    fi
+  done
+  echo "=== Diagnostics (truncated) ==="
+  sed -n '1,4000p' "${DIAG_FILE}" 2>/dev/null || true
+  echo
+  echo "Instructions: Return only a single unified diff patch (git-style, starting with 'diff --git a/... b/...') inside a code block or plain text. If no safe patch can be created, return an empty response."
+} > "${PROMPT_FILE}"
+
+# Call OpenRouter Chat Completions
+API_URL="https://api.openrouter.ai/v1/chat/completions"
+MODEL="tngtech/deepseek-r1t2-chimera:free"
+
+PAYLOAD=$( jq -n --arg model "$MODEL" --arg sys "You are a helpful, careful Go engineer." --arg usr "$(sed -n '1,20000p' "$PROMPT_FILE")" '{
+  model: $model,
+  messages: [
+    {role:"system", content:$sys},
+    {role:"user", content:$usr}
+  ],
+  temperature: 0.0,
+  max_tokens: 32768
+}' )
+
+RESPONSE="$(mktemp)"
+HTTP_CODE=$(curl -sS -X POST "$API_URL" \
+  -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d "$PAYLOAD" -w "%{http_code}" -o "$RESPONSE")
+
+if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+  echo "AI API returned HTTP $HTTP_CODE" >> "${DIAG_FILE}"
+  cat "$RESPONSE" >> "${DIAG_FILE}"
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "pr_branch=" >> "${GITHUB_OUTPUT}"; fi
+  exit 0
+fi
+
+AI_CONTENT=$(jq -r '.choices[0].message.content // .choices[0].text // empty' "$RESPONSE" 2>/dev/null || true)
+if [ -z "$AI_CONTENT" ]; then
+  echo "AI returned empty content; saving response to diagnostics." >> "${DIAG_FILE}"
+  cat "$RESPONSE" >> "${DIAG_FILE}"
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "pr_branch=" >> "${GITHUB_OUTPUT}"; fi
+  exit 0
+fi
+
+# Extract unified diff
+PATCH_FILE="${ART_DIR}/ai-diff-after.patch"
+echo "$AI_CONTENT" > /tmp/ai_content.txt
+awk 'BEGIN{p=0} /^```/{ if(p==0){p=1; next} else {p=0; next} } p{print }' /tmp/ai_content.txt > "${PATCH_FILE}" || true
+if [ ! -s "${PATCH_FILE}" ]; then
+  awk '/^diff --git /{p=1} p{print}' /tmp/ai_content.txt > "${PATCH_FILE}" || true
+fi
+
+if [ ! -s "${PATCH_FILE}" ]; then
+  echo "Failed to extract patch from AI response." >> "${DIAG_FILE}"
+  echo "$AI_CONTENT" >> "${DIAG_FILE}"
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "pr_branch=" >> "${GITHUB_OUTPUT}"; fi
+  exit 0
+fi
+
+# Save before diff
+git diff -- "${TARGET_FILES[@]}" > "${ART_DIR}/ai-diff-before.patch" || true
+
+# Validate and apply patch
+if git apply --check "${PATCH_FILE}" 2> /tmp/ai_patch_errors.txt; then
+  git apply "${PATCH_FILE}"
+else
+  echo "Patch failed git apply --check" >> "${DIAG_FILE}"
+  cat /tmp/ai_patch_errors.txt >> "${DIAG_FILE}"
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "pr_branch=" >> "${GITHUB_OUTPUT}"; fi
+  exit 0
+fi
+
+# Determine changed target files
+CHANGED=""
+for f in "${TARGET_FILES[@]}"; do
+  if git status --porcelain | awk '{print $2}' | grep -Fxq "$f" >/dev/null 2>&1; then
+    CHANGED="${CHANGED} ${f}"
+  fi
+done
+
+if [ -z "${CHANGED}" ]; then
+  git diff > "${ART_DIR}/ai-diff-after.patch" || true
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "pr_branch=" >> "${GITHUB_OUTPUT}"; fi
+  exit 0
+fi
+
+# Commit on new branch and push
+TIMESTAMP=$(date -u +"%Y%m%d%H%M%S")
+BRANCH="ai/dep-updates-${TIMESTAMP}"
+git checkout -b "${BRANCH}"
+
+for f in ${TARGET_FILES[@]}; do
+  if [ -f "$f" ]; then
+    git add "$f" || true
+  fi
+done
+
+git commit -m "[create-pull-request] automated AI-assisted fixes: ${CHANGED}" || true
+
+REMOTE_URL="https://x-access-token:${GH2_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+git push --set-upstream "${REMOTE_URL}" "${BRANCH}"
+
+# Save after diff
+git diff origin/main.."${BRANCH}" > "${ART_DIR}/ai-diff-after.patch" || true
+
+# Expose the branch for the workflow to create a PR
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  echo "pr_branch=${BRANCH}" >> "${GITHUB_OUTPUT}"
+else
+  echo "pr_branch=${BRANCH}"
+fi
+
+# Save diagnostics
+cp "${DIAG_FILE}" "${ART_DIR}/ai-diagnostics.txt" 2>/dev/null || true
+
+# Cleanup
+rm -f /tmp/ai_content.txt "$RESPONSE" /tmp/ai_patch_errors.txt || true
+
 exit 0
