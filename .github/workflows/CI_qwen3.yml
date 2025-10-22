@@ -50,7 +50,7 @@ jobs:
           only-new-issues: false
           problem-matchers: false
           cache-invalidation-interval: 7
-          args: --timeout=10m --fast=false
+          args: --timeout=10m
         env:
           GOFLAGS: -mod=mod
           GOTOOLCHAIN: local
@@ -67,8 +67,8 @@ jobs:
           set -euo pipefail || true
           cd "${GITHUB_WORKSPACE:-$PWD}"
           if command -v golangci-lint >/dev/null 2>&1; then
-            golangci-lint run --timeout=10m --fast=false --out-format json ./... > ci-artifacts/${{ matrix.os }}/golangci.json 2> ci-artifacts/${{ matrix.os }}/golangci.stderr || true
-            golangci-lint run --timeout=10m --fast=false ./... > ci-artifacts/${{ matrix.os }}/golangci.stdout 2>> ci-artifacts/${{ matrix.os }}/golangci.stderr || true
+            golangci-lint run --timeout=10m --out-format json ./... > ci-artifacts/${{ matrix.os }}/golangci.json 2> ci-artifacts/${{ matrix.os }}/golangci.stderr || true
+            golangci-lint run --timeout=10m ./... > ci-artifacts/${{ matrix.os }}/golangci.stdout 2>> ci-artifacts/${{ matrix.os }}/golangci.stderr || true
             golangci-lint --version > ci-artifacts/${{ matrix.os }}/golangci.version 2>&1 || true
           else
             echo "golangci-lint not found in PATH" > ci-artifacts/${{ matrix.os }}/golangci.stderr
@@ -84,8 +84,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path $outDir | Out-Null
           $exe = Get-Command golangci-lint -ErrorAction SilentlyContinue
           if ($null -ne $exe) {
-            & golangci-lint run --timeout=10m --fast=false --out-format json ./... > "$outDir/golangci.json" 2> "$outDir/golangci.stderr"  || Write-Output "lint returned non-zero"
-            & golangci-lint run --timeout=10m --fast=false ./... > "$outDir/golangci.stdout" 2>> "$outDir/golangci.stderr"  || Write-Output "lint returned non-zero"
+            & golangci-lint run --timeout=10m --out-format json ./... > "$outDir/golangci.json" 2> "$outDir/golangci.stderr"  || Write-Output "lint returned non-zero"
+            & golangci-lint run --timeout=10m ./... > "$outDir/golangci.stdout" 2>> "$outDir/golangci.stderr"  || Write-Output "lint returned non-zero"
             & golangci-lint --version > "$outDir/golangci.version" 2>&1 || Write-Output "version check failed"
           } else {
             "golangci-lint not found" | Out-File "$outDir/golangci.stderr" -Encoding utf8
@@ -129,7 +129,7 @@ jobs:
         with:
           name: ci-artifacts-${{ matrix.os }}
           path: ci-artifacts/${{ matrix.os }}
-          retention-days: 7
+          retention-days: 90
           if-no-files-found: warn
 
   ai-refactor:
