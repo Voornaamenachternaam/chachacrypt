@@ -26,9 +26,9 @@ import (
 	"time"
 	"unsafe"
 
-	"golang.org/x/crypto/argon2"         //nolint:depguard // Required for Argon2id KDF
+	"golang.org/x/crypto/argon2"           //nolint:depguard // Required for Argon2id KDF
 	"golang.org/x/crypto/chacha20poly1305" //nolint:depguard // Required for XChaCha20-Poly1305 AEAD
-	"golang.org/x/term"                   //nolint:depguard // Required for secure password input
+	"golang.org/x/term"                    //nolint:depguard // Required for secure password input
 )
 
 const (
@@ -39,22 +39,22 @@ const (
 	defaultNonce = chacha20poly1305.NonceSizeX // 24 for XChaCha20-Poly1305
 
 	// 2025 Cryptographic Standards - Argon2id minimum parameters
-	defaultArgonTime    = 6  // Increased from 3
+	defaultArgonTime    = 6          // Increased from 3
 	defaultArgonMemory  = 256 * 1024 // Increased from 64*1024 (256 MiB)
-	defaultArgonThreads = 2  // Increased from 1
-	defaultChunkSize    = 64 * 1024 // 64 KiB chunks
-	
+	defaultArgonThreads = 2          // Increased from 1
+	defaultChunkSize    = 64 * 1024  // 64 KiB chunks
+
 	// 2025 Security constants with tighter bounds
-	maxArgonTime    = 1 << 12 // 4096 iterations
-	maxArgonMemory  = 1 << 22 // 4 GiB upper bound (tightened from 1 TiB)
-	maxChunkSize    = 1 << 22 // 4 MiB chunk size upper bound (tightened)
-	maxSaltSize     = 1 << 8  // 256 bytes salt size upper bound (tightened)
-	maxKeySize      = 1 << 8  // 256 bytes key size upper bound (tightened)
-	
+	maxArgonTime   = 1 << 12 // 4096 iterations
+	maxArgonMemory = 1 << 22 // 4 GiB upper bound (tightened from 1 TiB)
+	maxChunkSize   = 1 << 22 // 4 MiB chunk size upper bound (tightened)
+	maxSaltSize    = 1 << 8  // 256 bytes salt size upper bound (tightened)
+	maxKeySize     = 1 << 8  // 256 bytes key size upper bound (tightened)
+
 	// CSPRNG validation constants
-	entropyCheckSize   = 32 // bytes to sample for entropy check
-	minEntropyBits     = 7.5 // minimum entropy per byte (NIST SP 800-22)
-	
+	entropyCheckSize = 32  // bytes to sample for entropy check
+	minEntropyBits   = 7.5 // minimum entropy per byte (NIST SP 800-22)
+
 	// Key rotation constants
 	maxKeyVersion = 255
 )
@@ -82,23 +82,23 @@ func (r *CSPRNGReader) checkEntropy(sample []byte) error {
 	if len(sample) < entropyCheckSize/2 {
 		return errors.New("insufficient sample size for entropy check")
 	}
-	
+
 	// Calculate Shannon entropy
 	freq := make(map[byte]int)
 	for _, b := range sample {
 		freq[b]++
 	}
-	
+
 	entropy := 0.0
 	for _, count := range freq {
 		p := float64(count) / float64(len(sample))
 		entropy -= p * log2(p)
 	}
-	
+
 	if entropy < minEntropyBits {
 		return fmt.Errorf("insufficient entropy: %f < %f", entropy, minEntropyBits)
 	}
-	
+
 	return nil
 }
 
@@ -114,35 +114,35 @@ var (
 )
 
 type FileHeader struct {
-	Magic       [9]byte
-	Version     byte
-	ArgonTime   uint32
-	ArgonMem    uint32
-	ArgonUtil   uint8
-	KeySize     uint32
-	SaltSize    uint32
-	NonceSize   uint32
-	KeyVersion  byte // For key rotation
-	Timestamp   uint64 // Unix timestamp for format migration
-	Integrity   [32]byte // HMAC-SHA256 for metadata integrity
-	Padding     [7]byte // Explicit padding
+	Magic      [9]byte
+	Version    byte
+	ArgonTime  uint32
+	ArgonMem   uint32
+	ArgonUtil  uint8
+	KeySize    uint32
+	SaltSize   uint32
+	NonceSize  uint32
+	KeyVersion byte     // For key rotation
+	Timestamp  uint64   // Unix timestamp for format migration
+	Integrity  [32]byte // HMAC-SHA256 for metadata integrity
+	Padding    [7]byte  // Explicit padding
 }
 
 type config struct {
-	SaltSize     uint32
-	KeySize      uint32
-	KeyTime      uint32
-	KeyMemory    uint32
-	KeyThreads   uint8
-	ChunkSize    int
-	NonceSize    int
-	KeyVersion   byte
+	SaltSize   uint32
+	KeySize    uint32
+	KeyTime    uint32
+	KeyMemory  uint32
+	KeyThreads uint8
+	ChunkSize  int
+	NonceSize  int
+	KeyVersion byte
 }
 
 // SecureBuffer implements secure memory management for sensitive data
 type SecureBuffer struct {
-	data []byte
-	mu   sync.Mutex
+	data   []byte
+	mu     sync.Mutex
 	zeroed atomic.Bool
 }
 
@@ -165,10 +165,10 @@ func (sb *SecureBuffer) Zero() {
 	if sb.zeroed.Load() {
 		return
 	}
-	
+
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
-	
+
 	// Constant-time zeroing to prevent timing attacks
 	n := len(sb.data)
 	if n > 0 {
@@ -179,7 +179,7 @@ func (sb *SecureBuffer) Zero() {
 		// Force memory barrier
 		atomic.StoreUint32((*uint32)(unsafe.Pointer(&sb.data[0])), 0)
 	}
-	
+
 	sb.zeroed.Store(true)
 	runtime.KeepAlive(sb.data)
 }
@@ -204,12 +204,12 @@ func ConstantTimeEqual(a, b []byte) bool {
 func validateSaltUniqueness(salt []byte) error {
 	saltMu.RLock()
 	defer saltMu.RUnlock()
-	
+
 	saltHex := hex.EncodeToString(salt)
 	if _, exists := saltCache[saltHex]; exists {
 		return errors.New("salt has been used before - potential security issue")
 	}
-	
+
 	// Add to cache with cleanup after 1 hour
 	saltMu.RUnlock()
 	saltMu.Lock()
@@ -221,7 +221,7 @@ func validateSaltUniqueness(salt []byte) error {
 		saltMu.Unlock()
 	}()
 	saltMu.Unlock()
-	
+
 	return nil
 }
 
@@ -231,16 +231,16 @@ func createFileIntegrity(header FileHeader, salt []byte) ([32]byte, error) {
 	headerCopy := header
 	var zeroIntegrity [32]byte
 	headerCopy.Integrity = zeroIntegrity
-	
+
 	var headerBuf bytes.Buffer
 	if err := binary.Write(&headerBuf, binary.LittleEndian, headerCopy); err != nil {
 		return zeroIntegrity, fmt.Errorf("failed to serialize header: %w", err)
 	}
-	
+
 	// Create HMAC with salt as key
 	mac := hmac.New(sha256.New, salt)
 	mac.Write(headerBuf.Bytes())
-	
+
 	var integrity [32]byte
 	copy(integrity[:], mac.Sum(nil))
 	return integrity, nil
@@ -252,18 +252,18 @@ func verifyFileIntegrity(header FileHeader, salt []byte) error {
 	if err != nil {
 		return fmt.Errorf("integrity check failed: %w", err)
 	}
-	
+
 	if !hmac.Equal(header.Integrity[:], expected[:]) {
 		return errors.New("file metadata has been tampered with")
 	}
-	
+
 	return nil
 }
 
 // buildEnhancedAAD builds AAD with all metadata binding
 func buildEnhancedAAD(header FileHeader, chunkSeq uint64) ([]byte, error) {
 	var aad bytes.Buffer
-	
+
 	// Bind all critical metadata
 	binary.Write(&aad, binary.LittleEndian, header.Magic)
 	aad.WriteByte(header.Version)
@@ -273,12 +273,12 @@ func buildEnhancedAAD(header FileHeader, chunkSeq uint64) ([]byte, error) {
 	binary.Write(&aad, binary.LittleEndian, header.KeySize)
 	aad.WriteByte(header.KeyVersion)
 	binary.Write(&aad, binary.LittleEndian, header.Timestamp)
-	
+
 	// Bind chunk sequence number
 	var seqBytes [8]byte
 	binary.BigEndian.PutUint64(seqBytes[:], chunkSeq)
 	aad.Write(seqBytes[:])
-	
+
 	return aad.Bytes(), nil
 }
 
@@ -547,14 +547,14 @@ func readPasswordPromptConfirm(prompt, confirmPrompt string) (*SecureBuffer, err
 	if !isTerminal(os.Stdin.Fd()) {
 		return nil, errors.New("interactive input required")
 	}
-	
+
 	fmt.Print(prompt)
 	p1, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
 	if err != nil {
 		return nil, fmt.Errorf("password read failed: %w", err) // Generic error
 	}
-	
+
 	fmt.Print(confirmPrompt)
 	p2, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
@@ -569,7 +569,7 @@ func readPasswordPromptConfirm(prompt, confirmPrompt string) (*SecureBuffer, err
 		zeroBytes(p2)
 		return nil, errors.New("password mismatch") // Generic error
 	}
-	
+
 	zeroBytes(p2)
 	return NewSecureBuffer(len(p1)), nil
 }
@@ -579,10 +579,10 @@ func generatePassword(n int) (string, error) {
 	if n <= 0 {
 		return "", errors.New("invalid password length")
 	}
-	
+
 	var result strings.Builder
 	result.Grow(n)
-	
+
 	for i := 0; i < n; i++ {
 		idx, err := rand.Int(csprng, big.NewInt(int64(len(letters))))
 		if err != nil {
@@ -590,7 +590,7 @@ func generatePassword(n int) (string, error) {
 		}
 		result.WriteByte(letters[idx.Int64()])
 	}
-	
+
 	return result.String(), nil
 }
 
@@ -771,7 +771,7 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 	// Update header for key rotation
 	header.KeyVersion = newVersion
 	header.Timestamp = uint64(time.Now().Unix())
-	
+
 	// Recalculate integrity
 	integrity, err := createFileIntegrity(header, salt.Bytes())
 	if err != nil {
@@ -820,7 +820,7 @@ func processKeyRotation(ctx context.Context, inFile, outFile *os.File, key *Secu
 	nonceSize := int(header.NonceSize)
 	var seq uint64
 	buf := make([]byte, 1024)
-	
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -842,38 +842,38 @@ func processKeyRotation(ctx context.Context, inFile, outFile *os.File, key *Secu
 			var clen uint32
 			binary.Read(bytes.NewReader(buf[nonceSize:nonceSize+4]), binary.LittleEndian, &clen)
 			ct := buf[nonceSize+4 : nonceSize+4+int(clen)]
-			
+
 			// Decrypt
 			plain, err := aead.Open(nil, nonce, ct, baseAAD)
 			if err != nil {
 				return fmt.Errorf("decryption failed during rotation: %w", err) // Generic error
 			}
-			
+
 			// Re-encrypt with updated AAD (includes new key version)
 			newAAD, err := buildEnhancedAAD(header, seq)
 			if err != nil {
 				return fmt.Errorf("AAD reconstruction failed: %w", err) // Generic error
 			}
-			
+
 			// Generate new nonce
 			newNonce := make([]byte, nonceSize)
 			if _, err := csprng.Read(newNonce); err != nil {
 				return fmt.Errorf("nonce generation failed: %w", err) // Generic error
 			}
-			
+
 			// Re-seal with new nonce and AAD
 			newCT := aead.Seal(nil, newNonce, plain, newAAD)
 			zeroBytes(plain)
-			
+
 			// Write new chunk
 			if err := writeChunk(outFile, newNonce, newCT); err != nil {
 				return fmt.Errorf("chunk write failed: %w", err) // Generic error
 			}
-			
+
 			seq++
 		}
 	}
-	
+
 	return nil
 }
 
@@ -897,14 +897,14 @@ func createHeader(cfg config) (FileHeader, error) {
 	header.NonceSize = uint32(cfg.NonceSize)
 	header.KeyVersion = cfg.KeyVersion
 	header.Timestamp = uint64(time.Now().Unix())
-	
+
 	// Validate padding bytes are zero (defensive programming)
 	for i := range header.Padding {
 		if header.Padding[i] != 0 {
 			return FileHeader{}, errors.New("non-zero padding detected")
 		}
 	}
-	
+
 	return header, nil
 }
 
@@ -930,12 +930,12 @@ func deriveKey(password []byte, salt []byte, header FileHeader) (*SecureBuffer, 
 	key := NewSecureBuffer(int(header.KeySize))
 	derived := argon2.IDKey(password, salt, header.ArgonTime, header.ArgonMem, header.ArgonUtil, header.KeySize)
 	copy(key.Bytes(), derived)
-	
+
 	// Constant-time zeroing of intermediate key
 	for i := range derived {
 		derived[i] = 0
 	}
-	
+
 	aead, err := chacha20poly1305.NewX(key.Bytes())
 	if err != nil {
 		key.Zero()
@@ -953,7 +953,7 @@ func processFile(ctx context.Context, inFile *os.File, outFile *os.File, key *Se
 
 	plainBuf := NewSecureBuffer(cfg.ChunkSize)
 	defer plainBuf.Close()
-	
+
 	baseAAD, err := buildEnhancedAAD(header, 0)
 	if err != nil {
 		return fmt.Errorf("AAD construction failed: %w", err) // Generic error
@@ -966,7 +966,7 @@ func processFile(ctx context.Context, inFile *os.File, outFile *os.File, key *Se
 			return ctx.Err()
 		default:
 		}
-		
+
 		n, readErr := inFile.Read(plainBuf.Bytes())
 		if n > 0 {
 			if err := encryptChunk(outFile, plainBuf.Bytes()[:n], aead, baseAAD, seq, header); err != nil {
@@ -1032,24 +1032,24 @@ func readHeader(inFile *os.File) (FileHeader, error) {
 	if err := binary.Read(inFile, binary.LittleEndian, &header); err != nil {
 		return FileHeader{}, fmt.Errorf("header read failed: %w", err) // Generic error
 	}
-	
+
 	// Enhanced validation
 	if string(header.Magic[:8]) != MagicNumber {
 		return FileHeader{}, errors.New("invalid file format") // Generic error
 	}
-	
+
 	// Version migration support
 	if header.Version > FileVersion {
 		return FileHeader{}, fmt.Errorf("unsupported file version: %d", header.Version) // Generic error
 	}
-	
+
 	// Validate padding bytes
 	for i, b := range header.Padding {
 		if b != 0 {
 			return FileHeader{}, fmt.Errorf("non-zero padding at byte %d", i) // Generic error
 		}
 	}
-	
+
 	return header, nil
 }
 
@@ -1088,7 +1088,7 @@ func decryptProcess(ctx context.Context, inFile *os.File, outFile *os.File, key 
 			return ctx.Err()
 		default:
 		}
-		
+
 		plain, err := decryptChunk(inFile, aead, baseAAD, nonceSize, seq, header)
 		if err == io.EOF {
 			break

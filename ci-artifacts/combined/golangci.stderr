@@ -1,0 +1,1 @@
+./.github/scripts/ai_refactor.sh: line 36: golangci-lint: command not found

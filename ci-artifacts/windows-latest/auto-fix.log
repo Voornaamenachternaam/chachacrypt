@@ -1,0 +1,2 @@
+level=error msg="[linters_context] typechecking error: : # chachacrypt\n.\\chachacrypt.go:988:77: undefined: chacha20poly1305.X\n.\\chachacrypt.go:999:44: aad.Bytes undefined (type []byte has no field or method Bytes)\n.\\chachacrypt.go:1111:59: undefined: chacha20poly1305.X\n.\\chachacrypt.go:1136:46: aad.Bytes undefined (type []byte has no field or method Bytes)"
+0 issues.

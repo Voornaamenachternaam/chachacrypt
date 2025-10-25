@@ -1,0 +1,16 @@
+=== go version ===
+go version go1.25.3 linux/amd64
+=== go build ===
+# chachacrypt
+./chachacrypt.go:988:77: undefined: chacha20poly1305.X
+./chachacrypt.go:999:44: aad.Bytes undefined (type []byte has no field or method Bytes)
+./chachacrypt.go:1111:59: undefined: chacha20poly1305.X
+./chachacrypt.go:1136:46: aad.Bytes undefined (type []byte has no field or method Bytes)
+=== go test ===
+# chachacrypt
+./chachacrypt.go:988:77: undefined: chacha20poly1305.X
+./chachacrypt.go:999:44: aad.Bytes undefined (type []byte has no field or method Bytes)
+./chachacrypt.go:1111:59: undefined: chacha20poly1305.X
+./chachacrypt.go:1136:46: aad.Bytes undefined (type []byte has no field or method Bytes)
+FAIL	chachacrypt [build failed]
+FAIL
