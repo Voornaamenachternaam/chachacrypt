@@ -45,18 +45,21 @@ jobs:
           key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
 
       - name: Install small tooling & run checks
-        # Use bash shell (GitHub Windows images include bash) to keep a single compact command
         shell: bash
         run: |
           set -eux
           mkdir -p "${{ env.ARTIFACT_DIR }}"
-          # golangci-lint v2.5.0 installer (cross-platform via curl)
+          # install golangci-lint v2.5.0
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "${GOBIN:-$HOME/go/bin}" v2.5.0 || true
-          # goimports
-          go install golang.org/x/tools/cmd/goimports@latest || true
+          # install goimports to GOBIN (or $HOME/go/bin if GOBIN not set)
+          go install golang.org/x/tools/cmd/goimports@latest
+          # ensure $GOBIN (or $HOME/go/bin) is on PATH for the rest of the job
+          echo "${GOBIN:-$HOME/go/bin}" >> $GITHUB_PATH
+          # sanity check
+          command -v goimports || true
+
+          # run checks and store outputs
           export PATH="${GOBIN:-$HOME/go/bin}:$PATH"
-          golangci-lint --version || true
-          # run lint/build/test and record outputs
           golangci-lint run --timeout=10m --out-format json ./... > "${{ env.ARTIFACT_DIR }}/golangci.json" 2> "${{ env.ARTIFACT_DIR }}/golangci.stderr" || true
           go build ./... > "${{ env.ARTIFACT_DIR }}/go-build-output.txt" 2>&1 || true
           go test ./... > "${{ env.ARTIFACT_DIR }}/go-test-output.txt" 2>&1 || true
