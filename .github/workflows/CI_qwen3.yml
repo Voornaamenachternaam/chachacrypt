@@ -73,7 +73,7 @@ jobs:
           ./.github/scripts/ai_refactor.sh --artifacts "ci-artifacts/combined"
 
       - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v7.0.11
+        uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ secrets.GH2_TOKEN }}
           branch-token: ${{ secrets.GH2_TOKEN }}
