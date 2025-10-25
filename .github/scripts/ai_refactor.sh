@@ -1,32 +1,53 @@
 #!/usr/bin/env bash
 # =====================================================================
 # AI Refactor Script for ChachaCrypt
-# Automatically fixes lint/build/test issues using golangci-lint, goimports,
-# and AI-based code improvements via OpenRouter.
+# Author: Automated CI Assistant
+# Purpose: Automatically detect, fix, and refactor Go code using:
+#  - goimports
+#  - golangci-lint
+#  - OpenRouter AI model (openai/gpt-4o-mini)
 # =====================================================================
 
 set -euo pipefail
 
 # ---------------------------------------------------------------------
-# Configuration
+# ARGUMENT PARSING
+# ---------------------------------------------------------------------
+ARTIFACT_DIR="ci-artifacts"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --artifacts|-a)
+      ARTIFACT_DIR="$2"
+      shift 2
+      ;;
+    *)
+      echo "[WARN] Unknown argument: $1 (ignored)"
+      shift
+      ;;
+  esac
+done
+
+# ---------------------------------------------------------------------
+# INITIAL SETUP
 # ---------------------------------------------------------------------
 REPO_DIR="${GITHUB_WORKSPACE:-$(pwd)}"
-ARTIFACT_DIR="${1:-ci-artifacts}"
 OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}"
 MODEL="openai/gpt-4o-mini"
-AI_PROMPT_FILE="$ARTIFACT_DIR/ai_prompt.txt"
-AI_RESPONSE_FILE="$ARTIFACT_DIR/ai_response.txt"
 LOG_FILE="$ARTIFACT_DIR/ai_refactor.log"
+PROMPT_FILE="$ARTIFACT_DIR/ai_prompt.txt"
+RESPONSE_FILE="$ARTIFACT_DIR/ai_response.txt"
 
 mkdir -p "$ARTIFACT_DIR"
+cd "$REPO_DIR"
 
-echo "[INFO] Starting AI refactor process in: $REPO_DIR" | tee "$LOG_FILE"
+echo "[INFO] Starting AI refactor in: $REPO_DIR" | tee "$LOG_FILE"
 
 # ---------------------------------------------------------------------
-# Ensure Go tools are available
+# TOOLCHAIN VALIDATION
 # ---------------------------------------------------------------------
+echo "[INFO] Checking Go toolchain..." | tee -a "$LOG_FILE"
 if ! command -v go >/dev/null 2>&1; then
-  echo "[ERROR] Go not found. Exiting." | tee -a "$LOG_FILE"
+  echo "[ERROR] Go not found. Ensure Go is installed." | tee -a "$LOG_FILE"
   exit 1
 fi
 
@@ -44,22 +65,22 @@ fi
 export PATH="$(go env GOPATH)/bin:$PATH"
 
 # ---------------------------------------------------------------------
-# Step 1. Run goimports and golangci-lint
+# STEP 1: LINT + IMPORT FIXES
 # ---------------------------------------------------------------------
-echo "[INFO] Running goimports formatting..." | tee -a "$LOG_FILE"
+echo "[INFO] Running goimports..." | tee -a "$LOG_FILE"
 goimports -w .
 
-echo "[INFO] Running golangci-lint..." | tee -a "$LOG_FILE"
-if ! golangci-lint run --fix --timeout=5m; then
-  echo "[WARN] golangci-lint found issues; attempting fixes..." | tee -a "$LOG_FILE"
-fi
+echo "[INFO] Running golangci-lint (auto-fix mode)..." | tee -a "$LOG_FILE"
+golangci-lint run --fix --timeout=5m || true
 
 # ---------------------------------------------------------------------
-# Step 2. Run go build and go test, capturing any errors
+# STEP 2: BUILD & TEST CAPTURE
 # ---------------------------------------------------------------------
-BUILD_LOG="$ARTIFACT_DIR/go_build.log"
-TEST_LOG="$ARTIFACT_DIR/go_test.log"
-LINT_LOG="$ARTIFACT_DIR/golangci-lint.log"
+BUILD_LOG="$ARTIFACT_DIR/build.log"
+TEST_LOG="$ARTIFACT_DIR/test.log"
+LINT_LOG="$ARTIFACT_DIR/lint.log"
+
+echo "[INFO] Capturing build/test/lint outputs..." | tee -a "$LOG_FILE"
 
 {
   go build ./... 2>&1 || true
@@ -67,92 +88,83 @@ LINT_LOG="$ARTIFACT_DIR/golangci-lint.log"
 } | tee "$BUILD_LOG"
 
 golangci-lint run 2>&1 | tee "$LINT_LOG" || true
-go test ./... 2>&1 | tee "$TEST_LOG" || true
+go test ./... -v 2>&1 | tee "$TEST_LOG" || true
 
-# Collect all errors
 ERRORS="$(grep -E 'error|FAIL' "$BUILD_LOG" "$TEST_LOG" "$LINT_LOG" || true)"
 
 if [[ -z "$ERRORS" ]]; then
-  echo "[INFO] No build/test/lint errors detected. AI step skipped." | tee -a "$LOG_FILE"
+  echo "[INFO] ✅ No errors found — skipping AI refactor." | tee -a "$LOG_FILE"
   exit 0
 fi
 
 # ---------------------------------------------------------------------
-# Step 3. Prepare AI prompt
+# STEP 3: GENERATE AI PROMPT
 # ---------------------------------------------------------------------
-echo "[INFO] Preparing AI prompt..." | tee -a "$LOG_FILE"
+echo "[INFO] Preparing AI refactor prompt..." | tee -a "$LOG_FILE"
 
-cat >"$AI_PROMPT_FILE" <<EOF
-You are an expert Go engineer. Analyze and fix all build, lint, and test issues in the following project.
-Apply idiomatic and modern Go best practices.
-Preserve functionality, improve readability, and ensure full test passing.
-Provide corrected Go source code only — no commentary or markdown formatting.
+cat >"$PROMPT_FILE" <<EOF
+You are an expert Go engineer.
+Fix the following lint, build, and test errors using idiomatic Go.
+Preserve functionality and improve clarity.
+Ensure all tests pass after your modifications.
+Return only pure Go source code with no commentary or markdown.
 
 Errors to fix:
 $ERRORS
-
-Affected files: chachacrypt.go, go.mod, go.sum (and related files if needed)
 EOF
 
 # ---------------------------------------------------------------------
-# Step 4. Send prompt to OpenRouter
+# STEP 4: AI REQUEST VIA OPENROUTER
 # ---------------------------------------------------------------------
 if [[ -z "$OPENROUTER_API_KEY" ]]; then
-  echo "[ERROR] Missing OPENROUTER_API_KEY" | tee -a "$LOG_FILE"
+  echo "[ERROR] Missing OPENROUTER_API_KEY environment variable." | tee -a "$LOG_FILE"
   exit 1
 fi
 
 echo "[INFO] Sending request to OpenRouter ($MODEL)..." | tee -a "$LOG_FILE"
 
-AI_CONTENT=""
-AI_CONTENT=$(curl -sS -X POST "https://openrouter.ai/api/v1/chat/completions" \
+AI_CONTENT="$(curl -sS -X POST "https://openrouter.ai/api/v1/chat/completions" \
   -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
   -H "Content-Type: application/json" \
   -d "{
     \"model\": \"${MODEL}\",
     \"messages\": [
       {\"role\": \"system\", \"content\": \"You are a senior Go refactoring assistant.\"},
-      {\"role\": \"user\", \"content\": $(jq -Rs . < \"$AI_PROMPT_FILE\")}
+      {\"role\": \"user\", \"content\": $(jq -Rs . < \"$PROMPT_FILE\")}
     ],
-    \"temperature\": 0.4
-  }" \
-  | jq -r '.choices[0].message.content // empty' || true)
+    \"temperature\": 0.3
+  }" | jq -r '.choices[0].message.content // empty')"
 
 if [[ -z "$AI_CONTENT" ]]; then
-  echo "[ERROR] AI did not return content." | tee -a "$LOG_FILE"
+  echo "[ERROR] AI returned empty response." | tee -a "$LOG_FILE"
   exit 1
 fi
 
-echo "$AI_CONTENT" > "$AI_RESPONSE_FILE"
-echo "[INFO] AI response saved to $AI_RESPONSE_FILE" | tee -a "$LOG_FILE"
+echo "$AI_CONTENT" > "$RESPONSE_FILE"
+echo "[INFO] AI response saved to: $RESPONSE_FILE" | tee -a "$LOG_FILE"
 
 # ---------------------------------------------------------------------
-# Step 5. Apply AI modifications
+# STEP 5: APPLY AI CHANGES SAFELY
 # ---------------------------------------------------------------------
-echo "[INFO] Applying AI-generated code changes..." | tee -a "$LOG_FILE"
-
-# Backup before applying
-cp chachacrypt.go "$ARTIFACT_DIR/chachacrypt.go.bak" || true
-
-# Write the AI's refactored code (if clearly Go code)
-if grep -q "package " "$AI_RESPONSE_FILE"; then
+if grep -q "package " "$RESPONSE_FILE"; then
+  echo "[INFO] Applying AI-generated code..." | tee -a "$LOG_FILE"
+  cp chachacrypt.go "$ARTIFACT_DIR/chachacrypt.go.bak" || true
   echo "$AI_CONTENT" > chachacrypt.go
-  echo "[INFO] AI modifications written to chachacrypt.go" | tee -a "$LOG_FILE"
 else
-  echo "[WARN] AI output not detected as Go code. Skipping overwrite." | tee -a "$LOG_FILE"
+  echo "[WARN] AI output not recognized as Go code. Skipping overwrite." | tee -a "$LOG_FILE"
 fi
 
 # ---------------------------------------------------------------------
-# Step 6. Verify and finalize
+# STEP 6: VALIDATE POST-AI CHANGES
 # ---------------------------------------------------------------------
-echo "[INFO] Rebuilding and testing after AI refactor..." | tee -a "$LOG_FILE"
-if ! go build ./...; then
-  echo "[WARN] Build still failing post-AI. Keeping logs." | tee -a "$LOG_FILE"
+echo "[INFO] Validating AI-applied changes..." | tee -a "$LOG_FILE"
+if go build ./...; then
+  echo "[INFO] ✅ Build successful after AI refactor." | tee -a "$LOG_FILE"
 else
-  echo "[SUCCESS] Build passed after AI refactor." | tee -a "$LOG_FILE"
+  echo "[WARN] ⚠ Build failed after AI refactor. Check logs." | tee -a "$LOG_FILE"
 fi
 
 go test ./... -v | tee -a "$LOG_FILE" || true
 
-echo "[INFO] AI refactor completed successfully." | tee -a "$LOG_FILE"
+echo "[INFO] ✅ AI refactor completed." | tee -a "$LOG_FILE"
 exit 0
