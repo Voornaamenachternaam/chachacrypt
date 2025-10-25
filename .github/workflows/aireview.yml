@@ -24,6 +24,6 @@ jobs:
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AI_PROVIDER: openrouter
-          AI_MODEL: qwen/qwen3-235b-a22b:free
+          AI_MODEL: minimax/minimax-m2:free
           AI_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           INCLUDE_PATTERNS: "*.go,**/*.go,go.*"
