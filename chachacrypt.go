@@ -272,10 +272,10 @@ func generatePassword(n int) (string, error) {
 
 func encryptFile(inputFile, outputFile string, password []byte, cfg config) error {
 	if err := validateFilePath(inputFile); err != nil {
-		return fmt.Errorf("invalid input path")
+		return errors.New("invalid input path")
 	}
 	if err := validateFilePath(outputFile); err != nil {
-		return fmt.Errorf("invalid output path")
+		return errors.New("invalid output path")
 	}
 
 	// Use os.Create so default OS behavior is applied (cross-platform)
@@ -374,7 +374,7 @@ func encryptFile(inputFile, outputFile string, password []byte, cfg config) erro
 			if _, err := outFile.Write(nonce); err != nil {
 				return fmt.Errorf("error writing nonce: %w", err)
 			}
-			var clen uint32 = uint32(len(ct))
+			var clen = uint32(len(ct))
 			if err := binary.Write(outFile, binary.LittleEndian, clen); err != nil {
 				return fmt.Errorf("error writing ciphertext length: %w", err)
 			}
@@ -400,10 +400,10 @@ func encryptFile(inputFile, outputFile string, password []byte, cfg config) erro
 
 func decryptFile(inputFile, outputFile string, password []byte, cfg config) error {
 	if err := validateFilePath(inputFile); err != nil {
-		return fmt.Errorf("invalid input path")
+		return errors.New("invalid input path")
 	}
 	if err := validateFilePath(outputFile); err != nil {
-		return fmt.Errorf("invalid output path")
+		return errors.New("invalid output path")
 	}
 
 	inFile, err := os.Open(inputFile)
@@ -417,12 +417,12 @@ func decryptFile(inputFile, outputFile string, password []byte, cfg config) erro
 		return fmt.Errorf("failed to read header: %w", err)
 	}
 	if string(header.Magic[:8]) != MagicNumber || header.Magic[8] != FileVersion {
-		return fmt.Errorf("invalid file format or unsupported version")
+		return errors.New("invalid file format or unsupported version")
 	}
 
 	saltSize := int(header.SaltSize)
 	if saltSize <= 0 || saltSize > 1024 {
-		return fmt.Errorf("invalid salt size")
+		return errors.New("invalid salt size")
 	}
 	salt := make([]byte, saltSize)
 	if _, err := io.ReadFull(inFile, salt); err != nil {
@@ -447,12 +447,12 @@ func decryptFile(inputFile, outputFile string, password []byte, cfg config) erro
 
 	nonceSize := int(header.NonceSize)
 	if nonceSize != aead.NonceSize() {
-		return fmt.Errorf("invalid file format or unsupported version")
+		return errors.New("invalid file format or unsupported version")
 	}
 
 	baseHeaderBuf := new(bytes.Buffer)
 	if err := binary.Write(baseHeaderBuf, binary.LittleEndian, header); err != nil {
-		return fmt.Errorf("internal error")
+		return errors.New("internal error")
 	}
 	baseAAD := baseHeaderBuf.Bytes()
 
@@ -462,19 +462,19 @@ func decryptFile(inputFile, outputFile string, password []byte, cfg config) erro
 		if _, err := io.ReadFull(inFile, nonce); err == io.EOF {
 			break
 		} else if err != nil {
-			return fmt.Errorf("error reading nonce or reached unexpected EOF")
+			return errors.New("error reading nonce or reached unexpected EOF")
 		}
 
 		var clen uint32
 		if err := binary.Read(inFile, binary.LittleEndian, &clen); err != nil {
-			return fmt.Errorf("error reading ciphertext length")
+			return errors.New("error reading ciphertext length")
 		}
 		if clen > (1 << 30) {
-			return fmt.Errorf("invalid ciphertext length")
+			return errors.New("invalid ciphertext length")
 		}
 		ct := make([]byte, clen)
 		if _, err := io.ReadFull(inFile, ct); err != nil {
-			return fmt.Errorf("error reading ciphertext")
+			return errors.New("error reading ciphertext")
 		}
 
 		var aad bytes.Buffer
@@ -486,12 +486,12 @@ func decryptFile(inputFile, outputFile string, password []byte, cfg config) erro
 		plain, err := aead.Open(nil, nonce, ct, aad.Bytes())
 		zeroBytes(ct)
 		if err != nil {
-			return fmt.Errorf("decryption failed or file is corrupted")
+			return errors.New("decryption failed or file is corrupted")
 		}
 
 		if _, err := outFile.Write(plain); err != nil {
 			zeroBytes(plain)
-			return fmt.Errorf("failed to write plaintext")
+			return errors.New("failed to write plaintext")
 		}
 		zeroBytes(plain)
 
