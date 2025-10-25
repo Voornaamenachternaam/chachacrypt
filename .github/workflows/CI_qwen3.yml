@@ -64,7 +64,7 @@ jobs:
           only-new-issues: false
           problem-matchers: false
           cache-invalidation-interval: 7
-          args: --timeout=10m --fast-only
+          args: --timeout=20m --fix
         env:
           GOFLAGS: -mod=mod
           GOTOOLCHAIN: local
@@ -120,8 +120,8 @@ jobs:
           OUTDIR="ci-artifacts/${{ matrix.os }}"
           mkdir -p "$OUTDIR"
           if command -v golangci-lint >/dev/null 2>&1; then
-            golangci-lint run --timeout=10m --fast-only --out-format json ./... > "$OUTDIR/golangci.json" 2> "$OUTDIR/golangci.stderr" || true
-            golangci-lint run --timeout=10m --fast-only ./... > "$OUTDIR/golangci.stdout" 2>> "$OUTDIR/golangci.stderr" || true
+            golangci-lint run --timeout=20m --fix --out-format json ./... > "$OUTDIR/golangci.json" 2> "$OUTDIR/golangci.stderr" || true
+            golangci-lint run --timeout=20m --fix ./... > "$OUTDIR/golangci.stdout" 2>> "$OUTDIR/golangci.stderr" || true
             golangci-lint --version > "$OUTDIR/golangci.version" 2>&1 || true
           else
             echo "golangci-lint missing" > "$OUTDIR/golangci.stderr"
@@ -137,8 +137,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path $outDir | Out-Null
           $exe = Get-Command golangci-lint -ErrorAction SilentlyContinue
           if ($null -ne $exe) {
-            & golangci-lint run --timeout=10m --fast-only --out-format json ./... > "$outDir/golangci.json" 2> "$outDir/golangci.stderr"  || Write-Output "lint returned non-zero"
-            & golangci-lint run --timeout=10m --fast-only ./... > "$outDir/golangci.stdout" 2>> "$outDir/golangci.stderr"  || Write-Output "lint returned non-zero"
+            & golangci-lint run --timeout=20m --fix --out-format json ./... > "$outDir/golangci.json" 2> "$outDir/golangci.stderr"  || Write-Output "lint returned non-zero"
+            & golangci-lint run --timeout=20m --fix ./... > "$outDir/golangci.stdout" 2>> "$outDir/golangci.stderr"  || Write-Output "lint returned non-zero"
             & golangci-lint --version > "$outDir/golangci.version" 2>&1 || Write-Output "version check failed"
           } else {
             "golangci-lint missing" | Out-File "$outDir/golangci.stderr" -Encoding utf8
