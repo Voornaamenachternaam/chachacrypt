@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"golang.org/x/crypto/argon2"         //nolint:depguard // Required for Argon2id KDF
 	"golang.org/x/crypto/chacha20poly1305" //nolint:depguard // Required for XChaCha20-Poly1305 AEAD
@@ -1060,7 +1062,7 @@ func readSalt(inFile *os.File, saltSize uint32) (*SecureBuffer, error) {
 	salt := NewSecureBuffer(int(saltSize))
 	if _, err := io.ReadFull(inFile, salt.Bytes()); err != nil {
 		salt.Zero()
-		return nil fmt.Errorf("salt read failed: %w", err) // Generic error
+		return nil, fmt.Errorf("salt read failed: %w", err) // Generic error
 	}
 	return salt, nil
 }
@@ -1113,24 +1115,24 @@ func decryptChunk(inFile *os.File, aead *chacha20poly1305.X, baseAAD []byte, non
 	if _, err := io.ReadFull(inFile, nonce); err == io.EOF {
 		return nil, io.EOF
 	} else if err != nil {
-		return nil fmt.Errorf("nonce read failed: %w", err) // Generic error
+		return nil, fmt.Errorf("nonce read failed: %w", err) // Generic error
 	}
 
 	var clen uint32
 	if err := binary.Read(inFile, binary.LittleEndian, &clen); err != nil {
-		return nil fmt.Errorf("length read failed: %w", err) // Generic error
+		return nil, fmt.Errorf("length read failed: %w", err) // Generic error
 	}
 	if clen > uint32(maxChunkSize) {
 		return nil, errors.New("chunk size exceeds limit") // Generic error
 	}
 	ct := make([]byte, clen)
 	if _, err := io.ReadFull(inFile, ct); err != nil {
-		return nil fmt.Errorf("ciphertext read failed: %w", err) // Generic error
+		return nil, fmt.Errorf("ciphertext read failed: %w", err) // Generic error
 	}
 
 	aad, err := buildEnhancedAAD(header, seq)
 	if err != nil {
-		return nil fmt.Errorf("AAD construction failed: %w", err) // Generic error
+		return nil, fmt.Errorf("AAD construction failed: %w", err) // Generic error
 	}
 
 	plain, err := aead.Open(nil, nonce, ct, aad.Bytes())
