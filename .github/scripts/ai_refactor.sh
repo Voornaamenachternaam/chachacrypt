@@ -1,21 +1,15 @@
 #!/usr/bin/env bash
-# =====================================================================
-# ai_refactor.sh — Automatic AI-driven Go refactor script
-# Integrates golangci-lint, goimports, and OpenRouter AI model
-# =====================================================================
-
+# .github/scripts/ai_refactor.sh
+# Robust AI refactor script — safe JSON, explicit model selection, artifact handling, validation.
 set -euo pipefail
 
-# ---------------------------------------------------------------------
-# CONFIGURATION
-# ---------------------------------------------------------------------
-MODEL="minimax/minimax-m2:free"           # ✅ Your required AI model
-GOLANGCI_LINT_VERSION="v2.5.0"
+# Re-exec under bash if necessary
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
 
-REPO_DIR="${GITHUB_WORKSPACE:-$(pwd)}"
-ARTIFACT_DIR="ci-artifacts"
-
-# Argument parsing
+# ---------- Arguments ----------
+ARTIFACT_DIR="ci-artifacts/combined"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --artifacts|-a)
@@ -23,141 +17,339 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     *)
-      echo "[WARN] Unknown argument: $1 (ignored)"
+      echo "Unknown argument: $1" >&2
       shift
       ;;
   esac
 done
 
+# ---------- Environment checks ----------
+WORKDIR="${GITHUB_WORKSPACE:-$(pwd)}"
+cd "$WORKDIR"
+
+# Ensure artifact dir exists before anything else (fixes missing-file errors)
 mkdir -p "$ARTIFACT_DIR"
-LOG_FILE="$ARTIFACT_DIR/ai_refactor.log"
-PROMPT_FILE="$ARTIFACT_DIR/ai_prompt.txt"
-RESPONSE_FILE="$ARTIFACT_DIR/ai_response.txt"
 
-echo "[INFO] Starting AI refactor in: $REPO_DIR" | tee "$LOG_FILE"
-cd "$REPO_DIR"
+# Files & logs
+DIAG="${ARTIFACT_DIR}/ai-diagnostics.txt"
+AI_RAW="${ARTIFACT_DIR}/ai-raw-response.json"
+AI_RESP="${ARTIFACT_DIR}/ai-response.txt"
+PATCH_BEFORE="${ARTIFACT_DIR}/ai-diff-before.patch"
+PATCH_AFTER="${ARTIFACT_DIR}/ai-diff-after.patch"
+VALIDATE_LOG="${ARTIFACT_DIR}/ai-validate.log"
 
-# ---------------------------------------------------------------------
-# TOOLCHAIN CHECKS
-# ---------------------------------------------------------------------
-echo "[INFO] Checking Go toolchain..." | tee -a "$LOG_FILE"
+# Required secrets
+: "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set as a repo secret}"
+: "${GH2_TOKEN:?GH2_TOKEN must be set as a repo secret}"
 
-if ! command -v go >/dev/null 2>&1; then
-  echo "[ERROR] Go not found in PATH." | tee -a "$LOG_FILE"
+# Model selection precedence:
+# 1) OPENROUTER_MODEL env (recommended)
+# 2) .github/ai_model.txt file in repo (if present)
+# If neither present, exit with error (so you don't accidentally use a fallback)
+OPENROUTER_MODEL="${OPENROUTER_MODEL:-}"
+if [ -z "$OPENROUTER_MODEL" ] && [ -f ".github/ai_model.txt" ]; then
+  # read single-line model name from file
+  OPENROUTER_MODEL="$(sed -n '1p' .github/ai_model.txt | tr -d '[:space:]' || true)"
+fi
+if [ -z "$OPENROUTER_MODEL" ]; then
+  echo "ERROR: OPENROUTER_MODEL not set as env and .github/ai_model.txt not present. Set the exact model you want." | tee "$DIAG"
+  echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
   exit 1
 fi
 
-if ! command -v goimports >/dev/null 2>&1; then
-  echo "[INFO] Installing goimports..." | tee -a "$LOG_FILE"
-  go install golang.org/x/tools/cmd/goimports@latest
+# Mark repo safe directory for git in runner environments
+git config --global --add safe.directory "$WORKDIR" >/dev/null 2>&1 || true
+
+# Ensure origin uses GH2_TOKEN to push branches (safe fallback)
+if git remote get-url origin >/dev/null 2>&1; then
+  git remote set-url origin "https://x-access-token:${GH2_TOKEN}@github.com/${GITHUB_REPOSITORY:-$(git rev-parse --show-toplevel | xargs basename)}.git" >/dev/null 2>&1 || true
 fi
 
-if ! command -v golangci-lint >/dev/null 2>&1; then
-  echo "[INFO] Installing golangci-lint $GOLANGCI_LINT_VERSION..." | tee -a "$LOG_FILE"
-  curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
-    | sh -s -- -b "$(go env GOPATH)/bin" "$GOLANGCI_LINT_VERSION"
-fi
+# ---------- Helper detection ----------
+HAS_JQ=false
+HAS_PY=false
+if command -v jq >/dev/null 2>&1; then HAS_JQ=true; fi
+if command -v python3 >/dev/null 2>&1; then HAS_PY=true; elif command -v python >/dev/null 2>&1; then HAS_PY=true; fi
 
-export PATH="$(go env GOPATH)/bin:$PATH"
+# ---------- Save before-diff ----------
+TARGET_FILES=( "chachacrypt.go" "go.mod" "go.sum" )
+git diff -- "${TARGET_FILES[@]}" > "$PATCH_BEFORE" 2>/dev/null || true
 
-# ---------------------------------------------------------------------
-# STEP 1: LINT + IMPORTS
-# ---------------------------------------------------------------------
-echo "[INFO] Running goimports..." | tee -a "$LOG_FILE"
-goimports -w .
-
-echo "[INFO] Running golangci-lint auto-fix..." | tee -a "$LOG_FILE"
-golangci-lint run --fix --timeout=5m || true
-
-# ---------------------------------------------------------------------
-# STEP 2: BUILD/TEST CAPTURE
-# ---------------------------------------------------------------------
-BUILD_LOG="$ARTIFACT_DIR/build.log"
-TEST_LOG="$ARTIFACT_DIR/test.log"
-LINT_LOG="$ARTIFACT_DIR/lint.log"
-
+# Diagnosis header
 {
-  go build ./... 2>&1 || true
-  go test ./... 2>&1 || true
-} | tee "$BUILD_LOG"
+  echo "ai_refactor diagnostics: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  echo "repo: ${GITHUB_REPOSITORY:-unknown}"
+  echo "workspace: $WORKDIR"
+  echo "openrouter_model: $OPENROUTER_MODEL"
+} > "$DIAG"
 
-golangci-lint run 2>&1 | tee "$LINT_LOG" || true
-go test ./... -v 2>&1 | tee "$TEST_LOG" || true
-
-ERRORS="$(grep -E 'error|FAIL|undefined' "$BUILD_LOG" "$TEST_LOG" "$LINT_LOG" || true)"
-
-if [[ -z "$ERRORS" ]]; then
-  echo "[INFO] ✅ No errors found — skipping AI refactor." | tee -a "$LOG_FILE"
+# ---------- Ensure Go tools available ----------
+if ! command -v go >/dev/null 2>&1; then
+  echo "go not found in PATH; aborting" >> "$DIAG"
+  echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
   exit 0
 fi
 
-# ---------------------------------------------------------------------
-# STEP 3: PREPARE PROMPT
-# ---------------------------------------------------------------------
-echo "[INFO] Preparing AI refactor prompt..." | tee -a "$LOG_FILE"
+# Ensure GOBIN / PATH updated for go install
+GOBIN="${GOBIN:-$(go env GOPATH 2>/dev/null || echo "$HOME/go")/bin}"
+mkdir -p "$GOBIN"
+export PATH="$GOBIN:$PATH"
 
-cat >"$PROMPT_FILE" <<EOF
-You are an expert Go engineer.
-Fix the following Go source errors automatically:
-- Ensure code compiles and passes all tests.
-- Correct all golangci-lint issues.
-- Do not alter core logic unnecessarily.
-- Return only valid Go code with no markdown.
-
-Detected issues:
-$ERRORS
-EOF
-
-# ---------------------------------------------------------------------
-# STEP 4: CALL OPENROUTER AI
-# ---------------------------------------------------------------------
-if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
-  echo "[ERROR] OPENROUTER_API_KEY not set." | tee -a "$LOG_FILE"
-  exit 1
+# Install goimports if missing
+if ! command -v goimports >/dev/null 2>&1; then
+  echo "Installing goimports to $GOBIN" >> "$DIAG"
+  if go install golang.org/x/tools/cmd/goimports@latest >/dev/null 2>&1; then
+    echo "goimports installed" >> "$DIAG"
+  else
+    echo "goimports install failed (non-fatal)" >> "$DIAG"
+  fi
 fi
 
-echo "[INFO] Sending request to OpenRouter ($MODEL)..." | tee -a "$LOG_FILE"
+# Install golangci-lint if missing (best-effort; version pinned to v2.5.0)
+if ! command -v golangci-lint >/dev/null 2>&1; then
+  echo "Installing golangci-lint v2.5.0" >> "$DIAG"
+  curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$GOBIN" v2.5.0 >/dev/null 2>&1 || true
+fi
 
-AI_CONTENT="$(curl -sS -X POST "https://openrouter.ai/api/v1/chat/completions" \
+# ---------- Safe automatic fixes ----------
+{
+  echo "Running safe auto-fixes..." >> "$DIAG"
+  gofmt -s -w . || true
+  if command -v goimports >/dev/null 2>&1; then
+    goimports -w . || true
+  fi
+  if command -v golangci-lint >/dev/null 2>&1; then
+    golangci-lint run --fix --timeout=10m ./... >> "${ARTIFACT_DIR}/golangci-fix.log" 2>&1 || true
+  fi
+  go mod tidy >> "${ARTIFACT_DIR}/go-mod-tidy.log" 2>&1 || true
+} || true
+
+# If safe fixes changed allowed files, commit/push and exit
+CHANGED_NOW=$(git status --porcelain | awk '{print $2}' || true)
+for tf in "${TARGET_FILES[@]}"; do
+  if echo "$CHANGED_NOW" | grep -Fqx "$tf"; then
+    TIMESTAMP=$(date -u +"%Y%m%d%H%M%S")
+    BRANCH="ai/auto-fix-${TIMESTAMP}"
+    git checkout -b "$BRANCH"
+    git config user.email "41898282+github-actions[bot]@users.noreply.github.com" || true
+    git config user.name "github-actions[bot]" || true
+    for f in "${TARGET_FILES[@]}"; do [ -f "$f" ] && git add -- "$f" || true; done
+    git commit -m "[create-pull-request] automated safe fixes (gofmt/golangci-lint --fix)" || true
+    git push --set-upstream origin "$BRANCH" || true
+    git diff origin/main.."${BRANCH}" > "$PATCH_AFTER" 2>/dev/null || true
+    echo "pr_branch=${BRANCH}" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch=${BRANCH}"
+    exit 0
+  fi
+done
+
+# ---------- Collect diagnostics ----------
+if command -v golangci-lint >/dev/null 2>&1; then
+  golangci-lint run --timeout=10m --out-format json ./... > "${ARTIFACT_DIR}/golangci.runtime.json" 2> "${ARTIFACT_DIR}/golangci.runtime.stderr" || true
+fi
+
+go build ./... > "${ARTIFACT_DIR}/go-build-output.txt" 2>&1 || true
+go test ./... > "${ARTIFACT_DIR}/go-test-output.txt" 2>&1 || true
+
+NEED_AI=false
+if [ -s "${ARTIFACT_DIR}/go-build-output.txt" ] || [ -s "${ARTIFACT_DIR}/go-test-output.txt" ]; then
+  NEED_AI=true
+fi
+if [ -f "${ARTIFACT_DIR}/golangci.runtime.json" ] && command -v jq >/dev/null 2>&1; then
+  if jq -r '.Issues[]?.Pos?.Filename // empty' "${ARTIFACT_DIR}/golangci.runtime.json" | grep -E "$(printf '%s|%s|%s' "${TARGET_FILES[0]}" "${TARGET_FILES[1]}" "${TARGET_FILES[2]}")" >/dev/null 2>&1; then
+    NEED_AI=true
+  fi
+fi
+
+if [ "$NEED_AI" = false ]; then
+  echo "No relevant issues; nothing for AI." >> "$DIAG"
+  echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
+  exit 0
+fi
+
+# Build prompt file safely
+PROMPT_FILE="$(mktemp)"
+cat > "$PROMPT_FILE" <<'PROMPT_EOF'
+You are an expert Go maintainer. Produce a single unified git patch (diff) enclosed in triple backticks that fixes the build / test / lint issues below.
+Only change files if necessary: chachacrypt.go, go.mod, go.sum. Prefer minimal, safe changes. If modifying go.mod, keep version bumps minimal and run 'go mod tidy'.
+PROMPT_EOF
+
+{
+  echo ""; echo "=== LINT OUTPUT ==="; sed -n '1,200p' "${ARTIFACT_DIR}/golangci.runtime.stderr" 2>/dev/null || true
+  echo ""; echo "=== BUILD OUTPUT ==="; sed -n '1,200p' "${ARTIFACT_DIR}/go-build-output.txt" 2>/dev/null || true
+  echo ""; echo "=== TEST OUTPUT ==="; sed -n '1,200p' "${ARTIFACT_DIR}/go-test-output.txt" 2>/dev/null || true
+  echo ""; echo "=== FILE CONTEXT (first 200 lines each) ==="
+  for f in "${TARGET_FILES[@]}"; do if [ -f "$f" ]; then echo "----- FILE: $f -----"; sed -n '1,200p' "$f"; fi; done
+} >> "$PROMPT_FILE"
+
+# ---------- Build payload safely ----------
+PAYLOAD_FILE="$(mktemp)"
+if command -v jq >/dev/null 2>&1; then
+  jq -n --arg model "$OPENROUTER_MODEL" \
+        --arg sys "You are a precise Go patch generator. Provide a single fenced patch." \
+        --arg usr "$(sed -n '1,20000p' "$PROMPT_FILE")" \
+        '{model:$model, messages:[{role:"system",content:$sys},{role:"user",content:$usr}], temperature:0.0, max_tokens:32768}' > "$PAYLOAD_FILE"
+elif command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
+  # python fallback
+  (python3 - <<PY 2>/dev/null || python - <<PY
+import json,sys
+model = "$OPENROUTER_MODEL"
+sys_msg = "You are a precise Go patch generator. Provide a single fenced patch."
+user_msg = open("$PROMPT_FILE","r",encoding="utf-8").read()
+payload = {"model": model, "messages":[{"role":"system","content":sys_msg},{"role":"user","content":user_msg}], "temperature":0.0, "max_tokens":32768}
+json.dump(payload, sys.stdout, ensure_ascii=False)
+PY
+  ) > "$PAYLOAD_FILE"
+else
+  echo "jq or python is required to safely build the payload. Aborting." >> "$DIAG"
+  echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
+  exit 0
+fi
+
+# ---------- Call OpenRouter ----------
+RESPONSE_TMP="$(mktemp)"
+HTTP_CODE=$(curl -sS -X POST "https://api.openrouter.ai/v1/chat/completions" \
   -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d "{
-    \"model\": \"${MODEL}\",
-    \"messages\": [
-      {\"role\": \"system\", \"content\": \"You are a senior Go code refactoring assistant.\"},
-      {\"role\": \"user\", \"content\": $(jq -Rs . < \"$PROMPT_FILE\")}
-    ],
-    \"temperature\": 0.2
-  }" | jq -r '.choices[0].message.content // empty')"
+  -d @"$PAYLOAD_FILE" -w "%{http_code}" -o "$RESPONSE_TMP" ) || true
 
-if [[ -z "$AI_CONTENT" ]]; then
-  echo "[ERROR] AI returned empty response." | tee -a "$LOG_FILE"
-  exit 1
+cp "$RESPONSE_TMP" "$AI_RAW" || true
+
+if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+  echo "OpenRouter API returned HTTP $HTTP_CODE" >> "$DIAG"
+  cat "$RESPONSE_TMP" >> "$DIAG" || true
+  cp "$DIAG" "${ARTIFACT_DIR}/ai-diagnostics.txt" || true
+  echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
+  exit 0
 fi
 
-echo "$AI_CONTENT" > "$RESPONSE_FILE"
-echo "[INFO] AI response saved: $RESPONSE_FILE" | tee -a "$LOG_FILE"
-
-# ---------------------------------------------------------------------
-# STEP 5: APPLY AI OUTPUT
-# ---------------------------------------------------------------------
-if grep -q "package " "$RESPONSE_FILE"; then
-  echo "[INFO] Applying AI-generated code..." | tee -a "$LOG_FILE"
-  cp chachacrypt.go "$ARTIFACT_DIR/chachacrypt.go.bak" || true
-  echo "$AI_CONTENT" > chachacrypt.go
+# Extract AI content
+AI_CONTENT=""
+if command -v jq >/dev/null 2>&1; then
+  AI_CONTENT=$(jq -r '.choices[0].message.content // .choices[0].text // ""' "$RESPONSE_TMP" 2>/dev/null || true)
+elif command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
+  AI_CONTENT=$(python3 - <<PY 2>/dev/null || python - <<PY 2>/dev/null
+import json,sys
+try:
+    obj=json.load(open("$RESPONSE_TMP","r",encoding="utf-8"))
+    chs = obj.get("choices") or []
+    if chs:
+        c=chs[0]
+        out = c.get("message",{}).get("content") or c.get("text") or ""
+    else:
+        out = ""
+    sys.stdout.write(out or "")
+except Exception:
+    sys.stdout.write("")
+PY
+)
 else
-  echo "[WARN] AI output not recognized as Go source. Skipping overwrite." | tee -a "$LOG_FILE"
+  AI_CONTENT=$(sed -n '1,20000p' "$RESPONSE_TMP" 2>/dev/null || true)
 fi
 
-# ---------------------------------------------------------------------
-# STEP 6: REVALIDATE BUILD
-# ---------------------------------------------------------------------
-if go build ./...; then
-  echo "[INFO] ✅ Build successful after AI refactor." | tee -a "$LOG_FILE"
+echo "$AI_CONTENT" > "$AI_RESP"
+
+if [ -z "${AI_CONTENT:-}" ]; then
+  echo "AI returned empty content; see $AI_RAW and $DIAG" >> "$DIAG"
+  cp "$DIAG" "${ARTIFACT_DIR}/ai-diagnostics.txt" || true
+  echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
+  exit 0
+fi
+
+# ---------- Extract fenced patch robustly ----------
+PATCH_TMP="$(mktemp)"
+PATCH_EXTRACTED=""
+if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
+  PATCH_EXTRACTED=$(python3 - <<PY 2>/dev/null || python - <<PY 2>/dev/null
+import re,sys
+s = open("$AI_RESP","r",encoding="utf-8").read()
+m = re.search(r'```(?:diff[^\n]*\n)?(.*?)\n```', s, re.S)
+if not m:
+    m = re.search(r'```\\s*\\n(.*?)\\n```', s, re.S)
+if m:
+    print(m.group(1))
+else:
+    print("", end="")
+PY
+)
+  printf "%s\n" "$PATCH_EXTRACTED" > "$PATCH_TMP" || true
 else
-  echo "[WARN] Build failed after AI refactor. Review logs." | tee -a "$LOG_FILE"
+  awk 'BEGIN{found=0} /```/{if(found==0){found=1; next} else {exit}} found{print}' "$AI_RESP" > "$PATCH_TMP" || true
 fi
 
-go test ./... -v | tee -a "$LOG_FILE" || true
-echo "[INFO] ✅ AI refactor process complete." | tee -a "$LOG_FILE"
+if [ ! -s "$PATCH_TMP" ]; then
+  echo "No patch could be extracted from AI response" >> "$DIAG"
+  cp "$DIAG" "${ARTIFACT_DIR}/ai-diagnostics.txt" || true
+  echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
+  exit 0
+fi
+
+# Validate patch applies
+if ! git apply --check "$PATCH_TMP" > /tmp/ai_patch_check.out 2>&1; then
+  echo "AI patch failed git apply --check" >> "$DIAG"
+  cat /tmp/ai_patch_check.out >> "$DIAG" || true
+  cp "$DIAG" "${ARTIFACT_DIR}/ai-diagnostics.txt" || true
+  echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
+  exit 0
+fi
+
+git apply "$PATCH_TMP" || {
+  echo "git apply failed" >> "$DIAG"
+  cp "$DIAG" "${ARTIFACT_DIR}/ai-diagnostics.txt" || true
+  echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
+  exit 0
+}
+
+# Validate after patch
+set +e
+go mod tidy >> "$VALIDATE_LOG" 2>&1 || true
+go build ./... >> "$VALIDATE_LOG" 2>&1
+BUILD_EXIT=$?
+go test ./... >> "$VALIDATE_LOG" 2>&1
+TEST_EXIT=$?
+set -e
+
+if [ "$BUILD_EXIT" -ne 0 ] || [ "$TEST_EXIT" -ne 0 ]; then
+  echo "Validation failed after AI patch; reverting" >> "$DIAG"
+  git checkout -- . || true
+  cp "$VALIDATE_LOG" "${ARTIFACT_DIR}/ai-validate.log" || true
+  cp "$DIAG" "${ARTIFACT_DIR}/ai-diagnostics.txt" || true
+  echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
+  exit 0
+fi
+
+# Commit only allowed files and push branch
+CHANGED_NOW=$(git status --porcelain | awk '{print $2}' || true)
+CHANGED_TARGETS=()
+for tf in "${TARGET_FILES[@]}"; do
+  if echo "$CHANGED_NOW" | grep -Fqx "$tf"; then
+    CHANGED_TARGETS+=("$tf")
+  fi
+done
+
+if [ ${#CHANGED_TARGETS[@]} -eq 0 ]; then
+  echo "No allowed target files changed by AI patch" >> "$DIAG"
+  cp "$DIAG" "${ARTIFACT_DIR}/ai-diagnostics.txt" || true
+  echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
+  exit 0
+fi
+
+TIMESTAMP=$(date -u +"%Y%m%d%H%M%S")
+BRANCH="ai/ai-fix-${TIMESTAMP}"
+git checkout -b "$BRANCH"
+git config user.email "41898282+github-actions[bot]@users.noreply.github.com" || true
+git config user.name "github-actions[bot]" || true
+
+for f in "${CHANGED_TARGETS[@]}"; do git add -- "$f" || true; done
+for f in go.mod go.sum; do
+  if git status --porcelain | awk '{print $2}' | grep -Fqx "$f"; then git add -- "$f" || true; fi
+done
+
+git commit -m "[create-pull-request] automated AI-assisted fixes: ${CHANGED_TARGETS[*]}" || true
+git push --set-upstream origin "$BRANCH" || true
+
+git diff origin/main.."${BRANCH}" > "$PATCH_AFTER" 2>/dev/null || true
+cp "$DIAG" "${ARTIFACT_DIR}/ai-diagnostics.txt" || true
+cp "$VALIDATE_LOG" "${ARTIFACT_DIR}/ai-validate.log" || true
+
+echo "pr_branch=${BRANCH}" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch=${BRANCH}"
 exit 0
