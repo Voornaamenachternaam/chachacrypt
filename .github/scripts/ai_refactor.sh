@@ -178,7 +178,7 @@ PROMPT_TMP="$(mktemp)"
 
 # Call OpenRouter Chat Completions
 API_URL="https://api.openrouter.ai/v1/chat/completions"
-MODEL="tngtech/deepseek-r1t2-chimera:free"
+MODEL="minimax/minimax-m2:free"
 
 PAYLOAD=$( jq -n --arg model "$MODEL" --arg sys "You are a careful, conservative Go engineer." --arg usr "$(sed -n '1,20000p' "$PROMPT_TMP")" '{
   model: $model,
