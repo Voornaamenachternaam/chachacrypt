@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # .github/scripts/ai_refactor.sh
-# Drop-in replacement (robust, self-healing, forces bash runtime)
+# Robust drop-in replacement: uses jq or python to safely build JSON payloads and parse responses.
+# - Forces bash execution if needed
+# - Self-heals by installing goimports if missing
+# - Runs safe auto-fixes; if still failing, asks OpenRouter for a fenced git patch
+# - Validates patch, commits only allowed files, pushes branch to origin, prints pr_branch via GITHUB_OUTPUT
 set -euo pipefail
 
-# If not running under bash, re-exec with bash so bash features (arrays, [[, etc.) work.
+# Re-exec under bash if not running under bash (ensures arrays, [[, etc.)
 if [ -z "${BASH_VERSION:-}" ]; then
   exec bash "$0" "$@"
 fi
 
-# ---------------------------
-# Usage and args
-# ---------------------------
+# ---------- args ----------
 ARTIFACTS_DIR=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -24,14 +26,11 @@ if [ -z "$ARTIFACTS_DIR" ]; then
   exit 1
 fi
 
-# ---------------------------
-# Environment checks / setup
-# ---------------------------
+# ---------- env & paths ----------
 WORKDIR="${GITHUB_WORKSPACE:-$(pwd)}"
 ART_DIR="${WORKDIR}/${ARTIFACTS_DIR}"
 mkdir -p "$ART_DIR"
 
-# Required secrets/env
 : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set (repo secret)}"
 : "${GH2_TOKEN:?GH2_TOKEN must be set (repo secret)}"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY must be set}"
@@ -41,14 +40,11 @@ cd "$WORKDIR"
 # Mark workspace safe for git
 git config --global --add safe.directory "$WORKDIR" >/dev/null 2>&1 || true
 
-# Ensure origin remote authenticated with GH2_TOKEN to avoid ambiguous-origin issues
-# actions/checkout in the workflow normally sets this; set-url here as a safe fallback
+# Ensure origin remote is authenticated with GH2_TOKEN to avoid ambiguous branch refs
 git remote set-url origin "https://x-access-token:${GH2_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" >/dev/null 2>&1 || true
 git fetch origin --prune --tags >/dev/null 2>&1 || true
 
-# ---------------------------
-# Constants / artifacts
-# ---------------------------
+# ---------- constants ----------
 TARGET_FILES=( "chachacrypt.go" "go.mod" "go.sum" )
 
 DIAG="${ART_DIR}/ai-diagnostics.txt"
@@ -57,8 +53,9 @@ AI_RESP="${ART_DIR}/ai-response.txt"
 PATCH_BEFORE="${ART_DIR}/ai-diff-before.patch"
 PATCH_AFTER="${ART_DIR}/ai-diff-after.patch"
 VALIDATE_LOG="${ART_DIR}/ai-validate.log"
+PROMPT_TMP="$(mktemp)"
 
-# Write header to diagnostics
+# header
 {
   echo "ai_refactor.sh diagnostics: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   echo "repo: ${GITHUB_REPOSITORY}"
@@ -66,28 +63,28 @@ VALIDATE_LOG="${ART_DIR}/ai-validate.log"
   echo
 } > "$DIAG"
 
-# Save before-diff of target files
+# save before-diff
 git diff -- "${TARGET_FILES[@]}" > "$PATCH_BEFORE" 2>/dev/null || true
 
-# ---------------------------
-# Ensure helper tools (jq, goimports)
-# ---------------------------
-# try to ensure jq exists (best-effort)
-if ! command -v jq >/dev/null 2>&1; then
-  if command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get update -y >/dev/null 2>&1 || true
-    sudo apt-get install -y jq >/dev/null 2>&1 || true
-  fi
+# ---------- helper tools: jq (preferred) or python fallback ----------
+HAS_JQ=false
+HAS_PY=false
+if command -v jq >/dev/null 2>&1; then
+  HAS_JQ=true
+fi
+if command -v python3 >/dev/null 2>&1; then
+  HAS_PY=true
+elif command -v python >/dev/null 2>&1; then
+  HAS_PY=true
 fi
 
-# Ensure go is available
+# ---------- ensure go and goimports ----------
 if ! command -v go >/dev/null 2>&1; then
   echo "go command not available; aborting." >> "$DIAG"
   echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
   exit 0
 fi
 
-# Ensure GOBIN exists and is on PATH
 GOBIN="${GOBIN:-$HOME/go/bin}"
 mkdir -p "$GOBIN"
 export GOBIN
@@ -96,42 +93,34 @@ case ":$PATH:" in
   *) PATH="$GOBIN:$PATH" ;;
 esac
 
-# Install goimports if missing (self-heal)
 if ! command -v goimports >/dev/null 2>&1; then
-  echo "goimports not found; attempting to install to ${GOBIN}" >> "$DIAG"
+  echo "goimports missing; trying to install..." >> "$DIAG"
   if go install golang.org/x/tools/cmd/goimports@latest >/dev/null 2>&1; then
     echo "goimports installed" >> "$DIAG"
     PATH="$GOBIN:$PATH"
   else
-    echo "goimports install failed; continuing (gofmt will still run)" >> "$DIAG"
+    echo "goimports install failed; continuing" >> "$DIAG"
   fi
 fi
 
-# Note if golangci-lint missing (workflow usually installs it)
 if ! command -v golangci-lint >/dev/null 2>&1; then
-  echo "golangci-lint not found; some auto-fixes (--fix) will be skipped" >> "$DIAG"
+  echo "golangci-lint not found; some auto-fixes will be skipped" >> "$DIAG"
 fi
 
-# ---------------------------
-# Safe automatic fixes (non-AI)
-# ---------------------------
+# ---------- safe auto-fixes ----------
 {
   echo "Running safe auto-fixes..." >> "$DIAG"
-  # format whole repo
   gofmt -s -w . || true
-  # goimports if available
   if command -v goimports >/dev/null 2>&1; then
     goimports -w . || true
   fi
-  # golangci-lint --fix if available
   if command -v golangci-lint >/dev/null 2>&1; then
     golangci-lint run --fix --timeout=10m ./... >> "${ART_DIR}/golangci-fix.log" 2>&1 || true
   fi
-  # go mod tidy
   go mod tidy >> "${ART_DIR}/go-mod-tidy.log" 2>&1 || true
 } || true
 
-# If safe fixes changed any target file, commit & push branch and exit
+# if safe fixes changed targets -> commit & push and exit
 CHANGED_NOW=$(git status --porcelain | awk '{print $2}' || true)
 for tf in "${TARGET_FILES[@]}"; do
   if echo "$CHANGED_NOW" | grep -Fqx "$tf"; then
@@ -140,7 +129,6 @@ for tf in "${TARGET_FILES[@]}"; do
     git checkout -b "$BRANCH"
     git config user.email "41898282+github-actions[bot]@users.noreply.github.com" || true
     git config user.name "github-actions[bot]" || true
-    # stage only allowed files
     for f in "${TARGET_FILES[@]}"; do
       [ -f "$f" ] && git add -- "$f" || true
     done
@@ -160,9 +148,7 @@ for tf in "${TARGET_FILES[@]}"; do
   fi
 done
 
-# ---------------------------
-# No safe fixes: collect diagnostics for AI
-# ---------------------------
+# ---------- collect diagnostics for AI ----------
 if command -v golangci-lint >/dev/null 2>&1; then
   golangci-lint run --timeout=10m --out-format json ./... > "${ART_DIR}/golangci.runtime.json" 2> "${ART_DIR}/golangci.runtime.stderr" || true
 fi
@@ -174,7 +160,7 @@ NEED_AI=false
 if [ -s "${ART_DIR}/go-build-output.txt" ] || [ -s "${ART_DIR}/go-test-output.txt" ]; then
   NEED_AI=true
 fi
-if [ -f "${ART_DIR}/golangci.runtime.json" ] && command -v jq >/dev/null 2>&1; then
+if [ -f "${ART_DIR}/golangci.runtime.json" ] && [ "$HAS_JQ" = true ]; then
   if jq -r '.Issues[]?.Pos?.Filename // empty' "${ART_DIR}/golangci.runtime.json" | grep -E "$(printf '%s|%s|%s' "${TARGET_FILES[0]}" "${TARGET_FILES[1]}" "${TARGET_FILES[2]}")" >/dev/null 2>&1; then
     NEED_AI=true
   fi
@@ -187,26 +173,21 @@ if [ "$NEED_AI" = false ]; then
   exit 0
 fi
 
-# ---------------------------
-# Build AI prompt (concise)
-# ---------------------------
-PROMPT_FILE=$(mktemp)
+# ---------- create a safe prompt file (no embedded JSON building here) ----------
 {
-  echo "You are an expert Go maintainer. Produce a single unified git diff patch (fenced with ``` ) that fixes the lint/build/test issues below."
-  echo "Only modify these files if necessary: ${TARGET_FILES[*]}. Keep changes minimal and safe; preserve behavior unless a change is required to fix an error."
+  echo "You are an expert Go maintainer. Produce a single unified git diff patch (enclosed in triple backticks) that fixes the lint/build/test issues below."
+  echo "Modify only these files if necessary: ${TARGET_FILES[*]}. Keep changes minimal and safe."
   echo
   echo "=== LINT (truncated) ==="
-  if [ -f "${ART_DIR}/golangci.runtime.stderr" ]; then
-    sed -n '1,200p' "${ART_DIR}/golangci.runtime.stderr"
-  fi
+  sed -n '1,200p' "${ART_DIR}/golangci.runtime.stderr" 2>/dev/null || true
   echo
   echo "=== BUILD (truncated) ==="
-  sed -n '1,200p' "${ART_DIR}/go-build-output.txt" || true
+  sed -n '1,200p' "${ART_DIR}/go-build-output.txt" 2>/dev/null || true
   echo
   echo "=== TEST (truncated) ==="
-  sed -n '1,200p' "${ART_DIR}/go-test-output.txt" || true
+  sed -n '1,200p' "${ART_DIR}/go-test-output.txt" 2>/dev/null || true
   echo
-  echo "=== FILES (first 200 lines each) ==="
+  echo "=== FILES (first 200 lines) ==="
   for f in "${TARGET_FILES[@]}"; do
     if [ -f "$f" ]; then
       echo "----- FILE: $f -----"
@@ -214,39 +195,61 @@ PROMPT_FILE=$(mktemp)
       echo
     fi
   done
-} > "$PROMPT_FILE"
+} > "$PROMPT_TMP"
 
-# ---------------------------
-# Call OpenRouter Chat Completions
-# ---------------------------
+# ---------- build JSON payload to file safely ----------
 API_URL="https://api.openrouter.ai/v1/chat/completions"
 MODEL="minimax/minimax-m2:free"
+PAYLOAD_FILE="$(mktemp)"
 
-if command -v jq >/dev/null 2>&1; then
-  PAYLOAD=$( jq -n \
-    --arg model "$MODEL" \
-    --arg sys "You are an expert Go code patch generator. Provide exactly one fenced diff patch." \
-    --arg usr "$(sed -n '1,20000p' "$PROMPT_FILE")" \
-    '{
-      model: $model,
-      messages: [
-        {role:"system", content:$sys},
-        {role:"user", content:$usr}
-      ],
-      temperature: 0.0,
-      max_tokens: 32768
-    }' )
+if [ "$HAS_JQ" = true ]; then
+  # Use jq to construct JSON safely
+  jq -n --arg model "$MODEL" \
+        --arg sys "You are an expert Go code patch generator. Provide exactly one fenced diff patch." \
+        --arg usr "$(sed -n '1,20000p' "$PROMPT_TMP")" \
+        '{
+          model: $model,
+          messages: [
+            {role:"system", content:$sys},
+            {role:"user", content:$usr}
+          ],
+          temperature: 0.0,
+          max_tokens: 32768
+        }' > "$PAYLOAD_FILE"
 else
-  # Fallback payload (best-effort)
-  PAYLOAD=$(printf '{"model":"%s","messages":[{"role":"system","content":"You are an expert Go code patch generator. Provide exactly one fenced diff patch."},{"role":"user","content":"%s"}],"temperature":0.0,"max_tokens":32768}' \
-    "$MODEL" "$(sed -n '1,20000p' "$PROMPT_FILE" | sed 's/"/\\"/g' | tr '\n' '\\u2028')")
+  # Use Python to create JSON safely (handles quotes/newlines robustly)
+  if [ "$HAS_PY" = true ]; then
+    python3 - <<PY > "$PAYLOAD_FILE" || python - <<PY > "$PAYLOAD_FILE"
+import json,sys
+MODEL = "$MODEL"
+system = "You are an expert Go code patch generator. Provide exactly one fenced diff patch."
+with open("$PROMPT_TMP","r", encoding="utf-8") as fh:
+    user = fh.read()
+payload = {
+  "model": MODEL,
+  "messages": [
+    {"role":"system","content": system},
+    {"role":"user","content": user}
+  ],
+  "temperature": 0.0,
+  "max_tokens": 32768
+}
+json.dump(payload, sys.stdout, ensure_ascii=False)
+PY
+  else
+    echo "Neither jq nor python available to safely build JSON payload; aborting." >> "$DIAG"
+    cp "$DIAG" "${ART_DIR}/ai-diagnostics.txt" || true
+    echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
+    exit 0
+  fi
 fi
 
-RESPONSE_TMP=$(mktemp)
+# ---------- call OpenRouter ----------
+RESPONSE_TMP="$(mktemp)"
 HTTP_CODE=$(curl -sS -X POST "$API_URL" \
   -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d "$PAYLOAD" -w "%{http_code}" -o "$RESPONSE_TMP" )
+  -d @"$PAYLOAD_FILE" -w "%{http_code}" -o "$RESPONSE_TMP" )
 
 cp "$RESPONSE_TMP" "$AI_RAW" || true
 
@@ -258,29 +261,68 @@ if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
   exit 0
 fi
 
-# Extract AI content (prefer jq)
-if command -v jq >/dev/null 2>&1; then
+# ---------- extract AI content (jq preferred, python fallback) ----------
+AI_CONTENT=""
+if [ "$HAS_JQ" = true ]; then
   AI_CONTENT=$(jq -r '.choices[0].message.content // .choices[0].text // empty' "$RESPONSE_TMP" 2>/dev/null || true)
 else
-  AI_CONTENT=$(sed -n '1,20000p' "$RESPONSE_TMP")
+  # use python to parse JSON safely if jq missing
+  if [ "$HAS_PY" = true ]; then
+    AI_CONTENT=$(python3 - <<PY 2>/dev/null || python - <<PY 2>/dev/null
+import json,sys
+try:
+    obj=json.load(open("$RESPONSE_TMP", "r", encoding="utf-8"))
+    # try chat completions shape
+    out = ""
+    if "choices" in obj and len(obj["choices"])>0:
+        ch = obj["choices"][0]
+        if isinstance(ch, dict):
+            out = ch.get("message", {}).get("content") or ch.get("text") or ""
+    print(out or "")
+except Exception as e:
+    sys.stderr.write("json parse error: "+str(e))
+    print("", end="")
+PY
+  else
+    AI_CONTENT=$(sed -n '1,20000p' "$RESPONSE_TMP")
+  fi
 fi
+
 echo "$AI_CONTENT" > "$AI_RESP"
 
-# ---------------------------
-# Extract patch and apply
-# ---------------------------
-PATCH_TMP=$(mktemp)
+# ---------- extract first fenced block from AI_CONTENT robustly (python fallback) ----------
+PATCH_TMP="$(mktemp)"
+# Try to extract using awk/sed but if complex, use python
 if echo "$AI_CONTENT" | grep -q '```'; then
-  # extract first fenced block
-  echo "$AI_CONTENT" | sed -n '/```/,/```/p' | sed '1d;$d' > "$PATCH_TMP" || true
+  # Prefer python extraction for correctness
+  if [ "$HAS_PY" = true ]; then
+    python3 - <<PY > "$PATCH_TMP" 2>/dev/null || python - <<PY > "$PATCH_TMP" 2>/dev/null
+import sys,re
+s = sys.stdin.read()
+# find first fenced block (```...```)
+m = re.search(r'```(?:[^\n]*)\n(.*?)\n```', s, re.S)
+if m:
+    print(m.group(1))
+else:
+    # fallback: between first and second ```
+    parts = s.split('```')
+    if len(parts) >= 3:
+        print(parts[1])
+PY <<'PY_INPUT'
+'"'"$(cat "$AI_RESP")"'"'
+PY_INPUT
+  else
+    # fallback native shell: extract between first pair of ```
+    awk 'BEGIN{found=0} /```/{if(found==0){found=1; next} else {exit}} found{print}' "$AI_RESP" > "$PATCH_TMP" || true
+  fi
 else
-  echo "No fenced patch in AI response" >> "$DIAG"
+  echo "No fenced patch found in AI response" >> "$DIAG"
   cp "$DIAG" "${ART_DIR}/ai-diagnostics.txt" || true
   echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
   exit 0
 fi
 
-# Validate patch can apply
+# Validate patch applies cleanly
 if ! git apply --check "$PATCH_TMP" > /tmp/ai_patch_check.out 2>&1; then
   echo "AI patch failed git apply --check" >> "$DIAG"
   cat /tmp/ai_patch_check.out >> "$DIAG" || true
@@ -289,6 +331,7 @@ if ! git apply --check "$PATCH_TMP" > /tmp/ai_patch_check.out 2>&1; then
   exit 0
 fi
 
+# Apply patch
 git apply "$PATCH_TMP" || {
   echo "git apply failed" >> "$DIAG"
   cp "$DIAG" "${ART_DIR}/ai-diagnostics.txt" || true
@@ -296,9 +339,7 @@ git apply "$PATCH_TMP" || {
   exit 0
 }
 
-# ---------------------------
-# Validate after patch (build/test)
-# ---------------------------
+# ---------- validate after patch ----------
 {
   echo "Validating after AI patch..." >> "$VALIDATE_LOG"
   set +e
@@ -320,9 +361,7 @@ if [ "${build_exit:-1}" -ne 0 ] || [ "${test_exit:-1}" -ne 0 ]; then
   exit 0
 fi
 
-# ---------------------------
-# Commit & push only allowed files
-# ---------------------------
+# ---------- commit & push only allowed files ----------
 CHANGED_NOW=$(git status --porcelain | awk '{print $2}' || true)
 CHANGED_TARGETS=()
 for tf in "${TARGET_FILES[@]}"; do
@@ -344,10 +383,10 @@ git checkout -b "$BRANCH"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com" || true
 git config user.name "github-actions[bot]" || true
 
-# Stage only changed allowed files (and go.mod/go.sum if changed)
 for f in "${CHANGED_TARGETS[@]}"; do
   git add -- "$f" || true
 done
+# ensure go.mod/go.sum included if changed
 for f in go.mod go.sum; do
   if git status --porcelain | awk '{print $2}' | grep -Fqx "$f"; then
     git add -- "$f" || true
