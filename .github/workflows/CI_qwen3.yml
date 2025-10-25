@@ -1,5 +1,4 @@
 name: CI_qwen3
-
 on:
   push:
     branches: [ main ]
@@ -12,29 +11,22 @@ permissions:
   pull-requests: write
 
 env:
-  # names used in script & steps
   ARTIFACT_DIR: ci-artifacts/combined
 
-concurrency:
-  group: chachacrypt-ci
-  cancel-in-progress: true
-
 jobs:
-  matrix-check:
-    name: Lint / Build / Test (${{ matrix.os }})
+  check:
+    name: Lint • Build • Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ ubuntu-latest, windows-latest ]
         go: [ "stable" ]
-    timeout-minutes: 30
     steps:
-      - name: Checkout (for matrix jobs)
+      - name: Checkout (authenticated)
         uses: actions/checkout@v5.0.0
         with:
           fetch-depth: 0
           persist-credentials: true
-          # when persist-credentials:true, actions/checkout configures origin auth using the token below
           token: ${{ secrets.GH2_TOKEN }}
 
       - name: Setup Go
@@ -44,90 +36,74 @@ jobs:
           check-latest: true
           cache: true
 
-      - name: Cache Go modules
+      - name: Cache modules & build cache
         uses: actions/cache@v4.3.0
         with:
           path: |
             ~/.cache/go-build
-            ~/.cache/some-golangci
             ${{ runner.os }}-go-mod-cache
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
+          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
 
-      - name: Install tooling (golangci-lint, goimports)
+      - name: Install small tooling & run checks
+        # Use bash shell (GitHub Windows images include bash) to keep a single compact command
+        shell: bash
         run: |
           set -eux
-          if ! command -v golangci-lint >/dev/null 2>&1; then
-            curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $GOBIN v2.5.0 || true
-          fi
-          if ! command -v goimports >/dev/null 2>&1; then
-            go install golang.org/x/tools/cmd/goimports@latest
-          fi
-
-      - name: Run golangci-lint
-        id: lint
-        run: |
           mkdir -p "${{ env.ARTIFACT_DIR }}"
+          # golangci-lint v2.5.0 installer (cross-platform via curl)
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "${GOBIN:-$HOME/go/bin}" v2.5.0 || true
+          # goimports
+          go install golang.org/x/tools/cmd/goimports@latest || true
+          export PATH="${GOBIN:-$HOME/go/bin}:$PATH"
+          golangci-lint --version || true
+          # run lint/build/test and record outputs
           golangci-lint run --timeout=10m --out-format json ./... > "${{ env.ARTIFACT_DIR }}/golangci.json" 2> "${{ env.ARTIFACT_DIR }}/golangci.stderr" || true
-          echo "lint_exit=0" >> $GITHUB_OUTPUT || true
-
-      - name: Build
-        run: |
-          mkdir -p "${{ env.ARTIFACT_DIR }}"
           go build ./... > "${{ env.ARTIFACT_DIR }}/go-build-output.txt" 2>&1 || true
-
-      - name: Test
-        run: |
-          mkdir -p "${{ env.ARTIFACT_DIR }}"
           go test ./... > "${{ env.ARTIFACT_DIR }}/go-test-output.txt" 2>&1 || true
 
-      - name: Upload artifacts for combined AI job
+      - name: Upload artifacts
         uses: actions/upload-artifact@v5.0.0
         with:
           name: matrix-artifacts-${{ matrix.os }}
-          path: |
-            ${{ env.ARTIFACT_DIR }}/golangci.json
-            ${{ env.ARTIFACT_DIR }}/golangci.stderr
-            ${{ env.ARTIFACT_DIR }}/go-build-output.txt
-            ${{ env.ARTIFACT_DIR }}/go-test-output.txt
+          path: ${{ env.ARTIFACT_DIR }}
 
-  ai-refactor:
-    name: AI Refactor & Create PR
+  ai:
+    name: AI refactor & PR
     runs-on: ubuntu-latest
-    needs: matrix-check
+    needs: check
     steps:
-      - name: Checkout (full workspace, authenticated with GH2_TOKEN)
-        uses: actions/checkout@v5
+      - name: Checkout (authenticated)
+        uses: actions/checkout@v5.0.0
         with:
           fetch-depth: 0
           persist-credentials: true
           token: ${{ secrets.GH2_TOKEN }}
 
-      - name: Restore combined artifacts
+      - name: Download artifacts (matrix)
         uses: actions/download-artifact@v6.0.0
         with:
           name: matrix-artifacts-ubuntu-latest
           path: ci-artifacts/ubuntu-latest || true
 
-      - name: Download other matrix artifacts (windows)
+      - name: Download artifacts (windows)
         if: always()
         uses: actions/download-artifact@v6.0.0
         with:
           name: matrix-artifacts-windows-latest
           path: ci-artifacts/windows-latest || true
 
-      - name: Merge artifacts into combined
+      - name: Merge artifacts
+        shell: bash
         run: |
           mkdir -p "${{ env.ARTIFACT_DIR }}"
           cp -v ci-artifacts/ubuntu-latest/* "${{ env.ARTIFACT_DIR }}/" 2>/dev/null || true
           cp -v ci-artifacts/windows-latest/* "${{ env.ARTIFACT_DIR }}/" 2>/dev/null || true
           ls -la "${{ env.ARTIFACT_DIR }}" || true
 
-      - name: Make AI script executable
+      - name: Ensure AI script is executable
         run: chmod +x .github/scripts/ai_refactor.sh
 
-      - name: Run AI refactor script (commits & pushes branch to origin)
+      - name: Run AI refactor script
         id: ai_run
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -137,7 +113,7 @@ jobs:
         run: |
           ./.github/scripts/ai_refactor.sh --artifacts "${{ env.ARTIFACT_DIR }}"
 
-      - name: Create Pull Request (only if branch created)
+      - name: Create PR (if branch produced)
         if: steps.ai_run.outputs.pr_branch != ''
         uses: peter-evans/create-pull-request@v7.0.8
         with:
@@ -145,15 +121,8 @@ jobs:
           branch-token: ${{ secrets.GH2_TOKEN }}
           branch: ${{ steps.ai_run.outputs.pr_branch }}
           base: main
-          title: "chore: automated dependency & code fixes (AI-assisted)"
+          title: chore "automated dependency & code fixes (AI-assisted)"
           body: |
-            Automated PR created by CI. The AI reviewed lint/build/test outputs and applied fixes to:
-            - go.mod
-            - go.sum
-            - chachacrypt.go
-            Please review changes and CI artifacts.
+            Automated PR created by CI. The AI reviewed lint/build/test outputs and applied fixes to go.mod, go.sum, and chachacrypt.go.
           labels: automated, dependencies, ai-assisted
-          draft: false
-          commit-message: create-pull-request
-          delete-branch: false
-          maintainer-can-modify: true
+          commit-message: automated change
