@@ -5,7 +5,7 @@
 # Purpose: Automatically detect, fix, and refactor Go code using:
 #  - goimports
 #  - golangci-lint
-#  - OpenRouter AI model (openai/gpt-4o-mini)
+#  - OpenRouter AI model (DeepSeek-Coder / the required model)
 # =====================================================================
 
 set -euo pipefail
@@ -32,14 +32,15 @@ done
 # ---------------------------------------------------------------------
 REPO_DIR="${GITHUB_WORKSPACE:-$(pwd)}"
 OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}"
-MODEL="openai/gpt-4o-mini"
+# 🧠 use your required model exactly as requested before
+MODEL="minimax/minimax-m2:free"
+
+mkdir -p "$ARTIFACT_DIR"
 LOG_FILE="$ARTIFACT_DIR/ai_refactor.log"
 PROMPT_FILE="$ARTIFACT_DIR/ai_prompt.txt"
 RESPONSE_FILE="$ARTIFACT_DIR/ai_response.txt"
 
-mkdir -p "$ARTIFACT_DIR"
 cd "$REPO_DIR"
-
 echo "[INFO] Starting AI refactor in: $REPO_DIR" | tee "$LOG_FILE"
 
 # ---------------------------------------------------------------------
@@ -135,7 +136,7 @@ AI_CONTENT="$(curl -sS -X POST "https://openrouter.ai/api/v1/chat/completions" \
     \"temperature\": 0.3
   }" | jq -r '.choices[0].message.content // empty')"
 
-if [[ -z "$AI_CONTENT" ]]; then
+if [[ -z "${AI_CONTENT}" ]]; then
   echo "[ERROR] AI returned empty response." | tee -a "$LOG_FILE"
   exit 1
 fi
