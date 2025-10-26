@@ -142,3 +142,4 @@ jobs:
             Automated PR created by CI. The AI and CI steps reviewed lint/build/test outputs and applied fixes (if any) to go.mod, go.sum, and chachacrypt.go.
           labels: automated, dependencies, ai-assisted
           commit-message: automated change
+
