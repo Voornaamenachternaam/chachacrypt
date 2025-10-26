@@ -97,10 +97,11 @@ jobs:
           for src in ci-artifacts/ubuntu-latest/* ci-artifacts/windows-latest/*; do
             [ -e "$src" ] || continue
             dest="${{ env.ARTIFACT_DIR }}/$(basename "$src")"
-            # if dest exists and identical, skip; if src == dest path, skip
+            # if dest is the same path as src, skip
             if [ "$src" = "$dest" ]; then
               continue
             fi
+            # if dest exists and identical content, skip
             if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
               continue
             fi
@@ -137,9 +138,8 @@ jobs:
           branch-token: ${{ secrets.GH2_TOKEN }}
           branch: ${{ steps.ai_run.outputs.pr_branch }}
           base: main
-          title: "chore: automated dependency & code fixes (AI-assisted)" 
+          title: "chore: automated dependency & code fixes (AI-assisted)"
           body: |
             Automated PR created by CI. The AI and CI steps reviewed lint/build/test outputs and applied fixes (if any) to go.mod, go.sum, and chachacrypt.go.
           labels: automated, dependencies, ai-assisted
           commit-message: automated change
-
