@@ -51,7 +51,7 @@ jobs:
           mkdir -p "${{ env.ARTIFACT_DIR }}"
           # install golangci-lint v2.5.0
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "${GOBIN:-$HOME/go/bin}" v2.5.0 || true
-          # install goimports
+          # install goimports to GOBIN (or $HOME/go/bin if GOBIN not set)
           go install golang.org/x/tools/cmd/goimports@latest || true
           echo "${GOBIN:-$HOME/go/bin}" >> $GITHUB_PATH
           export PATH="${GOBIN:-$HOME/go/bin}:$PATH"
@@ -90,24 +90,28 @@ jobs:
           name: matrix-artifacts-windows-latest
           path: ci-artifacts/windows-latest || true
 
-      - name: Merge artifacts
+      - name: Merge artifacts (guarded copy)
         shell: bash
         run: |
           mkdir -p "${{ env.ARTIFACT_DIR }}"
-          # copy files only if source exists and is not same path as destination
           for src in ci-artifacts/ubuntu-latest/* ci-artifacts/windows-latest/*; do
             [ -e "$src" ] || continue
             dest="${{ env.ARTIFACT_DIR }}/$(basename "$src")"
-            if [ "$src" != "$dest" ]; then
-              cp -vn "$src" "$dest" 2>/dev/null || true
+            # if dest exists and identical, skip; if src == dest path, skip
+            if [ "$src" = "$dest" ]; then
+              continue
             fi
+            if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
+              continue
+            fi
+            cp -v "$src" "$dest" 2>/dev/null || true
           done
           ls -la "${{ env.ARTIFACT_DIR }}" || true
 
       - name: Ensure AI script is executable
         run: chmod +x .github/scripts/ai_refactor.sh
 
-      - name: Setup Go (ai job) — use latest stable for verification
+      - name: Setup Go (ai job uses stable to validate)
         uses: actions/setup-go@v6
         with:
           go-version: stable
@@ -127,7 +131,7 @@ jobs:
 
       - name: Create PR (if branch produced)
         if: steps.ai_run.outputs.pr_branch != ''
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ secrets.GH2_TOKEN }}
           branch-token: ${{ secrets.GH2_TOKEN }}
@@ -135,6 +139,6 @@ jobs:
           base: main
           title: "chore: automated dependency & code fixes (AI-assisted)" 
           body: |
-            Automated PR created by CI. The AI reviewed lint/build/test outputs and applied fixes to go.mod, go.sum, and chachacrypt.go.
+            Automated PR created by CI. The AI and CI steps reviewed lint/build/test outputs and applied fixes (if any) to go.mod, go.sum, and chachacrypt.go.
           labels: automated, dependencies, ai-assisted
           commit-message: automated change
