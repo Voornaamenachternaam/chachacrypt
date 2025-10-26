@@ -23,21 +23,21 @@ jobs:
         go: [ "stable" ]
     steps:
       - name: Checkout (authenticated)
-        uses: actions/checkout@v5.0.0
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           persist-credentials: true
           token: ${{ secrets.GH2_TOKEN }}
 
       - name: Setup Go
-        uses: actions/setup-go@v6.0.0
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ matrix.go }}
           check-latest: true
           cache: true
 
       - name: Cache modules & build cache
-        uses: actions/cache@v4.3.0
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -51,21 +51,16 @@ jobs:
           mkdir -p "${{ env.ARTIFACT_DIR }}"
           # install golangci-lint v2.5.0
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "${GOBIN:-$HOME/go/bin}" v2.5.0 || true
-          # install goimports to GOBIN (or $HOME/go/bin if GOBIN not set)
-          go install golang.org/x/tools/cmd/goimports@latest
-          # ensure $GOBIN (or $HOME/go/bin) is on PATH for the rest of the job
+          # install goimports
+          go install golang.org/x/tools/cmd/goimports@latest || true
           echo "${GOBIN:-$HOME/go/bin}" >> $GITHUB_PATH
-          # sanity check
-          command -v goimports || true
-
-          # run checks and store outputs
           export PATH="${GOBIN:-$HOME/go/bin}:$PATH"
           golangci-lint run --timeout=10m --out-format json ./... > "${{ env.ARTIFACT_DIR }}/golangci.json" 2> "${{ env.ARTIFACT_DIR }}/golangci.stderr" || true
           go build ./... > "${{ env.ARTIFACT_DIR }}/go-build-output.txt" 2>&1 || true
           go test ./... > "${{ env.ARTIFACT_DIR }}/go-test-output.txt" 2>&1 || true
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v5.0.0
+        uses: actions/upload-artifact@v5
         with:
           name: matrix-artifacts-${{ matrix.os }}
           path: ${{ env.ARTIFACT_DIR }}
@@ -76,21 +71,21 @@ jobs:
     needs: check
     steps:
       - name: Checkout (authenticated)
-        uses: actions/checkout@v5.0.0
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           persist-credentials: true
           token: ${{ secrets.GH2_TOKEN }}
 
-      - name: Download artifacts (matrix - ubuntu)
-        uses: actions/download-artifact@v6.0.0
+      - name: Download artifacts (ubuntu)
+        uses: actions/download-artifact@v6
         with:
           name: matrix-artifacts-ubuntu-latest
           path: ci-artifacts/ubuntu-latest || true
 
-      - name: Download artifacts (matrix - windows)
+      - name: Download artifacts (windows)
         if: always()
-        uses: actions/download-artifact@v6.0.0
+        uses: actions/download-artifact@v6
         with:
           name: matrix-artifacts-windows-latest
           path: ci-artifacts/windows-latest || true
@@ -99,25 +94,31 @@ jobs:
         shell: bash
         run: |
           mkdir -p "${{ env.ARTIFACT_DIR }}"
-          cp -vn ci-artifacts/ubuntu-latest/* "${{ env.ARTIFACT_DIR }}/" 2>/dev/null || true
-          cp -vn ci-artifacts/windows-latest/* "${{ env.ARTIFACT_DIR }}/" 2>/dev/null || true
+          # copy files only if source exists and is not same path as destination
+          for src in ci-artifacts/ubuntu-latest/* ci-artifacts/windows-latest/*; do
+            [ -e "$src" ] || continue
+            dest="${{ env.ARTIFACT_DIR }}/$(basename "$src")"
+            if [ "$src" != "$dest" ]; then
+              cp -vn "$src" "$dest" 2>/dev/null || true
+            fi
+          done
           ls -la "${{ env.ARTIFACT_DIR }}" || true
 
       - name: Ensure AI script is executable
         run: chmod +x .github/scripts/ai_refactor.sh
 
-      - name: Install jq (for payload parsing)
-        shell: bash
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq
+      - name: Setup Go (ai job) — use latest stable for verification
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
 
       - name: Run AI refactor script
         id: ai_run
         shell: bash
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}   # REQUIRED: set this secret to the exact model name you want
+          OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
           GH2_TOKEN: ${{ secrets.GH2_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_WORKSPACE: ${{ github.workspace }}
@@ -126,14 +127,14 @@ jobs:
 
       - name: Create PR (if branch produced)
         if: steps.ai_run.outputs.pr_branch != ''
-        uses: peter-evans/create-pull-request@v7.0.8
+        uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GH2_TOKEN }}
           branch-token: ${{ secrets.GH2_TOKEN }}
           branch: ${{ steps.ai_run.outputs.pr_branch }}
           base: main
-          title: chore "automated dependency & code fixes (AI-assisted)"
+          title: "chore: automated dependency & code fixes (AI-assisted)" 
           body: |
             Automated PR created by CI. The AI reviewed lint/build/test outputs and applied fixes to go.mod, go.sum, and chachacrypt.go.
           labels: automated, dependencies, ai-assisted
-          commit-message: a utomated change
+          commit-message: automated change
