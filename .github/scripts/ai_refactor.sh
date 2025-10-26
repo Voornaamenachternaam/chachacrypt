@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # .github/scripts/ai_refactor.sh
-# Robust AI refactor helper (safe branch names + create branch only if files changed).
-# Requires: OPENROUTER_API_KEY, OPENROUTER_MODEL, GH2_TOKEN (secrets)
+# Safe AI refactor driver — creates PR branches only when allowed files actually change.
+# Required secrets: OPENROUTER_API_KEY, OPENROUTER_MODEL, GH2_TOKEN
 set -euo pipefail
 
-# Re-exec under bash if not bash
+# Ensure bash
 if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 
-# ---------------------------
+# -------------------------
 # Args
 ARTIFACT_DIR="ci-artifacts/combined"
 while [[ $# -gt 0 ]]; do
@@ -18,26 +18,27 @@ while [[ $# -gt 0 ]]; do
 done
 mkdir -p "$ARTIFACT_DIR"
 
-# ---------------------------
-# Artifacts and diag
+# -------------------------
+# Paths
 DIAG="$ARTIFACT_DIR/ai-diagnostics.txt"
 AI_RAW="$ARTIFACT_DIR/ai-raw-response.json"
 AI_RESP="$ARTIFACT_DIR/ai-response.txt"
 VALIDATE_LOG="$ARTIFACT_DIR/ai-validate.log"
+PATCH_BEFORE="$ARTIFACT_DIR/ai-diff-before.patch"
+PATCH_AFTER="$ARTIFACT_DIR/ai-diff-after.patch"
 
-# ---------------------------
-# Required environment / secrets
-: "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set (secret)}"
-: "${OPENROUTER_MODEL:?OPENROUTER_MODEL must be set (secret)}"
-: "${GH2_TOKEN:?GH2_TOKEN must be set (secret)}"
+# -------------------------
+# Required env
+: "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set}"
+: "${OPENROUTER_MODEL:?OPENROUTER_MODEL must be set}"
+: "${GH2_TOKEN:?GH2_TOKEN must be set}"
 
-# ---------------------------
-# Safety: make git safe in runners
+# Make git safe in runner
 git config --global --add safe.directory "${GITHUB_WORKSPACE:-$(pwd)}" >/dev/null 2>&1 || true
 
-# Ensure Go present (we rely on it)
+# Ensure go exists
 if ! command -v go >/dev/null 2>&1; then
-  echo "ERROR: go not found in PATH" | tee "$DIAG"
+  echo "ERROR: go tool not found in PATH" | tee "$DIAG"
   echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
   exit 1
 fi
@@ -45,52 +46,54 @@ GOBIN="$(go env GOPATH 2>/dev/null || echo "$HOME/go")/bin"
 mkdir -p "$GOBIN"
 export PATH="$GOBIN:$PATH"
 
-# Allowed target files (only these can be changed/committed)
+# Allowed files
 TARGET_FILES=( "chachacrypt.go" "go.mod" "go.sum" )
 
-# Diagnostics header
+# DIAG header
 {
-  echo "ai_refactor.sh run: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  echo "ai_refactor run: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   echo "repo: ${GITHUB_REPOSITORY:-unknown}"
   echo "model: ${OPENROUTER_MODEL}"
 } > "$DIAG"
 
-# ---------------------------
-# Helpers
-# sanitize a string for a git branch ref: keep A-Za-z0-9._- and replace other chars with '-'
-sanitize() {
+# ---------- helpers ----------
+sanitize_ref() {
+  # Keep only allowed characters, convert others to '-'
   local s="$1"
-  # replace sequences of invalid chars with single '-'
-  # keep slashes only if provided in prefix when calling; for version strings we won't include slashes
-  printf '%s' "$s" | sed -E 's#[^A-Za-z0-9._-]+#-#g' | sed -E 's#(^-|-$)##g'
+  # Replace runs of invalid chars with '-'
+  printf '%s' "$s" | sed -E 's/[^A-Za-z0-9._/-]+/-/g' | sed -E 's/^-+|-+$//g'
 }
 
-# produce safe branch name like: ai/go-bump-1.25.3-20251026T124540Z
 make_branch_name() {
-  local prefix="$1" version="$2"
-  local vsafe ts
-  vsafe="$(sanitize "$version")"
-  ts="$(date -u +%Y%m%dT%H%M%SZ)"
-  # ensure no double-dashes and no spaces, etc.
-  echo "${prefix}-${vsafe}-${ts}"
-}
-
-# check if any of the target files differ from HEAD (uncommitted changes or staged)
-target_files_changed() {
-  # compare working tree to HEAD (if no HEAD e.g. shallow copy, still check files)
-  if git rev-parse --verify HEAD >/dev/null 2>&1; then
-    git diff --name-only HEAD -- "${TARGET_FILES[@]}" | grep -q . && return 0 || true
-    # untracked changes
-    git ls-files --others --exclude-standard -- "${TARGET_FILES[@]}" | grep -q . && return 0 || true
+  # prefix and optional token
+  local prefix="$1"; local token="${2:-}"
+  local ts; ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  if [ -n "$token" ]; then
+    token="$(sanitize_ref "$token")"
+    echo "${prefix}-${token}-${ts}"
   else
-    # no HEAD (fresh repo) — detect any files present that match target list
-    for f in "${TARGET_FILES[@]}"; do [ -f "$f" ] && return 0 || true; done
+    echo "${prefix}-${ts}"
   fi
-  return 1
 }
 
-# stage-and-commit-if-changed: add only target files, commit only if staged changes exist
-stage_and_commit_if_changed() {
+# Return 0 if any allowed target files differ from HEAD or are untracked (i.e., real change)
+targets_changed() {
+  # If repo has HEAD, compare; otherwise check file presence
+  if git rev-parse --verify HEAD >/dev/null 2>&1; then
+    if git diff --name-only HEAD -- "${TARGET_FILES[@]}" | grep -q .; then
+      return 0
+    fi
+    if git ls-files --others --exclude-standard -- "${TARGET_FILES[@]}" | grep -q .; then
+      return 0
+    fi
+    return 1
+  else
+    for f in "${TARGET_FILES[@]}"; do [ -f "$f" ] && return 0 || true; done
+    return 1
+  fi
+}
+
+stage_and_commit_targets() {
   local msg="$1"
   for f in "${TARGET_FILES[@]}"; do
     if [ -f "$f" ]; then
@@ -104,31 +107,31 @@ stage_and_commit_if_changed() {
   return 1
 }
 
-# set origin to use token for push (only if GH2_TOKEN and GITHUB_REPOSITORY are set)
-set_push_remote_with_token() {
+set_push_remote_token() {
   if [ -n "${GH2_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
     git remote set-url origin "https://x-access-token:${GH2_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" >/dev/null 2>&1 || true
   fi
 }
 
-# write pr_branch output
 emit_pr_branch() {
-  local branch="$1"
+  local br="$1"
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
-    echo "pr_branch=${branch}" >> "${GITHUB_OUTPUT}"
+    echo "pr_branch=${br}" >> "${GITHUB_OUTPUT}"
   else
-    echo "pr_branch=${branch}"
+    echo "pr_branch=${br}"
   fi
 }
 
-# ---------------------------
-# STEP A: attempt go.mod 'go' directive bump to latest patch (only if it changes files)
-# ---------------------------
+# Save before-diff for diagnostics
+git diff -- "${TARGET_FILES[@]}" > "$PATCH_BEFORE" 2>/dev/null || true
+
+# -------------------------
+# STEP 0: Try Go bump (canonical)
+# -------------------------
 LATEST_GO_FULL="$(curl -fsS https://go.dev/VERSION?m=text || true)"  # e.g. "go1.25.3"
 LATEST_GO=""
 if [ -n "$LATEST_GO_FULL" ]; then LATEST_GO="${LATEST_GO_FULL#go}"; fi
 
-# semver-ish compare: return 0 if a >= b
 ver_ge() {
   IFS='.' read -r -a A <<< "$1"
   IFS='.' read -r -a B <<< "$2"
@@ -143,43 +146,41 @@ ver_ge() {
 if [ -f go.mod ] && [ -n "$LATEST_GO" ]; then
   CUR_GO="$(awk '/^go /{print $2; exit}' go.mod || true)"
   if [ -n "$CUR_GO" ] && ! ver_ge "$CUR_GO" "$LATEST_GO"; then
-    echo "Detected go directive ${CUR_GO} < latest ${LATEST_GO}; attempting bump" >> "$DIAG"
-    # backup original
+    echo "Attempting go.mod bump ${CUR_GO} -> ${LATEST_GO}" >> "$DIAG"
     cp go.mod "${ARTIFACT_DIR}/go.mod.prebump" || true
-    # replace first 'go ' line conservatively
-    awk -v ng="$LATEST_GO" 'BEGIN{p=0} { if (!p && $1=="go") { print "go " ng; p=1; next } print }' go.mod > go.mod.tmp && mv go.mod.tmp go.mod || true
-    # tidy to update go.sum
+    awk -v ng="$LATEST_GO" 'BEGIN{done=0} { if (!done && $1=="go") { print "go " ng; done=1; next } print }' go.mod > go.mod.tmp && mv go.mod.tmp go.mod || true
     go mod tidy >> "${ARTIFACT_DIR}/go-mod-tidy.log" 2>&1 || true
 
-    # check if files actually changed vs previous commit
+    # If go.mod or go.sum actually changed vs HEAD -> create branch & push
     if git diff --name-only -- go.mod go.sum | grep -q .; then
-      BR="$(make_branch_name "ai/go-bump" "$LATEST_GO")"
-      # create branch, commit, push
+      BR="$(make_branch_name 'ai/go-bump' "$LATEST_GO")"
+      BR="$(sanitize_ref "$BR")"
+      if ! git check-ref-format --branch "$BR" >/dev/null 2>&1; then
+        BR="ai/go-bump-$(date -u +%Y%m%dT%H%M%SZ)"
+      fi
       git checkout -b "$BR"
       git config user.email "41898282+github-actions[bot]@users.noreply.github.com" || true
       git config user.name "github-actions[bot]" || true
       git add go.mod go.sum || true
       git commit -m "[create-pull-request] bump go directive to ${LATEST_GO}" || true
-      set_push_remote_with_token
+      set_push_remote_token
       git push --set-upstream origin "$BR" || true
       emit_pr_branch "$BR"
       exit 0
     else
-      echo "go.mod bump produced no file changes; restoring previous go.mod" >> "$DIAG"
+      echo "go.mod bump produced no file changes; restoring original go.mod" >> "$DIAG"
       [ -f "${ARTIFACT_DIR}/go.mod.prebump" ] && mv "${ARTIFACT_DIR}/go.mod.prebump" go.mod || true
     fi
   else
-    echo "go.mod up-to-date or missing (cur: ${CUR_GO:-none}, latest: ${LATEST_GO:-unknown})" >> "$DIAG"
+    echo "No go.mod bump needed (cur: ${CUR_GO:-none}, latest: ${LATEST_GO:-unknown})" >> "$DIAG"
   fi
 fi
 
-# ---------------------------
-# STEP B: automatic safe fixes (gofmt, goimports, golangci-lint --fix)
-# ---------------------------
+# -------------------------
+# STEP 1: safe auto-fixes
+# -------------------------
 gofmt -s -w . || true
-if ! command -v goimports >/dev/null 2>&1; then
-  go install golang.org/x/tools/cmd/goimports@latest || true
-fi
+if ! command -v goimports >/dev/null 2>&1; then go install golang.org/x/tools/cmd/goimports@latest || true; fi
 command -v goimports >/dev/null 2>&1 && goimports -w . || true
 
 if ! command -v golangci-lint >/dev/null 2>&1; then
@@ -190,65 +191,62 @@ command -v golangci-lint >/dev/null 2>&1 && golangci-lint run --fix --timeout=10
 go mod tidy >> "${ARTIFACT_DIR}/go-mod-tidy.log" 2>&1 || true
 
 # If any target files changed -> commit & push branch
-if target_files_changed; then
-  BR="$(make_branch_name "ai/auto-fix" "$(date -u +%Y%m%dT%H%M%SZ)")"
+if targets_changed; then
+  BR="$(make_branch_name 'ai/auto-fix' "$(date -u +%Y%m%dT%H%M%SZ)")"
+  BR="$(sanitize_ref "$BR")"
   git checkout -b "$BR"
   git config user.email "41898282+github-actions[bot]@users.noreply.github.com" || true
   git config user.name "github-actions[bot]" || true
-  # stage only target files
   for f in "${TARGET_FILES[@]}"; do [ -f "$f" ] && git add -- "$f" || true; done
   if git diff --cached --name-only | grep -q .; then
     git commit -m "[create-pull-request] automated safe fixes (gofmt/golangci-lint --fix)" || true
-    set_push_remote_with_token
+    set_push_remote_token
     git push --set-upstream origin "$BR" || true
     emit_pr_branch "$BR"
     exit 0
   else
-    echo "Safe fixes did not stage any changes; continuing to diagnostics" >> "$DIAG"
+    echo "Safe fixes did not result in staged changes; continue." >> "$DIAG"
     git checkout - >/dev/null 2>&1 || true
   fi
 fi
 
-# ---------------------------
-# STEP C: collect diagnostics (build/test/lint)
-# ---------------------------
+# -------------------------
+# STEP 2: collect diagnostics (build/test/lint)
+# -------------------------
 go build ./... > "${ARTIFACT_DIR}/go-build-output.txt" 2>&1 || true
 go test ./... > "${ARTIFACT_DIR}/go-test-output.txt" 2>&1 || true
 command -v golangci-lint >/dev/null 2>&1 && golangci-lint run --timeout=10m --out-format json ./... > "${ARTIFACT_DIR}/golangci.runtime.json" 2> "${ARTIFACT_DIR}/golangci.runtime.stderr" || true
 
-# Determine if AI is needed
 NEED_AI=false
 if [ -s "${ARTIFACT_DIR}/go-build-output.txt" ] || [ -s "${ARTIFACT_DIR}/go-test-output.txt" ]; then NEED_AI=true; fi
 if [ -f "${ARTIFACT_DIR}/golangci.runtime.json" ] && command -v jq >/dev/null 2>&1; then
   if jq -r '.Issues[]?.Pos?.Filename // empty' "${ARTIFACT_DIR}/golangci.runtime.json" | grep -E "$(printf '%s|%s|%s' "${TARGET_FILES[0]}" "${TARGET_FILES[1]}" "${TARGET_FILES[2]}")" >/dev/null 2>&1; then NEED_AI=true; fi
 fi
-
 if [ "$NEED_AI" = false ]; then
-  echo "No relevant build/test/lint issues found; nothing for AI." >> "$DIAG"
+  echo "No build/test/lint issues needing AI." >> "$DIAG"
   emit_pr_branch ""
   exit 0
 fi
 
-# ---------------------------
-# STEP D: build AI prompt
+# -------------------------
+# STEP 3: prepare AI prompt
 PROMPT_FILE="$(mktemp)"
 cat > "$PROMPT_FILE" <<'PROMPT_EOF'
-You are an expert Go maintainer. Produce a single unified git diff patch (fenced with triple backticks) that fixes the build/test/lint issues below.
+You are an expert Go maintainer. Produce a single unified git diff (patch) enclosed in triple backticks that fixes the build/test/lint issues below.
 Only modify files if necessary: chachacrypt.go, go.mod, go.sum. Keep changes minimal and safe.
 PROMPT_EOF
-
 {
-  echo ""; echo "=== BUILD OUTPUT (truncated) ==="; sed -n '1,300p' "${ARTIFACT_DIR}/go-build-output.txt" 2>/dev/null || true
-  echo ""; echo "=== TEST OUTPUT (truncated) ==="; sed -n '1,300p' "${ARTIFACT_DIR}/go-test-output.txt" 2>/dev/null || true
-  echo ""; echo "=== LINT STDERR (truncated) ==="; sed -n '1,300p' "${ARTIFACT_DIR}/golangci.runtime.stderr" 2>/dev/null || true
-  echo ""; echo "=== FILE CONTEXT (first 200 lines) ==="
-  for f in "${TARGET_FILES[@]}"; do [ -f "$f" ] && { echo "----- FILE: $f -----"; sed -n '1,200p' "$f"; echo; } || true; done
+  echo ""; echo "=== BUILD OUTPUT ==="; sed -n '1,300p' "${ARTIFACT_DIR}/go-build-output.txt" 2>/dev/null || true
+  echo ""; echo "=== TEST OUTPUT ==="; sed -n '1,300p' "${ARTIFACT_DIR}/go-test-output.txt" 2>/dev/null || true
+  echo ""; echo "=== LINT STDERR ==="; sed -n '1,300p' "${ARTIFACT_DIR}/golangci.runtime.stderr" 2>/dev/null || true
+  echo ""; echo "=== FILE SNIPPETS ==="
+  for f in "${TARGET_FILES[@]}"; do [ -f "$f" ] && { echo "----- $f -----"; sed -n '1,200p' "$f"; echo; } || true; done
 } >> "$PROMPT_FILE"
 
-# ---------------------------
-# STEP E: call OpenRouter via small Python helper (robust)
+# -------------------------
+# STEP 4: call OpenRouter via python helper (retries & diagnostics)
 PY_CALL="$(mktemp)"
-cat > "$PY_CALL" <<'PYCODE'
+cat > "$PY_CALL" <<'PY_PY'
 #!/usr/bin/env python3
 import os,sys,time,socket,json
 try:
@@ -264,7 +262,6 @@ prompt_path=sys.argv[1]
 with open(prompt_path,'r',encoding='utf-8') as fh:
   user_text=fh.read()
 payload={"model":MODEL,"messages":[{"role":"system","content":"You are a precise Go patch generator."},{"role":"user","content":user_text}],"temperature":0.0,"max_tokens":32768}
-# DNS pre-check
 host="openrouter.ai"
 for i in range(6):
   try:
@@ -282,9 +279,9 @@ for attempt in range(6):
     sys.stderr.write(f"request error {attempt+1}: {e}\n")
     time.sleep((attempt+1)*2)
 sys.stderr.write("failed after retries\n"); sys.exit(3)
-PYCODE
+PY_PY
 chmod +x "$PY_CALL"
-# ensure requests is available
+# ensure requests
 if ! python3 -c "import requests" >/dev/null 2>&1; then
   if command -v pip3 >/dev/null 2>&1; then python3 -m pip install --upgrade requests >/dev/null 2>&1 || true; fi
 fi
@@ -295,14 +292,13 @@ python3 "$PY_CALL" "$PROMPT_FILE" > "$RESPONSE_JSON" 2>> "$DIAG"
 PY_EXIT=$?
 set -e
 cp "$RESPONSE_JSON" "$AI_RAW" || true
-
 if [ "$PY_EXIT" -ne 0 ]; then
   echo "OpenRouter call failed (exit $PY_EXIT). See $DIAG and $AI_RAW" >> "$DIAG"
   emit_pr_branch ""
   exit 0
 fi
 
-# Extract AI content robustly (choices[0].message.content)
+# Extract AI content
 EXTRACT_PY="$(mktemp)"
 cat > "$EXTRACT_PY" <<'EXTRACTPY'
 import json,sys
@@ -320,15 +316,14 @@ except Exception as e:
 EXTRACTPY
 python3 "$EXTRACT_PY" "$RESPONSE_JSON" > "$AI_RESP" 2>> "$DIAG" || true
 AI_CONTENT="$(sed -n '1,20000p' "$AI_RESP" || true)"
-
 if [ -z "${AI_CONTENT:-}" ]; then
   echo "AI returned empty content; see $AI_RAW and $DIAG" >> "$DIAG"
   emit_pr_branch ""
   exit 0
 fi
 
-# ---------------------------
-# STEP F: extract fenced diff and apply
+# -------------------------
+# STEP 5: extract fenced patch
 PATCH_TMP="$(mktemp)"
 EXTRACT_PATCH_PY="$(mktemp)"
 cat > "$EXTRACT_PATCH_PY" <<'PATCHPY'
@@ -359,7 +354,7 @@ fi
 
 git apply "$PATCH_TMP" || { echo "git apply failed" >> "$DIAG"; emit_pr_branch ""; exit 0; }
 
-# Validate build/test after applying AI patch
+# Validate after applying
 set +e
 go mod tidy >> "$VALIDATE_LOG" 2>&1 || true
 go build ./... >> "$VALIDATE_LOG" 2>&1
@@ -376,31 +371,27 @@ if [ "$BUILD_EXIT" -ne 0 ] || [ "$TEST_EXIT" -ne 0 ]; then
   exit 0
 fi
 
-# Commit and push only if allowed target files actually changed
-if target_files_changed; then
-  BR="$(make_branch_name "ai/ai-fix" "$(date -u +%Y%m%dT%H%M%SZ)")"
+# Commit and push only if target files changed
+if targets_changed; then
+  BR="$(make_branch_name 'ai/ai-fix' "$(date -u +%Y%m%dT%H%M%SZ)")"
+  BR="$(sanitize_ref "$BR")"
   git checkout -b "$BR"
   git config user.email "41898282+github-actions[bot]@users.noreply.github.com" || true
   git config user.name "github-actions[bot]" || true
-  for f in "${TARGET_FILES[@]}"; do
-    if [ -f "$f" ]; then
-      git add -- "$f" || true
-    fi
-  done
+  for f in "${TARGET_FILES[@]}"; do [ -f "$f" ] && git add -- "$f" || true; done
   if git diff --cached --name-only | grep -q .; then
     git commit -m "[create-pull-request] automated AI-assisted fixes" || true
-    set_push_remote_with_token
+    set_push_remote_token
     git push --set-upstream origin "$BR" || true
     emit_pr_branch "$BR"
     exit 0
   else
-    echo "No staged changes after applying AI patch; nothing to commit." >> "$DIAG"
+    echo "No staged changes after AI patch" >> "$DIAG"
     emit_pr_branch ""
     exit 0
   fi
 else
-  echo "No allowed target files changed after AI patch." >> "$DIAG"
+  echo "No target files changed after AI patch" >> "$DIAG"
   emit_pr_branch ""
   exit 0
 fi
- 
