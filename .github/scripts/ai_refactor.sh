@@ -1,42 +1,35 @@
 #!/usr/bin/env bash
 # .github/scripts/ai_refactor.sh
-# Robust, drop-in replacement — avoids quoting/EOF/unbound-variable issues.
+# Robust AI refactor script (drop-in replacement).
+# - Requires OPENROUTER_API_KEY, GH2_TOKEN and OPENROUTER_MODEL (or .github/ai_model.txt)
+# - Writes pr_branch to GITHUB_ACTIONS outputs via GITHUB_OUTPUT.
 set -euo pipefail
 
-# Re-exec under bash if not running under bash
+# Ensure bash features available
 if [ -z "${BASH_VERSION:-}" ]; then
   exec bash "$0" "$@"
 fi
 
-# -------------------------
-# Arg parsing & defaults
-# -------------------------
+# ---------------------------
+# Args
+# ---------------------------
 ARTIFACT_DIR="ci-artifacts/combined"
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
   case "$1" in
-    --artifacts|-a)
-      ARTIFACT_DIR="$2"; shift 2 ;;
-    *)
-      echo "Warning: unknown arg: $1" >&2; shift ;;
+    --artifacts|-a) ARTIFACT_DIR="$2"; shift 2 ;;
+    *) echo "Unknown arg: $1" >&2; shift ;;
   esac
 done
 
-# Ensure artifact dir exists immediately (fixes missing-file errors)
+# Immediately ensure artifact dir exists
 mkdir -p "$ARTIFACT_DIR"
 
-# -------------------------
-# Initialize variables (avoid unbound variable under set -u)
-# -------------------------
+# Initialize variables to avoid unbound variable errors
 AI_CONTENT=""
-OPENROUTER_MODEL="${OPENROUTER_MODEL:-}"
-RESPONSE_TMP=""
-PAYLOAD_FILE=""
-PATCH_TMP=""
-PROMPT_TMP=""
-RESPONSE_JSON=""
 PR_BRANCH=""
+TMPFILES=()
 
-# Artifact files
+# Artifact file paths
 DIAG="$ARTIFACT_DIR/ai-diagnostics.txt"
 AI_RAW="$ARTIFACT_DIR/ai-raw-response.json"
 AI_RESP="$ARTIFACT_DIR/ai-response.txt"
@@ -48,87 +41,56 @@ VALIDATE_LOG="$ARTIFACT_DIR/ai-validate.log"
 : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set (repo secret)}"
 : "${GH2_TOKEN:?GH2_TOKEN must be set (repo secret)}"
 
-# Model precedence: env OPENROUTER_MODEL -> .github/ai_model.txt -> fail
+# MODEL precedence: env OPENROUTER_MODEL > .github/ai_model.txt > fail
+OPENROUTER_MODEL="${OPENROUTER_MODEL:-}"
 if [ -z "$OPENROUTER_MODEL" ] && [ -f ".github/ai_model.txt" ]; then
   OPENROUTER_MODEL="$(sed -n '1p' .github/ai_model.txt | tr -d '[:space:]' || true)"
 fi
 if [ -z "$OPENROUTER_MODEL" ]; then
   echo "ERROR: OPENROUTER_MODEL not set and .github/ai_model.txt missing" | tee "$DIAG"
+  # set empty pr_branch output then exit
   echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
   exit 1
 fi
 
-# Make git safe in runner
+# Make git safe
 git config --global --add safe.directory "${GITHUB_WORKSPACE:-$(pwd)}" >/dev/null 2>&1 || true
 
-# Ensure origin uses token for pushes (safe fallback)
-if git remote get-url origin >/dev/null 2>&1; then
-  git remote set-url origin "https://x-access-token:${GH2_TOKEN}@github.com/${GITHUB_REPOSITORY:-$(git rev-parse --show-toplevel | xargs basename)}.git" >/dev/null 2>&1 || true
+# Ensure GOBIN on PATH
+if command -v go >/dev/null 2>&1; then
+  GOBIN="$(go env GOPATH 2>/dev/null || echo "$HOME/go")/bin"
+  mkdir -p "$GOBIN"
+  export PATH="$GOBIN:$PATH"
 fi
 
-# Temp files cleanup
-TMP_FILES=()
-cleanup() {
-  for f in "${TMP_FILES[@]:-}"; do [ -f "$f" ] && rm -f "$f" || true; done
-}
-trap cleanup EXIT
-
-# -------------------------
-# Tooling checks & installs
-# -------------------------
-if ! command -v go >/dev/null 2>&1; then
-  echo "go not found in PATH; aborting" | tee -a "$DIAG"
-  echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
-  exit 1
-fi
-
-GOBIN="$(go env GOPATH 2>/dev/null || echo "$HOME/go")/bin"
-mkdir -p "$GOBIN"
-export PATH="$GOBIN:$PATH"
-
-# install goimports if missing
-if ! command -v goimports >/dev/null 2>&1; then
-  echo "[INFO] Installing goimports..." | tee -a "$DIAG"
+# Install minimal tools if missing (best-effort)
+if ! command -v goimports >/dev/null 2>&1 && command -v go >/dev/null 2>&1; then
   go install golang.org/x/tools/cmd/goimports@latest || true
 fi
-
-# install golangci-lint if missing (pinned)
 if ! command -v golangci-lint >/dev/null 2>&1; then
-  echo "[INFO] Installing golangci-lint v2.5.0..." | tee -a "$DIAG"
+  # install pinned v2.5.0 if possible
   curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
     | sh -s -- -b "$GOBIN" v2.5.0 >/dev/null 2>&1 || true
 fi
 
-# install jq if missing (to build payloads easily)
-if ! command -v jq >/dev/null 2>&1; then
-  if command -v sudo >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
-    echo "[INFO] Installing jq (apt-get)..." | tee -a "$DIAG"
-    sudo apt-get update -y >/dev/null 2>&1 || true
-    sudo apt-get install -y jq >/dev/null 2>&1 || true
-  fi
-fi
-
-# -------------------------
-# Save before diff for diagnostics
-# -------------------------
+# Save before-diff of allowed files
 TARGET_FILES=( "chachacrypt.go" "go.mod" "go.sum" )
 git diff -- "${TARGET_FILES[@]}" > "$PATCH_BEFORE" 2>/dev/null || true
 
+# Diagnostics header
 {
-  echo "ai_refactor diagnostics: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  echo "ai_refactor.sh diagnostics: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   echo "repo: ${GITHUB_REPOSITORY:-unknown}"
   echo "model: $OPENROUTER_MODEL"
 } > "$DIAG"
 
-# -------------------------
-# Run safe fixes (format/lint --fix/go mod tidy)
-# -------------------------
+# Run safe auto-fixes
 gofmt -s -w . || true
-if command -v goimports >/dev/null 2>&1; then goimports -w . || true; fi
-if command -v golangci-lint >/dev/null 2>&1; then golangci-lint run --fix --timeout=10m ./... >> "${ARTIFACT_DIR}/golangci-fix.log" 2>&1 || true; fi
+command -v goimports >/dev/null 2>&1 && goimports -w . || true
+command -v golangci-lint >/dev/null 2>&1 && golangci-lint run --fix --timeout=10m ./... >> "${ARTIFACT_DIR}/golangci-fix.log" 2>&1 || true
 go mod tidy >> "${ARTIFACT_DIR}/go-mod-tidy.log" 2>&1 || true
 
-# If safe fixes changed allowed files -> commit & push branch and exit
+# If safe fixes changed allowed files -> commit & push (no AI)
 CHANGED_NOW="$(git status --porcelain | awk '{print $2}' || true)"
 for tf in "${TARGET_FILES[@]}"; do
   if echo "$CHANGED_NOW" | grep -Fqx "$tf"; then
@@ -145,86 +107,66 @@ for tf in "${TARGET_FILES[@]}"; do
   fi
 done
 
-# -------------------------
-# Collect diagnostics (build/test/lint)
-# -------------------------
+# Collect diagnostics
 go build ./... > "${ARTIFACT_DIR}/go-build-output.txt" 2>&1 || true
 go test ./... > "${ARTIFACT_DIR}/go-test-output.txt" 2>&1 || true
 if command -v golangci-lint >/dev/null 2>&1; then
   golangci-lint run --timeout=10m --out-format json ./... > "${ARTIFACT_DIR}/golangci.runtime.json" 2> "${ARTIFACT_DIR}/golangci.runtime.stderr" || true
 fi
 
+# Decide if AI needed
 NEED_AI=false
 if [ -s "${ARTIFACT_DIR}/go-build-output.txt" ] || [ -s "${ARTIFACT_DIR}/go-test-output.txt" ]; then NEED_AI=true; fi
 if [ -f "${ARTIFACT_DIR}/golangci.runtime.json" ] && command -v jq >/dev/null 2>&1; then
   if jq -r '.Issues[]?.Pos?.Filename // empty' "${ARTIFACT_DIR}/golangci.runtime.json" | grep -E "$(printf '%s|%s|%s' "${TARGET_FILES[0]}" "${TARGET_FILES[1]}" "${TARGET_FILES[2]}")" >/dev/null 2>&1; then NEED_AI=true; fi
 fi
-
 if [ "$NEED_AI" = false ]; then
-  echo "No relevant issues; nothing for AI" >> "$DIAG"
+  echo "No relevant issues; exiting." >> "$DIAG"
   echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
   exit 0
 fi
 
-# -------------------------
-# Build prompt safely (file)
-# -------------------------
-PROMPT_TMP="$(mktemp)"
-TMP_FILES+=("$PROMPT_TMP")
-cat > "$PROMPT_TMP" <<'PROMPT_EOF'
-You are an expert Go maintainer. Produce a single unified git diff (patch) enclosed in triple backticks ``` that fixes the build / test / lint issues below.
-Only modify files if necessary: chachacrypt.go, go.mod, go.sum. Keep changes minimal and safe. If modifying go.mod, keep version bumps minimal and run 'go mod tidy'.
+# Build prompt file
+PROMPT_FILE="$(mktemp)"; TMPFILES+=("$PROMPT_FILE")
+cat > "$PROMPT_FILE" <<'PROMPT_EOF'
+You are an expert Go maintainer. Produce a single unified git diff patch (fenced with triple backticks) that fixes the build/test/lint issues below.
+Only modify files if necessary: chachacrypt.go, go.mod, go.sum. Keep behavior and interfaces stable. If modifying go.mod, keep changes minimal.
 PROMPT_EOF
 
 {
-  echo ""; echo "=== BUILD OUTPUT (truncated) ==="; sed -n '1,200p' "${ARTIFACT_DIR}/go-build-output.txt" 2>/dev/null || true
-  echo ""; echo "=== TEST OUTPUT (truncated) ==="; sed -n '1,200p' "${ARTIFACT_DIR}/go-test-output.txt" 2>/dev/null || true
-  echo ""; echo "=== LINT STDERR (truncated) ==="; sed -n '1,200p' "${ARTIFACT_DIR}/golangci.runtime.stderr" 2>/dev/null || true
-  echo ""; echo "=== FILE CONTEXT (first 200 lines each) ==="
+  echo ""; echo "=== BUILD ==="; sed -n '1,200p' "${ARTIFACT_DIR}/go-build-output.txt" 2>/dev/null || true
+  echo ""; echo "=== TEST ==="; sed -n '1,200p' "${ARTIFACT_DIR}/go-test-output.txt" 2>/dev/null || true
+  echo ""; echo "=== LINT STDERR ==="; sed -n '1,200p' "${ARTIFACT_DIR}/golangci.runtime.stderr" 2>/dev/null || true
+  echo ""; echo "=== FILES (first 200 lines) ==="
   for f in "${TARGET_FILES[@]}"; do [ -f "$f" ] && { echo "----- FILE: $f -----"; sed -n '1,200p' "$f"; echo; } || true; done
-} >> "$PROMPT_TMP"
+} >> "$PROMPT_FILE"
 
-# -------------------------
-# Build payload safely (jq preferred, python fallback)
-# -------------------------
-PAYLOAD_FILE="$(mktemp)"; TMP_FILES+=("$PAYLOAD_FILE")
+# Build JSON payload safely (jq preferred, python fallback)
+PAYLOAD_FILE="$(mktemp)"; TMPFILES+=("$PAYLOAD_FILE")
 if command -v jq >/dev/null 2>&1; then
   jq -n --arg model "$OPENROUTER_MODEL" \
         --arg sys "You are a precise Go patch generator. Provide a single fenced diff patch." \
-        --arg usr "$(sed -n '1,20000p' "$PROMPT_TMP")" \
+        --arg usr "$(sed -n '1,20000p' "$PROMPT_FILE")" \
         '{model:$model, messages:[{role:"system",content:$sys},{role:"user",content:$usr}], temperature:0.0, max_tokens:32768}' > "$PAYLOAD_FILE"
 else
-  # Write a short python helper script to build JSON safely (avoid inline $(...) with newlines)
-  PY_BUILD="$(mktemp)"; TMP_FILES+=("$PY_BUILD")
-  cat > "$PY_BUILD" <<'PYCODE'
+  PY_PAYLOAD="$(mktemp)"; TMPFILES+=("$PY_PAYLOAD")
+  cat > "$PY_PAYLOAD" <<'PYCODE'
 import json,sys
-MODEL = sys.argv[1]
-PROMPT_PATH = sys.argv[2]
-with open(PROMPT_PATH, 'r', encoding='utf-8') as f:
-    user_text = f.read()
-payload = {
-  "model": MODEL,
-  "messages": [
-    {"role":"system","content":"You are a precise Go patch generator. Provide a single fenced diff patch."},
-    {"role":"user","content": user_text}
-  ],
-  "temperature": 0.0,
-  "max_tokens": 32768
-}
-json.dump(payload, sys.stdout, ensure_ascii=False)
+model=sys.argv[1]; prompt_path=sys.argv[2]
+with open(prompt_path,'r',encoding='utf-8') as fh:
+    user=fh.read()
+payload={"model":model,"messages":[{"role":"system","content":"You are a precise Go patch generator. Provide a single fenced diff patch."},{"role":"user","content":user}],"temperature":0.0,"max_tokens":32768}
+json.dump(payload,sys.stdout,ensure_ascii=False)
 PYCODE
-  # run python3 or python
   if command -v python3 >/dev/null 2>&1; then
-    python3 "$PY_BUILD" "$OPENROUTER_MODEL" "$PROMPT_TMP" > "$PAYLOAD_FILE"
+    python3 "$PY_PAYLOAD" "$OPENROUTER_MODEL" "$PROMPT_FILE" > "$PAYLOAD_FILE"
   else
-    python "$PY_BUILD" "$OPENROUTER_MODEL" "$PROMPT_TMP" > "$PAYLOAD_FILE"
+    python "$PY_PAYLOAD" "$OPENROUTER_MODEL" "$PROMPT_FILE" > "$PAYLOAD_FILE"
   fi
 fi
 
-# -------------------------
 # Call OpenRouter
-# -------------------------
-RESPONSE_TMP="$(mktemp)"; TMP_FILES+=("$RESPONSE_TMP")
+RESPONSE_TMP="$(mktemp)"; TMPFILES+=("$RESPONSE_TMP")
 HTTP_CODE=$(curl -sS -X POST "https://api.openrouter.ai/v1/chat/completions" \
   -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
   -H "Content-Type: application/json" \
@@ -240,30 +182,24 @@ if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
   exit 0
 fi
 
-# -------------------------
-# Extract AI_CONTENT robustly (jq preferred, python fallback)
-# -------------------------
-AI_CONTENT=""
+# Extract AI content robustly
 if command -v jq >/dev/null 2>&1; then
   AI_CONTENT="$(jq -r '.choices[0].message.content // .choices[0].text // ""' "$RESPONSE_TMP" 2>/dev/null || true)"
 else
-  PY_EXTRACT="$(mktemp)"; TMP_FILES+=("$PY_EXTRACT")
+  PY_EXTRACT="$(mktemp)"; TMPFILES+=("$PY_EXTRACT")
   cat > "$PY_EXTRACT" <<'PYEX'
 import json,sys
 try:
-    obj=json.load(open(sys.argv[1], 'r', encoding='utf-8'))
-    choices = obj.get('choices') or []
-    if choices:
-        c=choices[0]
-        if isinstance(c, dict):
-            out = c.get('message',{}).get('content') or c.get('text') or ""
-        else:
-            out = ""
-    else:
-        out = ""
-    sys.stdout.write(out or "")
+  obj=json.load(open(sys.argv[1],'r',encoding='utf-8'))
+  choices=obj.get('choices') or []
+  if choices:
+    c=choices[0]
+    out=c.get('message',{}).get('content') or c.get('text') or ""
+  else:
+    out=""
+  sys.stdout.write(out or "")
 except Exception:
-    sys.stdout.write("")
+  sys.stdout.write("")
 PYEX
   if command -v python3 >/dev/null 2>&1; then
     AI_CONTENT="$(python3 "$PY_EXTRACT" "$RESPONSE_TMP" 2>/dev/null || true)"
@@ -272,12 +208,8 @@ PYEX
   fi
 fi
 
-# Always persist the raw AI response and extracted content
-echo "" > "$AI_RESP" || true
-if [ -n "${AI_CONTENT:-}" ]; then
-  printf "%s\n" "$AI_CONTENT" > "$AI_RESP" || true
-fi
-
+# Persist AI content and fail safely if empty
+printf "%s\n" "$AI_CONTENT" > "$AI_RESP" || true
 if [ -z "${AI_CONTENT:-}" ]; then
   echo "AI returned empty content; see $AI_RAW and $DIAG" >> "$DIAG"
   cp "$DIAG" "${ARTIFACT_DIR}/ai-diagnostics.txt" || true
@@ -285,23 +217,19 @@ if [ -z "${AI_CONTENT:-}" ]; then
   exit 0
 fi
 
-# -------------------------
-# Extract fenced patch (python preferred)
-# -------------------------
-PATCH_TMP="$(mktemp)"; TMP_FILES+=("$PATCH_TMP")
-PY_EXTRACT_PATCH="$(mktemp)"; TMP_FILES+=("$PY_EXTRACT_PATCH")
+# Extract fenced diff from AI_CONTENT using python (robust)
+PATCH_TMP="$(mktemp)"; TMPFILES+=("$PATCH_TMP")
+PY_EXTRACT_PATCH="$(mktemp)"; TMPFILES+=("$PY_EXTRACT_PATCH")
 cat > "$PY_EXTRACT_PATCH" <<'PYPATCH'
 import re,sys
-s = open(sys.argv[1],'r',encoding='utf-8').read()
-# find first fenced block (```diff or ```any)
-m = re.search(r'```(?:diff[^\n]*)?\n(.*?)\n```', s, re.S)
+s=open(sys.argv[1],'r',encoding='utf-8').read()
+m=re.search(r'```(?:diff[^\n]*)?\n(.*?)\n```',s,re.S)
 if not m:
-    m = re.search(r'```\s*\n(.*?)\n```', s, re.S)
+  m=re.search(r'```\s*\n(.*?)\n```',s,re.S)
 if m:
-    print(m.group(1))
+  print(m.group(1))
 else:
-    # fallback: print entire content if it's a plain patch
-    print("")
+  print("",end="")
 PYPATCH
 if command -v python3 >/dev/null 2>&1; then
   python3 "$PY_EXTRACT_PATCH" "$AI_RESP" > "$PATCH_TMP" || true
@@ -316,9 +244,7 @@ if [ ! -s "$PATCH_TMP" ]; then
   exit 0
 fi
 
-# -------------------------
-# Validate patch applies cleanly
-# -------------------------
+# Validate patch
 if ! git apply --check "$PATCH_TMP" > /tmp/ai_patch_check.out 2>&1; then
   echo "AI patch failed git apply --check" >> "$DIAG"
   cat /tmp/ai_patch_check.out >> "$DIAG" || true
@@ -334,9 +260,7 @@ git apply "$PATCH_TMP" || {
   exit 0
 }
 
-# -------------------------
-# Validate build & test after applying patch
-# -------------------------
+# Validate build/test after applying patch
 set +e
 go mod tidy >> "$VALIDATE_LOG" 2>&1 || true
 go build ./... >> "$VALIDATE_LOG" 2>&1
@@ -346,7 +270,7 @@ TEST_EXIT=$?
 set -e
 
 if [ "$BUILD_EXIT" -ne 0 ] || [ "$TEST_EXIT" -ne 0 ]; then
-  echo "Validation failed after AI patch; reverting changes" >> "$DIAG"
+  echo "Validation failed after AI patch; reverting" >> "$DIAG"
   git checkout -- . || true
   cp "$VALIDATE_LOG" "${ARTIFACT_DIR}/ai-validate.log" || true
   cp "$DIAG" "${ARTIFACT_DIR}/ai-diagnostics.txt" || true
@@ -354,9 +278,7 @@ if [ "$BUILD_EXIT" -ne 0 ] || [ "$TEST_EXIT" -ne 0 ]; then
   exit 0
 fi
 
-# -------------------------
-# Commit allowed files & push branch
-# -------------------------
+# Commit only allowed files and push branch
 CHANGED_NOW="$(git status --porcelain | awk '{print $2}' || true)"
 CHANGED_TARGETS=()
 for tf in "${TARGET_FILES[@]}"; do
@@ -366,7 +288,7 @@ for tf in "${TARGET_FILES[@]}"; do
 done
 
 if [ ${#CHANGED_TARGETS[@]} -eq 0 ]; then
-  echo "No allowed target files changed by AI patch" >> "$DIAG"
+  echo "AI patch did not change allowed target files" >> "$DIAG"
   cp "$DIAG" "${ARTIFACT_DIR}/ai-diagnostics.txt" || true
   echo "pr_branch=" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch="
   exit 0
@@ -390,5 +312,13 @@ git diff origin/main.."${BR}" > "$PATCH_AFTER" 2>/dev/null || true
 cp "$DIAG" "${ARTIFACT_DIR}/ai-diagnostics.txt" || true
 cp "$VALIDATE_LOG" "${ARTIFACT_DIR}/ai-validate.log" || true
 
-echo "pr_branch=${BR}" >> "${GITHUB_OUTPUT:-/dev/null}" || echo "pr_branch=${BR}"
+# Emit pr_branch to GITHUB_OUTPUT (if available)
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  echo "pr_branch=${BR}" >> "$GITHUB_OUTPUT"
+else
+  # fallback: print to stdout (create-pull-request expects step output)
+  echo "pr_branch=${BR}"
+fi
+
 exit 0
+ 
