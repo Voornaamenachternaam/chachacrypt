@@ -82,13 +82,13 @@ jobs:
           persist-credentials: true
           token: ${{ secrets.GH2_TOKEN }}
 
-      - name: Download artifacts (matrix)
+      - name: Download artifacts (matrix - ubuntu)
         uses: actions/download-artifact@v6.0.0
         with:
           name: matrix-artifacts-ubuntu-latest
           path: ci-artifacts/ubuntu-latest || true
 
-      - name: Download artifacts (windows)
+      - name: Download artifacts (matrix - windows)
         if: always()
         uses: actions/download-artifact@v6.0.0
         with:
@@ -106,10 +106,18 @@ jobs:
       - name: Ensure AI script is executable
         run: chmod +x .github/scripts/ai_refactor.sh
 
+      - name: Install jq (for payload parsing)
+        shell: bash
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
       - name: Run AI refactor script
         id: ai_run
+        shell: bash
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}   # REQUIRED: set this secret to the exact model name you want
           GH2_TOKEN: ${{ secrets.GH2_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_WORKSPACE: ${{ github.workspace }}
@@ -128,4 +136,4 @@ jobs:
           body: |
             Automated PR created by CI. The AI reviewed lint/build/test outputs and applied fixes to go.mod, go.sum, and chachacrypt.go.
           labels: automated, dependencies, ai-assisted
-          commit-message: automated change
+          commit-message: a utomated change
