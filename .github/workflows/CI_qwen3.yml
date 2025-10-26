@@ -99,8 +99,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p "${{ env.ARTIFACT_DIR }}"
-          cp -v ci-artifacts/ubuntu-latest/* "${{ env.ARTIFACT_DIR }}/" 2>/dev/null || true
-          cp -v ci-artifacts/windows-latest/* "${{ env.ARTIFACT_DIR }}/" 2>/dev/null || true
+          cp -vn ci-artifacts/ubuntu-latest/* "${{ env.ARTIFACT_DIR }}/" 2>/dev/null || true
+          cp -vn ci-artifacts/windows-latest/* "${{ env.ARTIFACT_DIR }}/" 2>/dev/null || true
           ls -la "${{ env.ARTIFACT_DIR }}" || true
 
       - name: Ensure AI script is executable
