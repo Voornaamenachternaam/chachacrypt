@@ -33,5 +33,5 @@ jobs:
       - name: golangci-lint
         uses: reviewdog/action-golangci-lint@v2.8.0
         with:
-          golangci_lint_flags: "--fix --enable-all --exclude-use-default=false"
+          golangci_lint_flags: "--fix --exclude-use-default=false"
 
