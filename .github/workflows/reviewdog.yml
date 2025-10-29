@@ -1,4 +1,4 @@
-name: reviewdog (golangci + SARIF)
+name: reviewdog (golangci + SARIF validated)
 
 permissions:
   actions: write
@@ -23,7 +23,7 @@ on:
 
 jobs:
   golangci-lint:
-    name: runner / golangci-lint (reviewdog + SARIF v2.5.0, no cache)
+    name: golangci-lint (v2.5.0) → validate/repair SARIF → upload → reviewdog
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
@@ -31,45 +31,141 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Make reports directory
+      - name: Ensure reports directory exists
         run: mkdir -p reports
 
-      - name: Run golangci-lint (generate SARIF)
+      - name: Run golangci-lint (official action) — create SARIF
         uses: golangci/golangci-lint-action@v8
         with:
           version: v2.5.0
-          # Request SARIF written to reports/golangci.sarif
           args: --output.sarif.path=reports/golangci.sarif
+          # force binary install (no internal cache restore)
           install-mode: binary
           verify: true
-          # --- disable cache restore/save in the golangci action:
+          # explicitly disable the action's caching behavior
           skip-cache: true
           skip-save-cache: true
-        # keep the job going even if linters report issues (we still want SARIF uploaded)
         continue-on-error: true
 
-      - name: Show reports directory (verify SARIF was created)
+      - name: Show SARIF file (proof it exists) and head
         run: |
           echo "PWD: $(pwd)"
+          echo "reports directory listing:"
           ls -la reports || true
+          echo "---- head of SARIF (first 200 lines) ----"
+          head -n 200 reports/golangci.sarif || true
 
-      - name: Upload SARIF to GitHub code scanning
+      - name: Validate SARIF (jq checks)
+        id: sarif_validate
+        run: |
+          set -euo pipefail
+          SARIF=reports/golangci.sarif
+          if [ ! -f "$SARIF" ]; then
+            echo "SARIF file missing: $SARIF"
+            exit 1
+          fi
+          # Check SARIF top-level version
+          VERSION=$(jq -r '.version // empty' "$SARIF" || echo "MISSING")
+          echo "detected SARIF.version=$VERSION"
+          if [ "$VERSION" != "2.1.0" ]; then
+            echo "WARN: SARIF version is '$VERSION' (expected '2.1.0'). We'll continue but GitHub prefers SARIF 2.1.0."
+          fi
+
+          # Count how many results exist
+          RESULTS_COUNT=$(jq '[.runs[]?.results[]?] | length' "$SARIF")
+          echo "results_count=$RESULTS_COUNT"
+          # Check for missing artifactLocation.uri occurrences
+          MISSING_URI_COUNT=$(jq '[.runs[]?.results[]?.locations[]?.physicalLocation?.artifactLocation?.uri // empty] | map(select(. == "")) | length' "$SARIF")
+          echo "missing_artifact_uri_count=$MISSING_URI_COUNT"
+          # Check for any region.startColumn < 1
+          BAD_STARTCOL=$(jq '[.runs[]?.results[]?.locations[]?.physicalLocation?.region?.startColumn // 1] | map(select(. < 1)) | length' "$SARIF")
+          echo "bad_start_column_count=$BAD_STARTCOL"
+
+          # Export counts for next step
+          echo "missing_uri_count=$MISSING_URI_COUNT" >> "$GITHUB_OUTPUT" || true
+          echo "bad_startcol_count=$BAD_STARTCOL" >> "$GITHUB_OUTPUT" || true
+          echo "results_count=$RESULTS_COUNT" >> "$GITHUB_OUTPUT" || true
+
+      - name: Repair SARIF if needed (Python) and write fixed file
+        if: steps.sarif_validate.outputs.missing_uri_count != '0' || steps.sarif_validate.outputs.bad_startcol_count != '0'
+        run: |
+          python - <<'PY'
+          import json, sys, os
+          path_in = "reports/golangci.sarif"
+          path_out = "reports/golangci.fixed.sarif"
+          s = json.load(open(path_in,'r', encoding='utf-8'))
+          # ensure top-level version (best-effort)
+          if s.get("version") != "2.1.0":
+              s["version"] = "2.1.0"
+          # prepare artifact uri map per run
+          for run in s.get("runs", []):
+              artifacts = run.get("artifacts", [])
+              artifact_uri_by_index = {}
+              for i, a in enumerate(artifacts):
+                  # artifact.location.uri is common; guard for nested shapes
+                  uri = None
+                  loc = a.get("location") or a.get("uri") or {}
+                  if isinstance(loc, dict):
+                      uri = loc.get("uri")
+                  elif isinstance(loc, str):
+                      uri = loc
+                  if uri:
+                      artifact_uri_by_index[i] = uri
+              # process results
+              for res in run.get("results", []):
+                  locs = res.get("locations") or []
+                  for loc in locs:
+                      pl = loc.get("physicalLocation") or {}
+                      art = pl.get("artifactLocation") or {}
+                      # if uri missing but index present, try to lookup
+                      if not art.get("uri") and art.get("index") is not None:
+                          idx = art.get("index")
+                          uri = artifact_uri_by_index.get(idx)
+                          if uri:
+                              art["uri"] = uri
+                              pl["artifactLocation"] = art
+                              loc["physicalLocation"] = pl
+                      # ensure region exists and startColumn >= 1 if present
+                      region = pl.get("region")
+                      if isinstance(region, dict):
+                          sc = region.get("startColumn")
+                          if isinstance(sc, int) and sc < 1:
+                              region["startColumn"] = 1
+                              pl["region"] = region
+                              loc["physicalLocation"] = pl
+              # update run
+              # done in place
+          # write out repaired SARIF
+          json.dump(s, open(path_out, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+          print("Wrote repaired SARIF:", path_out)
+          PY
+
+      - name: Choose SARIF file to upload (original or repaired) and show summary
+        id: choose_sarif
+        run: |
+          if [ -f reports/golangci.fixed.sarif ]; then
+            echo "sarif_file=reports/golangci.fixed.sarif" >> "$GITHUB_OUTPUT"
+            echo "Using repaired SARIF (reports/golangci.fixed.sarif)"
+            wc -c reports/golangci.fixed.sarif || true
+          else
+            echo "sarif_file=reports/golangci.sarif" >> "$GITHUB_OUTPUT"
+            echo "Using original SARIF (reports/golangci.sarif)"
+            wc -c reports/golangci.sarif || true
+          fi
+
+      - name: Upload SARIF to GitHub Code Scanning
         uses: github/codeql-action/upload-sarif@v4
         with:
-          # use relative path (no spaces, avoid long absolute expressions to prevent YAML wrapping)
-          sarif_file: reports/golangci.sarif
+          sarif_file: ${{ steps.choose_sarif.outputs.sarif_file }}
           wait-for-processing: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Post reviewdog annotations to PR (optional)
+      - name: Run reviewdog (post PR annotations) — same golangci version, no cache
         uses: reviewdog/action-golangci-lint@v2.8.0
         with:
-          # Give reviewdog the same golangci-lint version
           golangci_lint_version: v2.5.0
-          # If you want automatic fixes (same as your earlier run), keep --fix. Otherwise remove it.
-          golangci_lint_flags: --fix
-          # Do NOT use the cache
+          golangci_lint_flags: "--fix"
           cache: false
-          # reporter you used earlier
           reporter: github-pr-check
           github_token: ${{ secrets.GITHUB_TOKEN }}
+ 
