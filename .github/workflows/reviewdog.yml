@@ -33,4 +33,4 @@ jobs:
       - name: golangci-lint
         uses: reviewdog/action-golangci-lint@v2.8.0
         with:
-          golangci_lint_flags: "--run --fix --completion"
+          golangci_lint_flags: "--run --fix"
