@@ -46,7 +46,7 @@ jobs:
           # choose a golangci-lint version that supports v2 output flags; `v2.1` is compatible with the action v8.
           version: v2.5.0
           # args: IMPORTANT: use '=' between flags and values (action parses args by spaces).
-          args: "--fixc--output.sarif.path=reports/golangci.sarif --output.path-mode=abs"
+          args: "--fix --output.sarif.path=reports/golangci.sarif --output.path-mode=abs"
         # allow the job to continue to the SARIF upload even if lint reports non-zero exit
         continue-on-error: true
 
