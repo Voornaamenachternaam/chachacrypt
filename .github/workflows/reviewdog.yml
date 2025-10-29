@@ -1,7 +1,8 @@
 name: reviewdog
 
+# keep (and extend) the permissions your original workflow used
 permissions:
-  actions: write
+  actions: read                 # recommended for some SARIF upload cases (see notes/citation)
   checks: write
   contents: write
   deployments: write
@@ -12,9 +13,9 @@ permissions:
   pages: write
   pull-requests: write
   repository-projects: write
-  security-events: write
+  security-events: write        # required to upload SARIF -> code scanning
   statuses: write
-  
+
 on:
   schedule:
     - cron: '0 2 * * *'
@@ -23,19 +24,36 @@ on:
 
 jobs:
   golangci-lint:
-    name: runner / golangci-lint
+    name: runner / golangci-lint (reviewdog + SARIF)
     runs-on: ubuntu-latest
     steps:
       - name: Check out code into the Go module directory
         uses: actions/checkout@v5.0.0
         with:
           fetch-depth: 0
-      - name: golangci-lint
-        uses: reviewdog/action-golangci-lint@v2.8.0
+
+      # Install Go (required by the official golangci-lint action v8)
+      - name: Set up Go (for generating SARIF)
+        uses: actions/setup-go@v6
         with:
-          golangci_lint_flags: "--fix"
-      - name: Upload SARIF file to GitHub
-        uses: github/codeql-action/upload-sarif@main
+          go-version: stable
+
+      # Generate a SARIF file using the official golangci-lint action.
+      # Note: the action's `args` input accepts golangci-lint command flags.
+      - name: Generate SARIF with golangci-lint
+        uses: golangci/golangci-lint-action@v8
         with:
-          sarif_file: "${{steps.reviewdog.outputs.sarif_output}}"
-          category: reviewdog
+          # choose a golangci-lint version that supports v2 output flags; `v2.1` is compatible with the action v8.
+          version: v2.5.0
+          # args: IMPORTANT: use '=' between flags and values (action parses args by spaces).
+          args: "--fixc--output.sarif.path=reports/golangci.sarif --output.path-mode=abs"
+        # allow the job to continue to the SARIF upload even if lint reports non-zero exit
+        continue-on-error: true
+
+      # Upload the SARIF file to GitHub Code Scanning (always run so we get results even on failures)
+      - name: Upload SARIF file to GitHub Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          # path relative to repository root where the SARIF file was written
+          sarif_file: reports/golangci.sarif
