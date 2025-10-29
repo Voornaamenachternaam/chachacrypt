@@ -36,15 +36,7 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
           check-latest: true
-          cache: true
-
-      - name: Cache modules & build cache
-        uses: actions/cache@v4.3.0
-        with:
-          path: |
-            ~/.cache/go-build
-            ${{ runner.os }}-go-mod-cache
-          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+          cache: false
 
       - name: Install small tooling & run checks
         shell: bash
