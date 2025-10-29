@@ -1,7 +1,7 @@
-name: reviewdog
+name: reviewdog (golangci + SARIF)
 
 permissions:
-  actions: read
+  actions: write
   checks: write
   contents: write
   deployments: write
@@ -23,41 +23,53 @@ on:
 
 jobs:
   golangci-lint:
-    name: runner / golangci-lint (reviewdog + SARIF v2.5.0)
+    name: runner / golangci-lint (reviewdog + SARIF v2.5.0, no cache)
     runs-on: ubuntu-latest
     steps:
-      - name: Check out code into the Go module directory
-        uses: actions/checkout@v5.0.0
+      - name: Check out code
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - name: Run reviewdog (keep original behavior)
-        uses: reviewdog/action-golangci-lint@v2.8.0
-        with:
-          golangci_lint_flags: "--fix"
-
-      # Setup Go before using the official golangci-lint action (required for recent action versions)
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: stable
-
-      # Ensure directory for SARIF exists (golangci-lint won't create parent dirs)
-      - name: Ensure reports directory exists
+      - name: Make reports directory
         run: mkdir -p reports
 
-      # Run golangci-lint (official action) and write SARIF to reports/golangci.sarif
-      - name: Generate SARIF with golangci-lint v2.5.0
+      - name: Run golangci-lint (generate SARIF)
         uses: golangci/golangci-lint-action@v8
         with:
           version: v2.5.0
-          # Important: use '=' between flag name and value (action parses args by spaces).
+          # Request SARIF written to reports/golangci.sarif
           args: --output.sarif.path=reports/golangci.sarif
+          install-mode: binary
+          verify: true
+          # --- disable cache restore/save in the golangci action:
+          skip-cache: true
+          skip-save-cache: true
+        # keep the job going even if linters report issues (we still want SARIF uploaded)
         continue-on-error: true
 
-      # Upload SARIF to GitHub Code Scanning; use absolute path to avoid "Path does not exist"
-      - name: Upload SARIF file to GitHub Code Scanning
-        if: always()
+      - name: Show reports directory (verify SARIF was created)
+        run: |
+          echo "PWD: $(pwd)"
+          ls -la reports || true
+
+      - name: Upload SARIF to GitHub code scanning
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: ${{ github.workspace }}/reports/golangc i.sarif
+          # use relative path (no spaces, avoid long absolute expressions to prevent YAML wrapping)
+          sarif_file: reports/golangci.sarif
+          wait-for-processing: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Post reviewdog annotations to PR (optional)
+        uses: reviewdog/action-golangci-lint@v2.8.0
+        with:
+          # Give reviewdog the same golangci-lint version
+          golangci_lint_version: v2.5.0
+          # If you want automatic fixes (same as your earlier run), keep --fix. Otherwise remove it.
+          golangci_lint_flags: --fix
+          # Do NOT use the cache
+          cache: false
+          # reporter you used earlier
+          reporter: github-pr-check
+          github_token: ${{ secrets.GITHUB_TOKEN }}
