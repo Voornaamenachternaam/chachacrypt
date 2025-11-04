@@ -1,4 +1,3 @@
-// Package main provides a secure file encryption and decryption utility using Argon2id key derivation and XChaCha20-Poly1305 AEAD.
 package main
 
 import (
@@ -295,7 +294,7 @@ func main() {
 		}
 	case "dec":
 		if err := handleDecrypt(context.Background()); err != nil {
-			log.Fatalf("Processing failed: %v", err) // Generic error message
+			log.Fatalf("Processing failed: %v", err) // Generic error
 		}
 	case "pw":
 		if err := handlePasswordGen(); err != nil {
@@ -880,7 +879,7 @@ func processKeyRotation(ctx context.Context, inFile, outFile *os.File, key *Secu
 func generateSalt(saltSize uint32) (*SecureBuffer, error) {
 	salt := NewSecureBuffer(int(saltSize))
 	if _, err := csprng.Read(salt.Bytes()); err != nil {
-		return nil, fmt.Errorf("salt generation failed: %w", err) // Generic error
+		return nil, fmt.Errorf("salt generation failed: %w", err)
 	}
 	return salt, nil
 }
@@ -911,17 +910,17 @@ func createHeader(cfg config) (FileHeader, error) {
 func writeHeader(outFile *os.File, header FileHeader) error {
 	var headerBuf bytes.Buffer
 	if err := binary.Write(&headerBuf, binary.LittleEndian, header); err != nil {
-		return fmt.Errorf("header serialization failed: %w", err) // Generic error
+		return fmt.Errorf("header serialization failed: %w", err)
 	}
 	if _, err := outFile.Write(headerBuf.Bytes()); err != nil {
-		return fmt.Errorf("header write failed: %w", err) // Generic error
+		return fmt.Errorf("header write failed: %w", err)
 	}
 	return nil
 }
 
 func writeSalt(outFile *os.File, salt []byte) error {
 	if _, err := outFile.Write(salt); err != nil {
-		return fmt.Errorf("salt write failed: %w", err) // Generic error
+		return fmt.Errorf("salt write failed: %w", err)
 	}
 	return nil
 }
@@ -939,7 +938,7 @@ func deriveKey(password []byte, salt []byte, header FileHeader) (*SecureBuffer, 
 	aead, err := chacha20poly1305.NewX(key.Bytes())
 	if err != nil {
 		key.Zero()
-		return nil, fmt.Errorf("AEAD initialization failed: %w", err) // Generic error
+		return nil, fmt.Errorf("AEAD initialization failed: %w", err)
 	}
 	_ = aead // Prevent optimization
 	return key, nil
@@ -948,7 +947,7 @@ func deriveKey(password []byte, salt []byte, header FileHeader) (*SecureBuffer, 
 func processFile(ctx context.Context, inFile *os.File, outFile *os.File, key *SecureBuffer, cfg config, header FileHeader) error {
 	aead, err := chacha20poly1305.NewX(key.Bytes())
 	if err != nil {
-		return fmt.Errorf("AEAD initialization failed: %w", err) // Generic error
+		return fmt.Errorf("AEAD initialization failed: %w", err)
 	}
 
 	plainBuf := NewSecureBuffer(cfg.ChunkSize)
@@ -956,7 +955,7 @@ func processFile(ctx context.Context, inFile *os.File, outFile *os.File, key *Se
 
 	baseAAD, err := buildEnhancedAAD(header, 0)
 	if err != nil {
-		return fmt.Errorf("AAD construction failed: %w", err) // Generic error
+		return fmt.Errorf("AAD construction failed: %w", err)
 	}
 
 	var seq uint64
@@ -970,7 +969,7 @@ func processFile(ctx context.Context, inFile *os.File, outFile *os.File, key *Se
 		n, readErr := inFile.Read(plainBuf.Bytes())
 		if n > 0 {
 			if err := encryptChunk(outFile, plainBuf.Bytes()[:n], aead, baseAAD, seq, header); err != nil {
-				return fmt.Errorf("encryption failed for chunk %d: %w", seq, err) // Generic error
+				return fmt.Errorf("encryption failed for chunk %d: %w", seq, err)
 			}
 			plainBuf.Zero()
 			seq++
@@ -979,7 +978,7 @@ func processFile(ctx context.Context, inFile *os.File, outFile *os.File, key *Se
 			break
 		}
 		if readErr != nil {
-			return fmt.Errorf("read failed: %w", readErr) // Generic error
+			return fmt.Errorf("read failed: %w", readErr)
 		}
 	}
 	return nil
@@ -988,32 +987,32 @@ func processFile(ctx context.Context, inFile *os.File, outFile *os.File, key *Se
 func encryptChunk(outFile *os.File, plainBuf []byte, aead *chacha20poly1305.X, baseAAD []byte, seq uint64, header FileHeader) error {
 	nonce := make([]byte, aead.NonceSize())
 	if _, err := csprng.Read(nonce); err != nil {
-		return fmt.Errorf("nonce generation failed: %w", err) // Generic error
+		return fmt.Errorf("nonce generation failed: %w", err)
 	}
 
 	aad, err := buildEnhancedAAD(header, seq)
 	if err != nil {
-		return fmt.Errorf("AAD construction failed: %w", err) // Generic error
+		return fmt.Errorf("AAD construction failed: %w", err)
 	}
 
 	ct := aead.Seal(nil, nonce, plainBuf, aad.Bytes())
 
 	if err := writeChunk(outFile, nonce, ct); err != nil {
-		return fmt.Errorf("chunk write failed: %w", err) // Generic error
+		return fmt.Errorf("chunk write failed: %w", err)
 	}
 	return nil
 }
 
 func writeChunk(outFile *os.File, nonce []byte, ct []byte) error {
 	if _, err := outFile.Write(nonce); err != nil {
-		return fmt.Errorf("nonce write failed: %w", err) // Generic error
+		return fmt.Errorf("nonce write failed: %w", err)
 	}
 	var clen = uint32(len(ct))
 	if err := binary.Write(outFile, binary.LittleEndian, clen); err != nil {
-		return fmt.Errorf("length write failed: %w", err) // Generic error
+		return fmt.Errorf("length write failed: %w", err)
 	}
 	if _, err := outFile.Write(ct); err != nil {
-		return fmt.Errorf("ciphertext write failed: %w", err) // Generic error
+		return fmt.Errorf("ciphertext write failed: %w", err)
 	}
 	return nil
 }
@@ -1030,23 +1029,23 @@ func buildAAD(baseAAD []byte, seq uint64) ([]byte, error) {
 func readHeader(inFile *os.File) (FileHeader, error) {
 	var header FileHeader
 	if err := binary.Read(inFile, binary.LittleEndian, &header); err != nil {
-		return FileHeader{}, fmt.Errorf("header read failed: %w", err) // Generic error
+		return FileHeader{}, fmt.Errorf("header read failed: %w", err)
 	}
 
 	// Enhanced validation
 	if string(header.Magic[:8]) != MagicNumber {
-		return FileHeader{}, errors.New("invalid file format") // Generic error
+		return FileHeader{}, errors.New("invalid file format")
 	}
 
 	// Version migration support
 	if header.Version > FileVersion {
-		return FileHeader{}, fmt.Errorf("unsupported file version: %d", header.Version) // Generic error
+		return FileHeader{}, fmt.Errorf("unsupported file version: %d", header.Version)
 	}
 
 	// Validate padding bytes
 	for i, b := range header.Padding {
 		if b != 0 {
-			return FileHeader{}, fmt.Errorf("non-zero padding at byte %d", i) // Generic error
+			return FileHeader{}, fmt.Errorf("non-zero padding at byte %d", i)
 		}
 	}
 
@@ -1055,12 +1054,12 @@ func readHeader(inFile *os.File) (FileHeader, error) {
 
 func readSalt(inFile *os.File, saltSize uint32) (*SecureBuffer, error) {
 	if saltSize < 16 || saltSize > maxSaltSize {
-		return nil, errors.New("invalid salt size") // Generic error
+		return nil, errors.New("invalid salt size")
 	}
 	salt := NewSecureBuffer(int(saltSize))
 	if _, err := io.ReadFull(inFile, salt.Bytes()); err != nil {
 		salt.Zero()
-		return nil, fmt.Errorf("salt read failed: %w", err) // Generic error
+		return nil, fmt.Errorf("salt read failed: %w", err)
 	}
 	return salt, nil
 }
@@ -1068,17 +1067,17 @@ func readSalt(inFile *os.File, saltSize uint32) (*SecureBuffer, error) {
 func decryptProcess(ctx context.Context, inFile *os.File, outFile *os.File, key *SecureBuffer, header FileHeader) error {
 	aead, err := chacha20poly1305.NewX(key.Bytes())
 	if err != nil {
-		return fmt.Errorf("AEAD initialization failed: %w", err) // Generic error
+		return fmt.Errorf("AEAD initialization failed: %w", err)
 	}
 
 	nonceSize := int(header.NonceSize)
 	if nonceSize != aead.NonceSize() {
-		return errors.New("invalid file format") // Generic error
+		return errors.New("invalid file format")
 	}
 
 	baseAAD, err := buildEnhancedAAD(header, 0)
 	if err != nil {
-		return fmt.Errorf("AAD construction failed: %w", err) // Generic error
+		return fmt.Errorf("AAD construction failed: %w", err)
 	}
 
 	var seq uint64
@@ -1094,12 +1093,12 @@ func decryptProcess(ctx context.Context, inFile *os.File, outFile *os.File, key 
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("processing failed for chunk %d: %w", seq, err) // Generic error
+			return fmt.Errorf("processing failed for chunk %d: %w", seq, err)
 		}
 
 		if _, err := outFile.Write(plain); err != nil {
 			zeroBytes(plain)
-			return fmt.Errorf("write failed: %w", err) // Generic error
+			return fmt.Errorf("write failed: %w", err)
 		}
 		zeroBytes(plain)
 
@@ -1113,30 +1112,30 @@ func decryptChunk(inFile *os.File, aead *chacha20poly1305.X, baseAAD []byte, non
 	if _, err := io.ReadFull(inFile, nonce); err == io.EOF {
 		return nil, io.EOF
 	} else if err != nil {
-		return nil, fmt.Errorf("nonce read failed: %w", err) // Generic error
+		return nil, fmt.Errorf("nonce read failed: %w", err)
 	}
 
 	var clen uint32
 	if err := binary.Read(inFile, binary.LittleEndian, &clen); err != nil {
-		return nil, fmt.Errorf("length read failed: %w", err) // Generic error
+		return nil, fmt.Errorf("length read failed: %w", err)
 	}
 	if clen > uint32(maxChunkSize) {
-		return nil, errors.New("chunk size exceeds limit") // Generic error
+		return nil, errors.New("chunk size exceeds limit")
 	}
 	ct := make([]byte, clen)
 	if _, err := io.ReadFull(inFile, ct); err != nil {
-		return nil, fmt.Errorf("ciphertext read failed: %w", err) // Generic error
+		return nil, fmt.Errorf("ciphertext read failed: %w", err)
 	}
 
 	aad, err := buildEnhancedAAD(header, seq)
 	if err != nil {
-		return nil, fmt.Errorf("AAD construction failed: %w", err) // Generic error
+		return nil, fmt.Errorf("AAD construction failed: %w", err)
 	}
 
 	plain, err := aead.Open(nil, nonce, ct, aad.Bytes())
 	zeroBytes(ct)
 	if err != nil {
-		return nil, errors.New("processing failed - data corrupted or wrong key") // Generic error
+		return nil, errors.New("processing failed - data corrupted or wrong key")
 	}
 	return plain, nil
 }
