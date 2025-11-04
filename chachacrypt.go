@@ -1109,7 +1109,7 @@ func decryptProcess(ctx context.Context, inFile *os.File, outFile *os.File, key 
 	return nil
 }
 
-func decryptChunk(inFile *os.File, aead cipher.AEAD, baseAAD []byte, nonceSize int, seq uint64, header FileHeader) ([]byte, error) {
+func decryptChunk(inFile *os.File, aead cipher.AEAD, baseAAD []byte, seq uint64, header FileHeader) ([]byte, error) {
 	nonce := make([]byte, nonceSize)
 	if _, err := io.ReadFull(inFile, nonce); err == io.EOF {
 		return nil, io.EOF
