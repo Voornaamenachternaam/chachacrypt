@@ -1,3 +1,4 @@
+// chachacrypt.go
 package main
 
 import (
@@ -984,7 +985,7 @@ func processFile(ctx context.Context, inFile *os.File, outFile *os.File, key *Se
 	return nil
 }
 
-func encryptChunk(outFile *os.File, plainBuf []byte, aead *chacha20poly1305.X, baseAAD []byte, seq uint64, header FileHeader) error {
+func encryptChunk(outFile *os.File, plainBuf []byte, aead *chacha20poly1305.XChaCha20Poly1305, baseAAD []byte, seq uint64, header FileHeader) error {
 	nonce := make([]byte, aead.NonceSize())
 	if _, err := csprng.Read(nonce); err != nil {
 		return fmt.Errorf("nonce generation failed: %w", err)
@@ -995,7 +996,7 @@ func encryptChunk(outFile *os.File, plainBuf []byte, aead *chacha20poly1305.X, b
 		return fmt.Errorf("AAD construction failed: %w", err)
 	}
 
-	ct := aead.Seal(nil, nonce, plainBuf, aad.Bytes())
+	ct := aead.Seal(nil, nonce, plainBuf, aad)
 
 	if err := writeChunk(outFile, nonce, ct); err != nil {
 		return fmt.Errorf("chunk write failed: %w", err)
@@ -1107,7 +1108,7 @@ func decryptProcess(ctx context.Context, inFile *os.File, outFile *os.File, key 
 	return nil
 }
 
-func decryptChunk(inFile *os.File, aead *chacha20poly1305.X, baseAAD []byte, nonceSize int, seq uint64, header FileHeader) ([]byte, error) {
+func decryptChunk(inFile *os.File, aead *chacha20poly1305.XChaCha20Poly1305, baseAAD []byte, nonceSize int, seq uint64, header FileHeader) ([]byte, error) {
 	nonce := make([]byte, nonceSize)
 	if _, err := io.ReadFull(inFile, nonce); err == io.EOF {
 		return nil, io.EOF
@@ -1132,7 +1133,7 @@ func decryptChunk(inFile *os.File, aead *chacha20poly1305.X, baseAAD []byte, non
 		return nil, fmt.Errorf("AAD construction failed: %w", err)
 	}
 
-	plain, err := aead.Open(nil, nonce, ct, aad.Bytes())
+	plain, err := aead.Open(nil, nonce, ct, aad)
 	zeroBytes(ct)
 	if err != nil {
 		return nil, errors.New("processing failed - data corrupted or wrong key")
