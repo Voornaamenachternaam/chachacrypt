@@ -4,6 +4,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -985,7 +986,7 @@ func processFile(ctx context.Context, inFile *os.File, outFile *os.File, key *Se
 	return nil
 }
 
-func encryptChunk(outFile *os.File, plainBuf []byte, aead *chacha20poly1305.XChaCha20Poly1305, baseAAD []byte, seq uint64, header FileHeader) error {
+func encryptChunk(outFile *os.File, plainBuf []byte, aead cipher.AEAD, baseAAD []byte, seq uint64, header FileHeader) error {
 	nonce := make([]byte, aead.NonceSize())
 	if _, err := csprng.Read(nonce); err != nil {
 		return fmt.Errorf("nonce generation failed: %w", err)
@@ -1108,7 +1109,7 @@ func decryptProcess(ctx context.Context, inFile *os.File, outFile *os.File, key 
 	return nil
 }
 
-func decryptChunk(inFile *os.File, aead *chacha20poly1305.XChaCha20Poly1305, baseAAD []byte, nonceSize int, seq uint64, header FileHeader) ([]byte, error) {
+func decryptChunk(inFile *os.File, aead cipher.AEAD, baseAAD []byte, nonceSize int, seq uint64, header FileHeader) ([]byte, error) {
 	nonce := make([]byte, nonceSize)
 	if _, err := io.ReadFull(inFile, nonce); err == io.EOF {
 		return nil, io.EOF
