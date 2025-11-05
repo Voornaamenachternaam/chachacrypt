@@ -24,7 +24,7 @@ jobs:
       available_labels: '${{ steps.get_labels.outputs.available_labels }}'
       selected_labels: '${{ env.SELECTED_LABELS }}'
     permissions:
-      contents: 'read'
+      contents: 'write'
       id-token: 'write'
       issues: 'read'
       pull-requests: 'read'
