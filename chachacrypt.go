@@ -53,8 +53,8 @@ const (
 	maxKeySize     = 1 << 8  // 256 bytes key size upper bound (tightened)
 
 	// CSPRNG validation constants
-	entropyCheckSize = 4096  // bytes to sample for entropy check
-	minEntropyBits   = 7.5 // minimum entropy per byte (NIST SP 800-22)
+	entropyCheckSize = 4096 // bytes to sample for entropy check
+	minEntropyBits   = 7.5  // minimum entropy per byte (NIST SP 800-22)
 
 	// Key rotation constants
 	maxKeyVersion = 255
@@ -80,35 +80,35 @@ func (r *CSPRNGReader) Read(p []byte) (n int, err error) {
 
 // checkEntropy validates entropy per NIST SP 800-22
 func (r *CSPRNGReader) checkEntropy(sample []byte) error {
-    if len(sample) < entropyCheckSize/2 {
-        return errors.New("insufficient sample size for entropy check")
-    }
+	if len(sample) < entropyCheckSize/2 {
+		return errors.New("insufficient sample size for entropy check")
+	}
 
-    // Calculate Shannon entropy (empirical / plug-in)
-    freq := make(map[byte]int)
-    for _, b := range sample {
-        freq[b]++
-    }
-    entropy := 0.0
-    for _, count := range freq {
-        p := float64(count) / float64(len(sample))
-        // use math.Log2 for clarity and to avoid relying on an external helper
-        entropy -= p * math.Log2(p)
-    }
+	// Calculate Shannon entropy (empirical / plug-in)
+	freq := make(map[byte]int)
+	for _, b := range sample {
+		freq[b]++
+	}
+	entropy := 0.0
+	for _, count := range freq {
+		p := float64(count) / float64(len(sample))
+		// use math.Log2 for clarity and to avoid relying on an external helper
+		entropy -= p * math.Log2(p)
+	}
 
-    // maximum empirical entropy possible given sample size:
-    maxPossible := math.Log2(math.Min(256.0, float64(len(sample))))
-    if minEntropyBits > maxPossible {
-        return fmt.Errorf(
-            "sample too small for required entropy: sample=%d, max_possible=%.6f, required=%.6f",
-            len(sample), maxPossible, minEntropyBits,
-        )
-    }
+	// maximum empirical entropy possible given sample size:
+	maxPossible := math.Log2(math.Min(256.0, float64(len(sample))))
+	if minEntropyBits > maxPossible {
+		return fmt.Errorf(
+			"sample too small for required entropy: sample=%d, max_possible=%.6f, required=%.6f",
+			len(sample), maxPossible, minEntropyBits,
+		)
+	}
 
-    if entropy < minEntropyBits {
-        return fmt.Errorf("insufficient entropy: %f < %f", entropy, minEntropyBits)
-    }
-    return nil
+	if entropy < minEntropyBits {
+		return fmt.Errorf("insufficient entropy: %f < %f", entropy, minEntropyBits)
+	}
+	return nil
 }
 
 // log2 calculates log base 2
