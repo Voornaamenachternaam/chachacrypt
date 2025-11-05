@@ -1,0 +1,20 @@
+name: Auto-generate PR using Aider
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  generate:
+    uses: mirrajabi/aider-github-workflows/.github/workflows/aider-issue-to-pr.yml@v1.1.0
+    # Check if the label is 'aider'
+    if: github.event.label.name == 'aider'
+    with:
+      issue-number: ${{ github.event.issue.number }}
+      base-branch: ${{ github.event.repository.default_branch }}
+      # Exit if the action is taking longer than 10 minutes
+      chat-timeout: 10
+      api_key_env_name: OPENROUTER_API_KEY
+      model: openai/gpt-oss-20b:free
+    secrets: 
+      api_key_env_value: ${{ secrets.OPENROUTER_API_KEY }}
+
