@@ -4,28 +4,39 @@ name: Superlint
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited, ready_for_review]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * *'
 
 # minimal workflow-level permission; per-job overrides below
 permissions:
-  contents: read
+  contents: write
+  checks: write
+  pull-requests: write
+  security-events: write
+  statuses: write
+  issues: write
 
 jobs:
   lint:
     name: Lint (check-only)
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      # allow status checks reporting
+      contents: write
+      checks: write
+      pull-requests: write
+      security-events: write
       statuses: write
+      issues: write
     steps:
       - name: Checkout repository (for lint check)
-        uses: actions/checkout@v5
+        uses: actions/checkout@v5.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Super-Linter (check-only)
-        uses: super-linter/super-linter@v8.1.0
+        uses: super-linter/super-linter@v8.2.1
         # check-only: do NOT enable FIX_* here
         env:
           # Use the repo secret you requested (exposed as GITHUB_TOKEN for the container)
@@ -40,14 +51,18 @@ jobs:
     # write permission needed to push commits & update statuses
     permissions:
       contents: write
+      checks: write
+      pull-requests: write
+      security-events: write
       statuses: write
+      issues: write
     # set the GITHUB_TOKEN to your secret so downstream steps/actions use that token
     env:
       GITHUB_TOKEN: ${{ secrets.GH2_TOKEN }}
 
     steps:
       - name: Checkout PR head branch (full history)
-        uses: actions/checkout@v5
+        uses: actions/checkout@v5.0.0
         with:
           # make sure we check out the PR head branch (not a detached commit)
           ref: ${{ github.event.pull_request.head.ref }}
@@ -57,7 +72,7 @@ jobs:
           persist-credentials: false
 
       - name: Super-Linter (auto-fix for Go)
-        uses: super-linter/super-linter@v8.1.0
+        uses: super-linter/super-linter@v8.2.1
         env:
           # expose the token requested by you as GITHUB_TOKEN inside the container
           GITHUB_TOKEN: ${{ secrets.GH2_TOKEN }}
@@ -81,7 +96,7 @@ jobs:
         if: >
           github.event_name == 'pull_request' &&
           github.ref_name != github.event.repository.default_branch
-        uses: stefanzweifel/git-auto-commit-action@v6
+        uses: stefanzweifel/git-auto-commit-action@v7.0.0
         with:
           # push back to the same branch that opened the PR
           branch: ${{ github.event.pull_request.head.ref || github.head_ref || github.ref }}
