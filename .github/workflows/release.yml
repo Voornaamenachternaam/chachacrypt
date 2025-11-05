@@ -17,10 +17,10 @@ jobs:
         include:
           - goos: linux
             goarch: amd64
-            goamd64: v3
+            goamd64: v2
           - goos: windows
             goarch: amd64
-            goamd64: v3
+            goamd64: v2
           - goos: linux
             goarch: arm64
 
@@ -35,5 +35,5 @@ jobs:
           # Only include goamd64 when defined (i.e. amd64)
           goamd64: ${{ matrix.goamd64 || '' }}
           executable_compression: upx
-          goversion: '1.25.1'
+          goversion: '1.25.3'
           ldflags: -s -w
