@@ -266,19 +266,37 @@ func buildEnhancedAAD(header FileHeader, chunkSeq uint64) ([]byte, error) {
 	var aad bytes.Buffer
 
 	// Bind all critical metadata
-	binary.Write(&aad, binary.LittleEndian, header.Magic)
-	aad.WriteByte(header.Version)
-	binary.Write(&aad, binary.LittleEndian, header.ArgonTime)
-	binary.Write(&aad, binary.LittleEndian, header.ArgonMem)
-	aad.WriteByte(header.ArgonUtil)
-	binary.Write(&aad, binary.LittleEndian, header.KeySize)
-	aad.WriteByte(header.KeyVersion)
-	binary.Write(&aad, binary.LittleEndian, header.Timestamp)
+	if err := binary.Write(&aad, binary.LittleEndian, header.Magic); err != nil {
+		return nil, err
+	}
+	if err := aad.WriteByte(header.Version); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(&aad, binary.LittleEndian, header.ArgonTime); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(&aad, binary.LittleEndian, header.ArgonMem); err != nil {
+		return nil, err
+	}
+	if err := aad.WriteByte(header.ArgonUtil); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(&aad, binary.LittleEndian, header.KeySize); err != nil {
+		return nil, err
+	}
+	if err := aad.WriteByte(header.KeyVersion); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(&aad, binary.LittleEndian, header.Timestamp); err != nil {
+		return nil, err
+	}
 
 	// Bind chunk sequence number
 	var seqBytes [8]byte
 	binary.BigEndian.PutUint64(seqBytes[:], chunkSeq)
-	aad.Write(seqBytes[:])
+	if _, err := aad.Write(seqBytes[:]); err != nil {
+		return nil, err
+	}
 
 	return aad.Bytes(), nil
 }
@@ -634,7 +652,9 @@ func encryptFile(ctx context.Context, inputFile, outputFile string, password *Se
 	if err != nil {
 		return fmt.Errorf("salt generation failed: %w", err) // Generic error
 	}
-	defer salt.Close()
+	if err := salt.Close(); err != nil {
+		log.Printf("close error: %v", err)
+	}
 
 	header, err := createHeader(cfg)
 	if err != nil {
@@ -665,7 +685,9 @@ func encryptFile(ctx context.Context, inputFile, outputFile string, password *Se
 	if err != nil {
 		return fmt.Errorf("key derivation failed: %w", err) // Generic error
 	}
-	defer key.Close()
+	if err := key.Close(); err != nil {
+		log.Printf("close error: %v", err)
+	}
 
 	return processFile(ctx, inFile, outFile, key, cfg, header)
 }
@@ -704,7 +726,9 @@ func decryptFile(ctx context.Context, inputFile, outputFile string, password []b
 	if err != nil {
 		return fmt.Errorf("salt read failed: %w", err) // Generic error
 	}
-	defer salt.Close()
+	if err := salt.Close(); err != nil {
+		log.Printf("close error: %v", err)
+	}
 
 	// Verify file integrity before proceeding
 	if err := verifyFileIntegrity(header, salt.Bytes()); err != nil {
@@ -715,7 +739,9 @@ func decryptFile(ctx context.Context, inputFile, outputFile string, password []b
 	if err != nil {
 		return fmt.Errorf("key derivation failed: %w", err) // Generic error
 	}
-	defer key.Close()
+	if err := key.Close(); err != nil {
+		log.Printf("close error: %v", err)
+	}
 
 	outFile, err := os.Create(outputFile)
 	if err != nil {
@@ -749,7 +775,9 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 	if err != nil {
 		return fmt.Errorf("file access failed: %w", err) // Generic error
 	}
-	defer inFile.Close()
+	if err := inFile.Close(); err != nil {
+		log.Printf("close error: %v", err)
+	}
 
 	header, err := readHeader(inFile)
 	if err != nil {
@@ -760,14 +788,18 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 	if err != nil {
 		return fmt.Errorf("salt read failed: %w", err) // Generic error
 	}
-	defer salt.Close()
+	if err := salt.Close(); err != nil {
+		log.Printf("close error: %v", err)
+	}
 
 	// Derive original key to verify password
 	originalKey, err := deriveKey(password, salt.Bytes(), header)
 	if err != nil {
 		return fmt.Errorf("key derivation failed: %w", err) // Generic error
 	}
-	defer originalKey.Close()
+	if err := originalKey.Close(); err != nil {
+		log.Printf("close error: %v", err)
+	}
 
 	// Update header for key rotation
 	header.KeyVersion = newVersion
@@ -785,7 +817,9 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 	if err != nil {
 		return fmt.Errorf("file creation failed: %w", err) // Generic error
 	}
-	defer outFile.Close()
+	if err := outFile.Close(); err != nil {
+		log.Printf("close error: %v", err)
+	}
 
 	// Write updated header
 	if err := writeHeader(outFile, header); err != nil {
@@ -841,7 +875,9 @@ func processKeyRotation(ctx context.Context, inFile, outFile *os.File, key *Secu
 			// Re-encrypt with new key version
 			nonce := buf[:nonceSize]
 			var clen uint32
-			binary.Read(bytes.NewReader(buf[nonceSize:nonceSize+4]), binary.LittleEndian, &clen)
+			if err := binary.Read(bytes.NewReader(buf[nonceSize:nonceSize+4]), binary.LittleEndian, &clen); err != nil {
+				return fmt.Errorf("length read failed: %w", err)
+			}
 			ct := buf[nonceSize+4 : nonceSize+4+int(clen)]
 
 			// Decrypt
@@ -953,7 +989,9 @@ func processFile(ctx context.Context, inFile *os.File, outFile *os.File, key *Se
 	}
 
 	plainBuf := NewSecureBuffer(cfg.ChunkSize)
-	defer plainBuf.Close()
+	if err := plainBuf.Close(); err != nil {
+		log.Printf("close error: %v", err)
+	}
 
 	baseAAD, err := buildEnhancedAAD(header, 0)
 	if err != nil {
@@ -1017,15 +1055,6 @@ func writeChunk(outFile *os.File, nonce []byte, ct []byte) error {
 		return fmt.Errorf("ciphertext write failed: %w", err)
 	}
 	return nil
-}
-
-func buildAAD(baseAAD []byte, seq uint64) ([]byte, error) {
-	var aad bytes.Buffer
-	aad.Write(baseAAD)
-	var seqBytes [8]byte
-	binary.BigEndian.PutUint64(seqBytes[:], seq)
-	aad.Write(seqBytes[:])
-	return aad.Bytes(), nil
 }
 
 func readHeader(inFile *os.File) (FileHeader, error) {
