@@ -54,7 +54,6 @@ jobs:
     timeout-minutes: 90
     env:
       GITHUB_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
-      # Keep COSIGN_EXPERIMENTAL if you require it
       COSIGN_EXPERIMENTAL: '1'
     steps:
       - name: Checkout (full history & tags)
@@ -93,7 +92,7 @@ jobs:
           go-version: '1.25.4'
           cache: false
 
-      - name: Install system deps (UPX + zip)
+      - name: Install system deps (UPX + tar + zip)
         run: |
           sudo apt-get update
           sudo apt-get install -y upx zip tar
@@ -112,7 +111,6 @@ jobs:
       - name: Run GoReleaser (builds, UPX, archives, checksums, release)
         uses: goreleaser/goreleaser-action@v6.4.0
         with:
-          # v2: --clean replaces removed --rm-dist
           args: release --clean --config .goreleaser.yml
         env:
           GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
@@ -141,17 +139,12 @@ jobs:
         run: |
           set -eux
           cd dist
-          # For directories: create dist/<dirname>.tar.gz and sign that
-          # For files: sign only regular files that are executable or match release extensions
           for path in *; do
-            # Skip meta & docs early
             case "$path" in
               *.cosign.bundle|*sbom*|*SHA256SUMS|*.spdx.json|*.cdx.json) echo "Skipping meta $path"; continue ;;
               README*|LICENSE*|CHANGELOG*|*.md) echo "Skipping doc $path"; continue ;;
             esac
-
             if [ -d "$path" ]; then
-              # Archive directory into tar.gz (preserve contents)
               base=$(basename "$path")
               tarname="${base}.tar.gz"
               echo "Archiving directory $path -> $tarname"
@@ -164,7 +157,6 @@ jobs:
               continue
             fi
 
-            # Only sign real release artifacts: executable files or known archive/install extensions
             case "$target" in
               *.tar.gz|*.zip|*.exe|*.msi|*.deb|*.rpm)
                 echo "Signing $target"
@@ -185,17 +177,24 @@ jobs:
           SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
           COSIGN_EXPERIMENTAL: ${{ env.COSIGN_EXPERIMENTAL }}
 
-      - name: Verify cosign bundles (pre-upload verification)
+      - name: Verify cosign bundles (pre-upload verification, keyless)
         run: |
           set -eux
           cd dist
+          # Recommended: restrict identity regex to your repository/organization to avoid false positives.
+          ID_REGEX="^https://github\\.com/${{ github.repository }}/.+"
+          OIDC_ISSUER="https://token.actions.githubusercontent.com"
           for f in *; do
             case "$f" in
               *.cosign.bundle) continue ;;
             esac
             if [ -f "${f}.cosign.bundle" ]; then
               echo "Verifying $f"
-              COSIGN_EXPERIMENTAL=1 cosign verify-blob --bundle "${f}.cosign.bundle" "$f"
+              # Keyless verification requires certificate identity (or regexp) and oidc issuer.
+              COSIGN_EXPERIMENTAL=1 cosign verify-blob --bundle "${f}.cosign.bundle" \
+                --certificate-identity-regexp "$ID_REGEX" \
+                --certificate-oidc-issuer "$OIDC_ISSUER" \
+                "$f"
             fi
           done
         env:
