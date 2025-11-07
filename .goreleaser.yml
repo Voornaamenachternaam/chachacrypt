@@ -1,6 +1,5 @@
 # .goreleaser.yml
-# Change `main:` if your main package is in ./cmd/<name> or elsewhere.
-project_name: "{{ .RepoName }}"
+project_name: '{{ .RepoName }}'
 
 before:
   hooks:
