@@ -135,21 +135,34 @@ jobs:
           format: cyclonedx-json
           artifact-name: sbom-dist.cdx.json
 
-      - name: Cosign sign artifacts (keyless, produce .cosign.bundle) - NON-INTERACTIVE & SAFE
+      - name: Cosign sign & normalize artifacts (non-interactive, safe)
         run: |
           set -eux
           cd dist
+
+          # For every entry:
+          # - skip docs/meta files,
+          # - if it's a directory and a matching tar.gz doesn't exist, create tar.gz
+          # - if it's a directory but a tar.gz already exists, remove the directory to avoid duplicate names
+          # - sign only known release artifact types: *.tar.gz, *.zip, *.exe, *.deb, *.rpm or executables
           for path in *; do
             case "$path" in
               *.cosign.bundle|*sbom*|*SHA256SUMS|*.spdx.json|*.cdx.json) echo "Skipping meta $path"; continue ;;
               README*|LICENSE*|CHANGELOG*|*.md) echo "Skipping doc $path"; continue ;;
             esac
+
             if [ -d "$path" ]; then
-              base=$(basename "$path")
-              tarname="${base}.tar.gz"
-              echo "Archiving directory $path -> $tarname"
-              tar -C "$path" -czf "$tarname" .
-              target="$tarname"
+              tarname="${path}.tar.gz"
+              if [ -f "$tarname" ]; then
+                echo "Found existing $tarname for directory $path; removing directory to avoid duplicate upload"
+                rm -rf "$path"
+                target="$tarname"
+              else
+                echo "Archiving directory $path -> $tarname"
+                tar -C "$path" -czf "$tarname" .
+                rm -rf "$path"
+                target="$tarname"
+              fi
             elif [ -f "$path" ]; then
               target="$path"
             else
@@ -181,7 +194,6 @@ jobs:
         run: |
           set -eux
           cd dist
-          # Recommended: restrict identity regex to your repository/organization to avoid false positives.
           ID_REGEX="^https://github\\.com/${{ github.repository }}/.+"
           OIDC_ISSUER="https://token.actions.githubusercontent.com"
           for f in *; do
@@ -190,7 +202,6 @@ jobs:
             esac
             if [ -f "${f}.cosign.bundle" ]; then
               echo "Verifying $f"
-              # Keyless verification requires certificate identity (or regexp) and oidc issuer.
               COSIGN_EXPERIMENTAL=1 cosign verify-blob --bundle "${f}.cosign.bundle" \
                 --certificate-identity-regexp "$ID_REGEX" \
                 --certificate-oidc-issuer "$OIDC_ISSUER" \
@@ -200,7 +211,7 @@ jobs:
         env:
           COSIGN_EXPERIMENTAL: ${{ env.COSIGN_EXPERIMENTAL }}
 
-      - name: Attach SBOMs & Cosign bundles to the Release
+      - name: Attach SBOMs & Cosign bundles to the Release (upload canonical patterns)
         uses: step-security/action-gh-release@v2.4.1
         with:
           token: ${{ env.GITHUB_TOKEN }}
@@ -213,6 +224,9 @@ jobs:
             dist/*.exe
             dist/*.deb
             dist/*.rpm
+          overwrite_files: true
+        env:
+          GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
 
       - name: Final dist listing (always)
         if: always()
