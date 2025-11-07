@@ -53,18 +53,16 @@ jobs:
       - name: Ensure modules
         run: go mod download
 
-      - name: Install golangci-lint (pinned version)
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$GOPATH/bin" v2.6.1
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8.0.0
+        with:
+          install-only: true
 
       - name: Run go vet
         run: go vet ./...
 
       - name: Run tests
         run: go test ./... -v
-
-      - name: Run linter
-        run: golangci-lint run ./...
 
   # -------------------------------------------------------------------------
   # 2) Release job (builds, sbom, sign, verify, publish)
