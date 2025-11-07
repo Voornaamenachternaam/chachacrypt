@@ -15,8 +15,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+        "math"
 	"log"
-	"math"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -109,11 +109,6 @@ func (r *CSPRNGReader) checkEntropy(sample []byte) error {
 		return fmt.Errorf("insufficient entropy: %f < %f", entropy, minEntropyBits)
 	}
 	return nil
-}
-
-// log2 calculates log base 2
-func log2(x float64) float64 {
-	return math.Log(x) / math.Log(2)
 }
 
 var (
