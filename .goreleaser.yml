@@ -1,8 +1,11 @@
-# .goreleaser.yml (v2)
+# .goreleaser.yml (v2-compatible)
 version: 2
 dist: dist
 
-project_name: "{{ .RepoName }}"
+# Don't hardcode a template here. Let goreleaser infer the project name
+# from the git remote (recommended). That makes .ProjectName available
+# to templates and guarantees consistent artifact filenames.
+# project_name: my-project   # optional override (string). DON'T use literal templates here.
 
 before:
   hooks:
@@ -11,6 +14,8 @@ before:
 builds:
   - id: main
     main: .                      # change to ./cmd/mycli if needed
+    # Use the project name as the binary name so artifacts are named
+    # after the repository/project (not 'main').
     binary: '{{ .ProjectName }}'
     goos:
       - linux
@@ -31,6 +36,7 @@ archives:
   - id: raw-binaries
     formats:
       - binary
+    # name_template uses .ProjectName (inferred) + tag + os/arch
     name_template: '{{ .ProjectName }}-{{ .Tag }}-{{ .Os }}-{{ .Arch }}{{ .Amd64 }}{{ .ArtifactExt }}'
     wrap_in_directory: false
 
@@ -51,7 +57,7 @@ checksum:
   name_template: '{{ .ProjectName }}-{{ .Tag }}_SHA256SUMS'
   algorithm: sha256
 
-# UPX array (v2 schema)
+# UPX array (v2)
 upx:
   - enabled: true
     compress: '9'
@@ -61,6 +67,6 @@ upx:
 release:
   name_template: '{{ .Tag }}'
   github:
-    # leave owner/name blank to infer from git remote
+    # optional: override owner/name if you need to publish to a repo different from origin
     # owner: your-org
-    # name: repo-name
+    # name: your-repo
