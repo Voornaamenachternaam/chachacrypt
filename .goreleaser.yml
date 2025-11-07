@@ -54,11 +54,29 @@ checksum:
   name_template: '{{ .ProjectName }}-{{ .Tag }}_SHA256SUMS'
   algorithm: sha256
 
+# UPX is an array of UPX rules (v2 schema). Define one rule that applies to all builds.
 upx:
-  enabled: true
-  level: 9
+  - enabled: true
+    # compress can be 1..9 or 'best'
+    compress: '9'
+    # try LZMA (optional)
+    lzma: false
+    # brute (optional, slower)
+    brute: false
+    # example filters (optional) - remove or adapt if you want to restrict which builds get UPX'd
+    # ids: [main]
+    # goos: [linux]
+    # goarch: [amd64, arm64]
 
 release:
+  # release name (templates allowed). Put name_template at top-level release, not inside release.github
+  name_template: '{{ .Tag }}'
   github:
-    name_template: '{{ .Tag }}'
-    # goreleaser will upload artifacts and the combined checksum file
+    # optionally specify owner/name if you want to force a different repo for the release.
+    # owner: your-org
+    # name: your-repo
+    # leaving unset makes GoReleaser infer from git remote
+    # owner: user
+    # name: repo
+
+    # NOTE: 'name_template' does NOT belong under github; putting it there triggers "field name_template not found in type config.Repo"
