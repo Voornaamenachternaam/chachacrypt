@@ -1,0 +1,61 @@
+# .goreleaser.yml
+# Change `main:` if your main package is in ./cmd/<name> or elsewhere.
+project_name: "{{ .RepoName }}"
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: main
+    main: .                      # change to ./cmd/mycli if needed
+    binary: '{{ .ProjectName }}'
+    goos:
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # build GOAMD64 variants when GOARCH=amd64
+    goamd64:
+      - v2
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - '-s -w'
+
+archives:
+  # raw binaries (no wrapping dir)
+  - id: raw-binaries
+    format: binary
+    name_template: '{{ .ProjectName }}-{{ .Tag }}-{{ .Os }}-{{ .Arch }}{{ .Amd64 }}{{ .ArtifactExt }}'
+    wrap_in_directory: false
+
+  # packaged archives (tar.gz on unix, zip on windows)
+  - id: packaged
+    format: tar.gz
+    name_template: '{{ .ProjectName }}-{{ .Tag }}-{{ .Os }}-{{ .Arch }}{{ .Amd64 }}'
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - LICENSE
+    wrap_in_directory: true
+
+checksum:
+  # combined checksum file uploaded by GoReleaser (SHA256 per artifact)
+  name_template: '{{ .ProjectName }}-{{ .Tag }}_SHA256SUMS'
+  algorithm: sha256
+
+upx:
+  enabled: true
+  level: 9
+
+release:
+  github:
+    name_template: '{{ .Tag }}'
+    # goreleaser will upload artifacts and the combined checksum file
