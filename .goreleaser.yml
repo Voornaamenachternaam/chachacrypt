@@ -1,4 +1,4 @@
-# .goreleaser.yml (v2 compliant)
+# .goreleaser.yml (v2-compatible)
 version: 2
 dist: dist
 
@@ -51,7 +51,7 @@ checksum:
   name_template: '{{ .ProjectName }}-{{ .Tag }}_SHA256SUMS'
   algorithm: sha256
 
-# UPX is an array in v2. Provide one rule (applies to all builds by default)
+# UPX is an array in v2 ─ provide a single rule applicable to your builds
 upx:
   - enabled: true
     compress: '9'
@@ -59,8 +59,9 @@ upx:
     brute: false
 
 release:
+  # templates allowed (default was '{{ .Tag }}'); keep explicit
   name_template: '{{ .Tag }}'
   github:
-    # owner and name are optional — GoReleaser will infer from git remote.
+    # owner/name optional — GoReleaser infers from git remote unless you need to override
     # owner: your-org
     # name: repo-name
