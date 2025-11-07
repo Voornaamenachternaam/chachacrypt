@@ -16,32 +16,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # -------------------------------------------------------------------------
-  # 1) Test & lint job (gates the release)
-  #    - This is implemented here rather than calling the repo-local file
-  #      directly to ensure the gating behavior is always present.
-  #    - If your repo's .github/workflows/reviewdog.yml is a reusable workflow
-  #      (on: workflow_call), you can replace the steps below with:
-  #        uses: ./.github/workflows/reviewdog.yml
-  #      (left as a comment below where appropriate).
-  # -------------------------------------------------------------------------
   test:
     name: Test & Lint
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Checkout (full history)
-        uses: actions/checkout@v5.0.0
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Setup Go 1.25.4
-        uses: actions/setup-go@v6.0.0
+        uses: actions/setup-go@v6
         with:
           go-version: '1.25.4'
 
       - name: Cache Go build & modules
-        uses: actions/cache@v4.3.0
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -53,8 +44,8 @@ jobs:
       - name: Ensure modules
         run: go mod download
 
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8.0.0
+      - name: golangci-lint (install only)
+        uses: golangci/golangci-lint-action@v8
         with:
           install-only: true
 
@@ -64,10 +55,6 @@ jobs:
       - name: Run tests
         run: go test ./... -v
 
-  # -------------------------------------------------------------------------
-  # 2) Release job (builds, sbom, sign, verify, publish)
-  #    - Needs the 'test' gate above
-  # -------------------------------------------------------------------------
   release:
     name: Build, SBOM, Sign, Verify, Release
     needs: test
@@ -78,7 +65,7 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout (full history)
-        uses: actions/checkout@v5.0.0
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -89,7 +76,7 @@ jobs:
           echo "SOURCE_DATE_EPOCH set to $SOURCE_DATE_EPOCH"
 
       - name: Cache Go build & modules
-        uses: actions/cache@v4.3.0
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -99,7 +86,7 @@ jobs:
             ${{ runner.os }}-go-
 
       - name: Setup Go 1.25.4
-        uses: actions/setup-go@v6.0.0
+        uses: actions/setup-go@v6
         with:
           go-version: '1.25.4'
 
@@ -109,16 +96,19 @@ jobs:
           sudo apt-get install -y upx zip
 
       - name: Install Cosign (keyless signing)
-        uses: step-security/cosign-installer@v4.0.0
+        uses: step-security/cosign-installer@v4
 
       - name: Run GoReleaser (builds, UPX, archives, checksums, release)
         uses: goreleaser/goreleaser-action@v6.4.0
         with:
-          args: release -config .goreleaser.yml
+          # IMPORTANT: use the long flag `--config` (two dashes). single dash (`-config`) fails.
+          args: release --config .goreleaser.yml
         env:
           GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
           SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
           COSIGN_EXPERIMENTAL: '1'
+          # if you want to force a local toolchain (optional):
+          # GOTOOLCHAIN: local
 
       - name: Show produced artifacts (for debug)
         if: always()
@@ -139,12 +129,10 @@ jobs:
           artifact-name: sbom-dist.cdx.json
 
       - name: Cosign sign all artifacts (keyless, produce .cosign.bundle)
-        # keyless signing via OIDC; id-token: write permission required above
         run: |
           set -eux
           cd dist
           for f in *; do
-            # skip pre-existing bundles, sboms, and the combined checksum file (we can sign it too but we sign everything here)
             case "$f" in
               *.cosign.bundle|*sbom*|*SHA256SUMS) continue ;;
             esac
@@ -157,7 +145,6 @@ jobs:
           set -eux
           cd dist
           for f in *; do
-            # skip bundles themselves
             case "$f" in
               *.cosign.bundle) continue ;;
             esac
