@@ -21,10 +21,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout (full history)
+      - name: Checkout (full history & tags)
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Setup Go 1.25.4
         uses: actions/setup-go@v6
@@ -63,16 +64,25 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
-      - name: Checkout (full history)
+      - name: Checkout (full history & tags)
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Set SOURCE_DATE_EPOCH (reproducible build timestamp)
         id: sde
         run: |
-          echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct $GITHUB_SHA)" >> $GITHUB_ENV
-          echo "SOURCE_DATE_EPOCH set to $SOURCE_DATE_EPOCH"
+          # robustly get commit to use for timestamp: prefer GITHUB_SHA, else HEAD
+          sha=${GITHUB_SHA:-$(git rev-parse --verify HEAD)}
+          if [ -z "$sha" ]; then
+            echo "No commit SHA found; leaving SOURCE_DATE_EPOCH empty"
+            echo "SOURCE_DATE_EPOCH=" >> $GITHUB_ENV
+          else
+            ts=$(git show -s --format=%ct "$sha")
+            echo "SOURCE_DATE_EPOCH=$ts" >> $GITHUB_ENV
+            echo "SOURCE_DATE_EPOCH set to $ts"
+          fi
 
       - name: Cache Go build & modules
         uses: actions/cache@v4
@@ -97,7 +107,7 @@ jobs:
       - name: Install Cosign (keyless signing)
         uses: step-security/cosign-installer@v4
 
-      - name: Check GoReleaser config (v2 schema)
+      - name: Check GoReleaser config (v2 schema, fail fast on deprecations/invalid)
         uses: goreleaser/goreleaser-action@v6.4.0
         with:
           args: check --config .goreleaser.yml
