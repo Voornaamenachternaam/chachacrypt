@@ -27,7 +27,6 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      # Do NOT enable caching in setup-go
       - name: Setup Go 1.25.4 (no cache)
         uses: actions/setup-go@v6
         with:
@@ -55,6 +54,8 @@ jobs:
     timeout-minutes: 90
     env:
       GITHUB_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+      # Keep COSIGN_EXPERIMENTAL if you require it
+      COSIGN_EXPERIMENTAL: '1'
     steps:
       - name: Checkout (full history & tags)
         uses: actions/checkout@v5
@@ -65,7 +66,6 @@ jobs:
       - name: Wipe local Go caches & previous dist (NO CACHE)
         run: |
           set -eux
-          # Remove runner-local Go caches and dist to guarantee a cache-free run
           rm -rf "$HOME/.cache/go-build" || true
           rm -rf "$HOME/go/pkg/mod" || true
           rm -rf "/home/runner/go/pkg/mod" || true
@@ -73,7 +73,7 @@ jobs:
           rm -rf dist || true
           echo "Local caches and dist/ removed."
 
-      - name: Set SOURCE_DATE_EPOCH (reproducible build timestamp, robust)
+      - name: Set SOURCE_DATE_EPOCH (robust)
         id: sde
         run: |
           set -eux
@@ -96,7 +96,7 @@ jobs:
       - name: Install system deps (UPX + zip)
         run: |
           sudo apt-get update
-          sudo apt-get install -y upx zip
+          sudo apt-get install -y upx zip tar
 
       - name: Install Cosign (keyless signing)
         uses: step-security/cosign-installer@v4
@@ -112,13 +112,14 @@ jobs:
       - name: Run GoReleaser (builds, UPX, archives, checksums, release)
         uses: goreleaser/goreleaser-action@v6.4.0
         with:
+          # v2: --clean replaces removed --rm-dist
           args: release --clean --config .goreleaser.yml
         env:
           GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
           SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
-          COSIGN_EXPERIMENTAL: '1'
+          COSIGN_EXPERIMENTAL: ${{ env.COSIGN_EXPERIMENTAL }}
 
-      - name: Show produced artifacts (for debug)
+      - name: Show produced artifacts (debug)
         if: always()
         run: ls -al dist || true
 
@@ -136,32 +137,53 @@ jobs:
           format: cyclonedx-json
           artifact-name: sbom-dist.cdx.json
 
-      - name: Cosign sign artifacts (keyless, produce .cosign.bundle) - NON-INTERACTIVE & TARGETED
+      - name: Cosign sign artifacts (keyless, produce .cosign.bundle) - NON-INTERACTIVE & SAFE
         run: |
           set -eux
           cd dist
-          # Only sign likely release artifacts:
-          #  - executable files (no ext but marked executable) OR
-          #  - archives / installers: *.tar.gz, *.zip, *.exe, *.msi, *.deb, *.rpm
-          # Skip bundles, sboms, checksum files and docs (README, CHANGELOG, LICENSE)
-          for f in *; do
-            case "$f" in
-              *.cosign.bundle|*sbom*|*SHA256SUMS|*.spdx.json|*.cdx.json) echo "Skipping meta $f"; continue ;;
-              README*|LICENSE*|CHANGELOG*|*.md) echo "Skipping doc $f"; continue ;;
+          # For directories: create dist/<dirname>.tar.gz and sign that
+          # For files: sign only regular files that are executable or match release extensions
+          for path in *; do
+            # Skip meta & docs early
+            case "$path" in
+              *.cosign.bundle|*sbom*|*SHA256SUMS|*.spdx.json|*.cdx.json) echo "Skipping meta $path"; continue ;;
+              README*|LICENSE*|CHANGELOG*|*.md) echo "Skipping doc $path"; continue ;;
             esac
-            # if file is executable or matches known release extensions, sign it
-            if [ -x "$f" ] || [[ "$f" == *.tar.gz ]] || [[ "$f" == *.zip ]] || [[ "$f" == *.exe ]] || [[ "$f" == *.msi ]] || [[ "$f" == *.deb ]] || [[ "$f" == *.rpm ]]; then
-              echo "Signing $f"
-              # --yes => non-interactive acceptance of Rekor/transparency terms; use COSIGN_EXPERIMENTAL if needed for keyless blob tlog behavior
-              COSIGN_EXPERIMENTAL=1 cosign sign-blob --yes --bundle "${f}.cosign.bundle" "$f"
+
+            if [ -d "$path" ]; then
+              # Archive directory into tar.gz (preserve contents)
+              base=$(basename "$path")
+              tarname="${base}.tar.gz"
+              echo "Archiving directory $path -> $tarname"
+              tar -C "$path" -czf "$tarname" .
+              target="$tarname"
+            elif [ -f "$path" ]; then
+              target="$path"
             else
-              echo "Skipping unrecognized artifact $f"
+              echo "Skipping non-regular $path"
+              continue
             fi
+
+            # Only sign real release artifacts: executable files or known archive/install extensions
+            case "$target" in
+              *.tar.gz|*.zip|*.exe|*.msi|*.deb|*.rpm)
+                echo "Signing $target"
+                COSIGN_EXPERIMENTAL=1 cosign sign-blob --yes --bundle "${target}.cosign.bundle" "$target"
+                ;;
+              *)
+                if [ -f "$target" ] && [ -x "$target" ]; then
+                  echo "Signing executable $target"
+                  COSIGN_EXPERIMENTAL=1 cosign sign-blob --yes --bundle "${target}.cosign.bundle" "$target"
+                else
+                  echo "Skipping unrecognized artifact $target"
+                fi
+                ;;
+            esac
           done
         env:
           GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
           SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
-          COSIGN_EXPERIMENTAL: '1'
+          COSIGN_EXPERIMENTAL: ${{ env.COSIGN_EXPERIMENTAL }}
 
       - name: Verify cosign bundles (pre-upload verification)
         run: |
@@ -177,7 +199,7 @@ jobs:
             fi
           done
         env:
-          COSIGN_EXPERIMENTAL: '1'
+          COSIGN_EXPERIMENTAL: ${{ env.COSIGN_EXPERIMENTAL }}
 
       - name: Attach SBOMs & Cosign bundles to the Release
         uses: step-security/action-gh-release@v2.4.1
@@ -187,6 +209,11 @@ jobs:
             dist/*.spdx.json
             dist/*.cdx.json
             dist/*.cosign.bundle
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.exe
+            dist/*.deb
+            dist/*.rpm
 
       - name: Final dist listing (always)
         if: always()
