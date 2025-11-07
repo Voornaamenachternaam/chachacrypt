@@ -1,4 +1,4 @@
-# .goreleaser.yml (v2-compatible)
+# .goreleaser.yml (v2)
 version: 2
 dist: dist
 
@@ -51,7 +51,7 @@ checksum:
   name_template: '{{ .ProjectName }}-{{ .Tag }}_SHA256SUMS'
   algorithm: sha256
 
-# Ensure UPX is an array (v2 schema)
+# UPX must be an array in v2 schema
 upx:
   - enabled: true
     compress: '9'
