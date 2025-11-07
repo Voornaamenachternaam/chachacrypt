@@ -31,17 +31,17 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout (full history)
-        uses: actions/checkout@08c6903
+        uses: actions/checkout@v5.0.0
         with:
           fetch-depth: 0
 
       - name: Setup Go 1.25.4
-        uses: actions/setup-go@4469467
+        uses: actions/setup-go@v6.0.0
         with:
           go-version: '1.25.4'
 
       - name: Cache Go build & modules
-        uses: actions/cache@0057852
+        uses: actions/cache@v4.3.0
         with:
           path: |
             ~/.cache/go-build
@@ -55,7 +55,7 @@ jobs:
 
       - name: Install golangci-lint (pinned version)
         run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$GOPATH/bin" v1.57.0
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$GOPATH/bin" v2.6.1
 
       - name: Run go vet
         run: go vet ./...
@@ -80,7 +80,7 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout (full history)
-        uses: actions/checkout@08c6903
+        uses: actions/checkout@v5.0.0
         with:
           fetch-depth: 0
 
@@ -91,7 +91,7 @@ jobs:
           echo "SOURCE_DATE_EPOCH set to $SOURCE_DATE_EPOCH"
 
       - name: Cache Go build & modules
-        uses: actions/cache@0057852
+        uses: actions/cache@v4.3.0
         with:
           path: |
             ~/.cache/go-build
@@ -101,7 +101,7 @@ jobs:
             ${{ runner.os }}-go-
 
       - name: Setup Go 1.25.4
-        uses: actions/setup-go@4469467
+        uses: actions/setup-go@v6.0.0
         with:
           go-version: '1.25.4'
 
@@ -111,12 +111,12 @@ jobs:
           sudo apt-get install -y upx zip
 
       - name: Install Cosign (keyless signing)
-        uses: step-security/cosign-installer@9610e5a
+        uses: step-security/cosign-installer@v4.0.0
         with:
           cosign-release: 'latest'
 
       - name: Run GoReleaser (builds, UPX, archives, checksums, release)
-        uses: goreleaser/goreleaser-action@e435ccd
+        uses: goreleaser/goreleaser-action@v6.4.0
         with:
           args: release --rm-dist --config .goreleaser.yml
         env:
@@ -129,14 +129,14 @@ jobs:
         run: ls -al dist || true
 
       - name: Generate SBOM (SPDX JSON)
-        uses: anchore/sbom-action@8e94d75
+        uses: anchore/sbom-action@v0.20.9
         with:
           path: dist
           format: spdx-json
           artifact-name: sbom-dist.spdx.json
 
       - name: Generate SBOM (CycloneDX JSON)
-        uses: anchore/sbom-action@8e94d75
+        uses: anchore/sbom-action@v0.20.9
         with:
           path: dist
           format: cyclonedx-json
@@ -174,7 +174,7 @@ jobs:
           done
 
       - name: Attach SBOMs & Cosign bundles to the Release
-        uses: step-security/action-gh-release@674f8f8
+        uses: step-security/action-gh-release@v2.4.1
         with:
           token: ${{ env.GITHUB_TOKEN }}
           files: |
