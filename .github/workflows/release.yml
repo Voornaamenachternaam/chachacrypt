@@ -8,7 +8,7 @@ on:
 permissions:
   contents: write
   packages: write
-  id-token: write
+  id-token: write       # required for keyless Cosign (OIDC)
   actions: read
 
 concurrency:
@@ -27,6 +27,7 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      # Do NOT enable caching in setup-go
       - name: Setup Go 1.25.4 (no cache)
         uses: actions/setup-go@v6
         with:
@@ -36,7 +37,7 @@ jobs:
       - name: Ensure modules
         run: go mod download
 
-      - name: golangci-lint (install only)
+      - name: golangci-lint (install-only)
         uses: golangci/golangci-lint-action@v8
         with:
           install-only: true
@@ -61,23 +62,21 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Wipe local caches (ensure no cache is used)
+      - name: Wipe local Go caches & previous dist (NO CACHE)
         run: |
           set -eux
-          # remove common Go caches from the runner workspace and home
+          # Remove runner-local Go caches and dist to guarantee a cache-free run
           rm -rf "$HOME/.cache/go-build" || true
           rm -rf "$HOME/go/pkg/mod" || true
           rm -rf "/home/runner/go/pkg/mod" || true
           rm -rf "/home/runner/.cache/go-build" || true
-          # also remove any dist directory left behind
           rm -rf dist || true
-          echo "Local runner caches removed."
+          echo "Local caches and dist/ removed."
 
       - name: Set SOURCE_DATE_EPOCH (reproducible build timestamp, robust)
         id: sde
         run: |
           set -eux
-          # prefer commit that triggered the workflow, else fallback to HEAD
           sha=${GITHUB_SHA:-$(git rev-parse --verify HEAD 2>/dev/null || true)}
           if [ -z "$sha" ]; then
             echo "SOURCE_DATE_EPOCH=" >> $GITHUB_ENV
@@ -88,7 +87,7 @@ jobs:
             echo "SOURCE_DATE_EPOCH set to ${ts:-}"
           fi
 
-      - name: Setup Go 1.25.4 (no cache)
+      - name: Setup Go 1.25.4 (release job; no cache)
         uses: actions/setup-go@v6
         with:
           go-version: '1.25.4'
@@ -113,7 +112,6 @@ jobs:
       - name: Run GoReleaser (builds, UPX, archives, checksums, release)
         uses: goreleaser/goreleaser-action@v6.4.0
         with:
-          # v2: --clean replaces removed --rm-dist
           args: release --clean --config .goreleaser.yml
         env:
           GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
@@ -138,17 +136,32 @@ jobs:
           format: cyclonedx-json
           artifact-name: sbom-dist.cdx.json
 
-      - name: Cosign sign all artifacts (keyless, produce .cosign.bundle)
+      - name: Cosign sign artifacts (keyless, produce .cosign.bundle) - NON-INTERACTIVE & TARGETED
         run: |
           set -eux
           cd dist
+          # Only sign likely release artifacts:
+          #  - executable files (no ext but marked executable) OR
+          #  - archives / installers: *.tar.gz, *.zip, *.exe, *.msi, *.deb, *.rpm
+          # Skip bundles, sboms, checksum files and docs (README, CHANGELOG, LICENSE)
           for f in *; do
             case "$f" in
-              *.cosign.bundle|*sbom*|*SHA256SUMS) continue ;;
+              *.cosign.bundle|*sbom*|*SHA256SUMS|*.spdx.json|*.cdx.json) echo "Skipping meta $f"; continue ;;
+              README*|LICENSE*|CHANGELOG*|*.md) echo "Skipping doc $f"; continue ;;
             esac
-            echo "Signing $f"
-            cosign sign-blob --bundle "${f}.cosign.bundle" "$f"
+            # if file is executable or matches known release extensions, sign it
+            if [ -x "$f" ] || [[ "$f" == *.tar.gz ]] || [[ "$f" == *.zip ]] || [[ "$f" == *.exe ]] || [[ "$f" == *.msi ]] || [[ "$f" == *.deb ]] || [[ "$f" == *.rpm ]]; then
+              echo "Signing $f"
+              # --yes => non-interactive acceptance of Rekor/transparency terms; use COSIGN_EXPERIMENTAL if needed for keyless blob tlog behavior
+              COSIGN_EXPERIMENTAL=1 cosign sign-blob --yes --bundle "${f}.cosign.bundle" "$f"
+            else
+              echo "Skipping unrecognized artifact $f"
+            fi
           done
+        env:
+          GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
+          SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
+          COSIGN_EXPERIMENTAL: '1'
 
       - name: Verify cosign bundles (pre-upload verification)
         run: |
@@ -160,11 +173,11 @@ jobs:
             esac
             if [ -f "${f}.cosign.bundle" ]; then
               echo "Verifying $f"
-              cosign verify-blob --bundle "${f}.cosign.bundle" "$f"
-            else
-              echo "No cosign bundle for $f"
+              COSIGN_EXPERIMENTAL=1 cosign verify-blob --bundle "${f}.cosign.bundle" "$f"
             fi
           done
+        env:
+          COSIGN_EXPERIMENTAL: '1'
 
       - name: Attach SBOMs & Cosign bundles to the Release
         uses: step-security/action-gh-release@v2.4.1
