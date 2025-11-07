@@ -1,5 +1,9 @@
 # .goreleaser.yml
-project_name: '{{ .RepoName }}'
+version: 2
+dist: dist
+
+# Project name (used for archive names, homebrew formula, etc)
+project_name: "{{ .RepoName }}"
 
 before:
   hooks:
