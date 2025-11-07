@@ -97,7 +97,6 @@ jobs:
       - name: Install Cosign (keyless signing)
         uses: step-security/cosign-installer@v4
 
-      # --- Run goreleaser check to surface config/schema/deprecation issues early ---
       - name: Check GoReleaser config (v2 schema)
         uses: goreleaser/goreleaser-action@v6.4.0
         with:
@@ -105,13 +104,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
           SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
-        # NOTE: This step intentionally fails the job if the config is invalid so we don't proceed
-        # to an attempted release that will also fail.
 
       - name: Run GoReleaser (builds, UPX, archives, checksums, release)
         uses: goreleaser/goreleaser-action@v6.4.0
         with:
-          # clean dist first, then run release using the v2 config
           args: release --rm-dist --config .goreleaser.yml
         env:
           GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
