@@ -8,11 +8,11 @@ permissions:
   statuses: write
   issues: write
 
-#on:
-#  workflow_dispatch:
-#  push:
-#    tags:
-#      - 'v*'
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
 
 jobs:
   lint-and-upload:
