@@ -25,7 +25,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"golang.org/x/crypto/argon2"           //nolint:depguard // Required for Argon2id KDF
 	"golang.org/x/crypto/chacha20poly1305" //nolint:depguard // Required for XChaCha20-Poly1305 AEAD
@@ -145,9 +144,10 @@ type config struct {
 
 // SecureBuffer implements secure memory management for sensitive data
 type SecureBuffer struct {
-	data   []byte
-	mu     sync.Mutex
-	zeroed atomic.Bool
+    data   []byte
+    mu     sync.Mutex
+    zeroed atomic.Bool
+    guard  uint32 // memory barrier guard to avoid unsafe usage
 }
 
 // NewSecureBuffer creates a new secure buffer
@@ -181,7 +181,7 @@ func (sb *SecureBuffer) Zero() {
 			sb.data[i] ^= sb.data[i]
 		}
 		// Force memory barrier
-		atomic.StoreUint32((*uint32)(unsafe.Pointer(&sb.data[0])), 0)
+		atomic.AddUint32(&sb.guard, 1)
 	}
 
 	sb.zeroed.Store(true)
