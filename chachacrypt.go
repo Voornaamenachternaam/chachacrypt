@@ -144,10 +144,10 @@ type config struct {
 
 // SecureBuffer implements secure memory management for sensitive data
 type SecureBuffer struct {
-    data   []byte
-    mu     sync.Mutex
-    zeroed atomic.Bool
-    guard  uint32 // memory barrier guard to avoid unsafe usage
+	data   []byte
+	mu     sync.Mutex
+	zeroed atomic.Bool
+	guard  uint32 // memory barrier guard to avoid unsafe usage
 }
 
 // NewSecureBuffer creates a new secure buffer
