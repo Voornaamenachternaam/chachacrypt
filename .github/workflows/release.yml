@@ -37,7 +37,7 @@ jobs:
         run: go mod download
 
       - name: golangci-lint (install-only)
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           install-only: true
 
