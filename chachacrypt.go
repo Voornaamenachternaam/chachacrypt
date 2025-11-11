@@ -176,11 +176,11 @@ func (sb *SecureBuffer) Zero() {
 	// Constant-time zeroing to prevent timing attacks
 	n := len(sb.data)
 	if n > 0 {
-		// XOR with itself to zero (constant time)
-		for i := 0; i < n; i++ {
-			sb.data[i] ^= sb.data[i]
+		// Zero the buffer.
+		for i := range sb.data {
+			sb.data[i] = 0
 		}
-		// Force memory barrier
+		// Prevent the compiler from optimizing away the zeroing loop above
 		sink(sb.data)
 	}
 
