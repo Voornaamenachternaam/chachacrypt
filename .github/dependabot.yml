@@ -10,7 +10,6 @@ updates:
     schedule:
       interval: "daily"
 
-updates:
   - package-ecosystem: "gomod" # See documentation for possible values
     directory: "/" # Location of package manifests
     schedule:
