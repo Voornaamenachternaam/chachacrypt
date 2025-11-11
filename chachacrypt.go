@@ -111,21 +111,21 @@ func (r *CSPRNGReader) checkEntropy(sample []byte) error {
 }
 
 var (
-    csprng    = &CSPRNGReader{}
-    saltCache = make(map[string][]byte) // Cache for salt verification
-    saltMu    sync.RWMutex
+	csprng    = &CSPRNGReader{}
+	saltCache = make(map[string][]byte) // Cache for salt verification
+	saltMu    sync.RWMutex
 
-    // package-level volatile storage to prevent compiler elision of zeroing
-    sinkGlobal any
+	// package-level volatile storage to prevent compiler elision of zeroing
+	sinkGlobal any
 )
 
 // sink prevents the compiler from optimizing away sensitive-memory zeroing.
 // It uses a package-level observable side-effect and runtime.KeepAlive to ensure writes happen.
 func sink(b []byte) {
-    // Make an observable side-effect so the compiler cannot elide memory writes.
-    sinkGlobal = len(b)
-    // Ensure the slice is considered live until this call.
-    runtime.KeepAlive(b)
+	// Make an observable side-effect so the compiler cannot elide memory writes.
+	sinkGlobal = len(b)
+	// Ensure the slice is considered live until this call.
+	runtime.KeepAlive(b)
 }
 
 type FileHeader struct {
