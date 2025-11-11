@@ -176,12 +176,19 @@ func (sb *SecureBuffer) Zero() {
 	// Constant-time zeroing to prevent timing attacks
 	n := len(sb.data)
 	if n > 0 {
-		// Zero the buffer.
-		for i := range sb.data {
-			sb.data[i] = 0
-		}
-		// Prevent the compiler from optimizing away the zeroing loop above
-		sink(sb.data)
+// sink prevents the compiler from optimizing away sensitive-memory zeroing.
+// It uses a package-level volatile-like global and runtime.KeepAlive to ensure side effects.
+var sinkGlobal any
+ 
+func sink(b []byte) {
+	// Store to a package-level variable to create an observable effect.
+	// Assign the length to avoid retaining the content unnecessarily,
+	// but still make the compiler consider the slice value used.
+	sinkGlobal = len(b)
+	// Keep the slice alive until this point.
+	runtime.KeepAlive(b)
+}
+
 	}
 
 	sb.zeroed.Store(true)
