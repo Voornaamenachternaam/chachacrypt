@@ -111,10 +111,17 @@ func (r *CSPRNGReader) checkEntropy(sample []byte) error {
 }
 
 var (
-	csprng    = &CSPRNGReader{}
-	saltCache = make(map[string][]byte) // Cache for salt verification
-	saltMu    sync.RWMutex
-)
+var sinkGlobal any
+
+// sink prevents the compiler from optimizing away sensitive-memory zeroing.
+// It uses a package-level volatile-like global and runtime.KeepAlive to ensure side effects.
+func sink(b []byte) {
+	// Store an observable value to the package-level variable so the compiler
+	// cannot elide the zeroing writes.
+	sinkGlobal = len(b)
+	// Ensure b is considered live until this call.
+	runtime.KeepAlive(b)
+}
 
 type FileHeader struct {
 	Magic      [9]byte
@@ -176,19 +183,14 @@ func (sb *SecureBuffer) Zero() {
 	// Constant-time zeroing to prevent timing attacks
 	n := len(sb.data)
 	if n > 0 {
-// sink prevents the compiler from optimizing away sensitive-memory zeroing.
-// It uses a package-level volatile-like global and runtime.KeepAlive to ensure side effects.
-var sinkGlobal any
- 
-func sink(b []byte) {
-	// Store to a package-level variable to create an observable effect.
-	// Assign the length to avoid retaining the content unnecessarily,
-	// but still make the compiler consider the slice value used.
-	sinkGlobal = len(b)
-	// Keep the slice alive until this point.
-	runtime.KeepAlive(b)
-}
-
+		// Overwrite memory in a tight loop so writes actually happen.
+		// This simple loop is explicit and not easily optimized away.
+		for i := 0; i < n; i++ {
+			sb.data[i] = 0
+		}
+		// Call the package-level sink to create an observable side-effect
+		// and ensure the writes are preserved by the compiler.
+		sink(sb.data)
 	}
 
 	sb.zeroed.Store(true)
