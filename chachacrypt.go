@@ -181,7 +181,7 @@ func (sb *SecureBuffer) Zero() {
 			sb.data[i] ^= sb.data[i]
 		}
 		// Force memory barrier
-		atomic.AddUint32(&sb.guard, 1)
+		sink(sb.data)
 	}
 
 	sb.zeroed.Store(true)
