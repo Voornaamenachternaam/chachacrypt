@@ -7,3 +7,5 @@ ci-artifacts*
 
 # GitHub App credentials
 gha-creds-*.json
+
+sonar-project.properties
