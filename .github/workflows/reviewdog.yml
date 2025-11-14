@@ -36,7 +36,7 @@ jobs:
         uses: reviewdog/action-golangci-lint@v2.8.0
         with:
           # pin golangci-lint to v2.5.0 (your requested version)
-          golangci_lint_version: v2.6.1
+          golangci_lint_version: v2.6.2
           # instruct golangci-lint to write SARIF to reports/golangci.sarif
           # and print text to stdout for reviewdog to parse.
           # Note: flags follow golangci-lint v2 semantics (output.* flags).
