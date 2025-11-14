@@ -10,12 +10,19 @@ on:
 
 # minimal workflow-level permission; per-job overrides below
 permissions:
-  contents: write
+  actions: write
   checks: write
+  contents: write
+  deployments: write
+  id-token: write
+  issues: write
+  discussions: write
+  packages: write
+  pages: write
   pull-requests: write
+  repository-projects: write
   security-events: write
   statuses: write
-  issues: write
 
 jobs:
   lint:
@@ -23,12 +30,19 @@ jobs:
     continue-on-error: true
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      actions: write
       checks: write
+      contents: write
+      deployments: write
+      id-token: write
+      issues: write
+      discussions: write
+      packages: write
+      pages: write
       pull-requests: write
+      repository-projects: write
       security-events: write
       statuses: write
-      issues: write
     steps:
       - name: Checkout repository (for lint check)
         continue-on-error: true
