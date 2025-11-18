@@ -46,7 +46,7 @@ jobs:
     steps:
       - name: Checkout repository (for lint check)
         continue-on-error: true
-        uses: actions/checkout@v5.0.0
+        uses: actions/checkout@v5.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -81,7 +81,7 @@ jobs:
     steps:
       - name: Checkout PR head branch (full history)
         continue-on-error: true
-        uses: actions/checkout@v5.0.0
+        uses: actions/checkout@v5.0.1
         with:
           # make sure we check out the PR head branch (not a detached commit)
           ref: ${{ github.event.pull_request.head.ref }}

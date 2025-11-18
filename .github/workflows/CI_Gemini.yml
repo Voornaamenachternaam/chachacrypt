@@ -24,7 +24,7 @@ jobs:
       API_URL: "https://openrouter.ai/api/v1/chat/completions"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v5.0.1
         with:
           fetch-depth: 0
           persist-credentials: true
