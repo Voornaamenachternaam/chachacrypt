@@ -1,21 +1,21 @@
 # .github/workflows/CI_Gemini.yml
-name: CI_Gemini
+#name: CI_Gemini
 
-on:
+#on:
   workflow_dispatch:
   schedule:
     - cron: '0 3 * * *'
 
-permissions:
+#permissions:
   contents: write
   checks: write
   pull-requests: write
 
-concurrency:
+#concurrency:
   group: ci-gemini
   cancel-in-progress: false
 
-jobs:
+#jobs:
   update-and-refactor:
     name: Automated dependency & toolchain update with AI refactor
     runs-on: ubuntu-latest
