@@ -1,13 +1,13 @@
-name: "CI3 - backup"
+#name: "CI3 - backup"
 
-permissions:
+#permissions:
   contents: write
   pull-requests: write
 
-on:
+#on:
   workflow_dispatch:
 
-jobs:
+#jobs:
   update-and-test:
     name: Update Go & Deps, Run Tests & Auto‐Fix
     runs-on: ubuntu-latest
