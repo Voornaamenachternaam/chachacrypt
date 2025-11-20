@@ -1,18 +1,18 @@
-name: CI_ChatGPT
+#name: CI_ChatGPT
 
-on:
+#on:
   workflow_dispatch:
 
-permissions:
+#permissions:
   contents: write
   checks: write
   pull-requests: write
 
-env:
+#env:
   DEFAULT_AI_MODEL: tngtech/deepseek-r1t2-chimera:free
   DEFAULT_BRANCH: main
 
-jobs:
+#jobs:
   lint-fix-and-ai:
     name: Lint, deterministic-fix, AI-fallback, PR
     runs-on: ubuntu-latest
