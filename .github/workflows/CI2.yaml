@@ -1,6 +1,6 @@
-name: "CI 2"
+#name: "CI 2"
 
-permissions:
+#permissions:
   actions: write
   checks: write
   contents: write
@@ -15,7 +15,7 @@ permissions:
   security-events: write
   statuses: write
   
-on:
+#on:
   schedule:
     - cron: '0 2 * * *'
   workflow_dispatch:
@@ -23,7 +23,7 @@ on:
     types:
       - opened
 
-jobs:
+#jobs:
   bump:
     name: "Bump Go Version"
     runs-on: ubuntu-latest
