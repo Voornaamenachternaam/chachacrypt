@@ -1,6 +1,5 @@
 name: Superlint
 
-# Run when a PR is created/updated
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited, ready_for_review]
@@ -8,7 +7,6 @@ on:
   schedule:
     - cron: '0 2 * * *'
 
-# minimal workflow-level permission; per-job overrides below
 permissions:
   actions: write
   checks: write
@@ -57,8 +55,8 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
 
-    # Run for all events (PR, workflow_dispatch, schedule) for human actors.
-    # This avoids the 'This job was skipped' case you experienced when running via workflow_dispatch.
+    # Run for manual and PR runs for human actors (avoids bot-only runs).
+    # This guarantees the job runs when you manually trigger a workflow_dispatch.
     if: >
       github.actor != 'github-actions[bot]' &&
       github.actor != 'dependabot[bot]'
@@ -70,7 +68,7 @@ jobs:
       statuses: write
 
     steps:
-      - name: Checkout target branch / head (full history, no persisted creds)
+      - name: Checkout head or specified ref (full history, no persisted creds)
         uses: actions/checkout@v6.0.0
         with:
           # robust ref selection for PR vs workflow_dispatch runs
@@ -85,92 +83,69 @@ jobs:
           cache: false
           token: ${{ github.token }}
 
-      - name: Super-Linter (auto-fix for Go)
+      - name: Super-Linter (auto-fix for Go) — no workspace summary files
         uses: super-linter/super-linter@v8.2.1
         continue-on-error: true
         env:
-          # token
           GITHUB_TOKEN: ${{ github.token }}
 
-          # enable Go fixes
           VALIDATE_GO: true
           VALIDATE_GO_MODULES: true
           FIX_GO: true
           FIX_GO_MODULES: true
 
-          # IMPORTANT: prevent super-linter from writing output files that break git checkouts.
-          # These tell Super-Linter NOT to save outputs or write the markdown summary into the workspace.
+          # Prevent Super-Linter from creating workspace summary files that can block git operations
           SAVE_SUPER_LINTER_OUTPUT: 'false'
           SAVE_SUPER_LINTER_SUMMARY: 'false'
           ENABLE_GITHUB_ACTIONS_STEP_SUMMARY: 'false'
 
-      - name: Run go mod tidy for every tracked module (explicit)
+      - name: Run go mod tidy (modules) — minimal script
         run: |
           set -euo pipefail
           mapfile -t mods < <(git ls-files -- '*/go.mod' 'go.mod' || true)
-          if [ ${#mods[@]} -eq 0 ]; then
-            echo "No go.mod files found."
-            exit 0
+          if [ ${#mods[@]} -gt 0 ]; then
+            for gm in "${mods[@]}"; do
+              (cd "$(dirname "$gm")" && go mod tidy)
+            done
           fi
-          for gm in "${mods[@]}"; do
-            moddir=$(dirname "$gm")
-            echo "Running 'go mod tidy' in: $moddir"
-            (cd "$moddir" && go mod tidy)
-          done
         shell: bash
 
-      - name: Create an artifacts status file (always) - minimal, required artifact upload
+      - name: Create a small run-info file for artifact upload (always)
         if: always()
         run: |
           set -euo pipefail
-          mkdir -p .super-linter-artifacts
-          cat > .super-linter-artifacts/run-info.txt <<'EOF'
-          run_id=${{ github.run_id }}
-          repo=${{ github.repository }}
-          actor=${{ github.actor }}
-          event=${{ github.event_name }}
-          ref=${{ github.ref }}
-          EOF
+          mkdir -p .superlinter-artifact
+          printf 'run_id=%s\n' "${{ github.run_id }}" > .superlinter-artifact/run-info.txt
+          printf 'repo=%s\n' "${{ github.repository }}" >> .superlinter-artifact/run-info.txt
+          printf 'actor=%s\n' "${{ github.actor }}" >> .superlinter-artifact/run-info.txt
+          printf 'event=%s\n' "${{ github.event_name }}" >> .superlinter-artifact/run-info.txt
+          printf 'ref=%s\n' "${{ github.ref }}" >> .superlinter-artifact/run-info.txt
         shell: bash
 
-      - name: Upload run status artifact (always)
+      - name: Upload run-info artifact (always)
         if: always()
         uses: actions/upload-artifact@v5.0.0
         with:
           name: superlinter-run-info-${{ github.run_id }}
-          path: .super-linter-artifacts
+          path: .superlinter-artifact
 
-      - name: Ensure workspace is clean (safety)
+      - name: Clean any temporary files before create-pull-request (defensive)
         run: |
-          # If the linter or any step created files, remove them before create-pull-request.
-          # This is defensive: we already disabled Super-Linter outputs, but keep cleanup to be safe.
           set -euo pipefail
           rm -rf super-linter-output || true
           rm -f super-linter-report.html super-linter-report.json || true
-          # Remove our temporary artifact folder (artifact already uploaded)
-          rm -rf .super-linter-artifacts || true
-          # remove any other untracked files to guarantee clean checkout for PR action
+          rm -rf .superlinter-artifact || true
           git clean -fdx || true
         shell: bash
 
-      - name: Prepare fixes branch name (minimal, deterministic)
-        id: branchname
-        run: |
-          src="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-${GITHUB_REF##*/}}}"
-          if [ -z "$src" ]; then
-            src="unknown"
-          fi
-          safe_src=$(echo "$src" | tr '/ ' '-' | tr -cd '[:alnum:]-' | sed 's/^-*//;s/-*$//')
-          echo "branch=super-linter/fixes-${safe_src}-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
-        shell: bash
-
-      - name: Create or update Pull Request with fixes
+      - name: Create or update Pull Request with fixes (will only create PR if branch is ahead of main)
         id: create_pr
         uses: peter-evans/create-pull-request@v7.0.8
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
-          branch: ${{ steps.branchname.outputs.branch }}
+          # branch name built inline — avoids separate branchname script step
+          branch: super-linter/fixes-${{ github.head_ref || github.ref_name || github.run_id }}
           base: main
           title: "[super-linter] apply Go fixes for ${{ github.event.pull_request.number }} -> main"
           body: |
