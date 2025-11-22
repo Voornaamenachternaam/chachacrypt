@@ -132,7 +132,7 @@ jobs:
           safe_src=$(echo "$src" | tr '/ ' '-' | tr -cd '[:alnum:]-' | sed 's/^-*//;s/-*$//')
           echo "branch=super-linter/fixes-${safe_src}-${{ github.run_id }}" >> $GITHUB_OUTPUT
 
-      - name: Create or update Pull Request with fixes (target: main)
+      - name: Create or update Pull Request with fixes
         id: create_pr
         # persist-credentials must be false in checkout above so this step uses GITHUB_TOKEN
         uses: step-security/create-or-update-pull-request-action@v1.10.2
