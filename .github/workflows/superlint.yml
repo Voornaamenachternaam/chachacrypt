@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     permissions:
-      contents: read
+      contents: write
       checks: write
       pull-requests: write
     steps:
@@ -88,7 +88,6 @@ jobs:
           # read the go version from /go.mod in repo root
           go-version-file: 'go.mod'
           cache: false
-          # explicit token is not required for public repos; action defaults to github.token
           token: ${{ github.token }}
 
       - name: Super-Linter (auto-fix for Go)
@@ -103,9 +102,8 @@ jobs:
           # If you want only Go to be considered, uncomment this:
           # FILTER_REGEX_INCLUDE: '.*\.go$'
 
-      - name: Run go mod tidy for every module (explicit, deterministic)
+      - name: Run go mod tidy for every tracked module (explicit, deterministic)
         continue-on-error: true
-        # if a module's go.mod was changed by Super-Linter (or needs tidy), this ensures go.mod/go.sum are tidy
         run: |
           set -euo pipefail
           echo "Looking for go.mod files tracked by git..."
@@ -122,32 +120,24 @@ jobs:
           done
         shell: bash
 
-      - name: Configure git user for automated commit
-        continue-on-error: true
-        run: |
-          git config user.name "super-linter[bot]"
-          git config user.email "super-linter@super-linter.dev"
-
       - name: Prepare fixes branch name
-        continue-on-error: true
         id: branchname
+        continue-on-error: true
         run: |
           # sanitize source branch name for readability, append run id for uniqueness
           src="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-unknown}}"
           safe_src=$(echo "$src" | tr '/ ' '-' | tr -cd '[:alnum:]-' | sed 's/^-*//;s/-*$//')
-          echo "branch=super-linter/fixes-${safe_src}-${{ github.run_id }}" >> $GITHUB_OUTPUT
+          # Use run id to avoid collisions (deterministic per run)
+          echo "branch=super-linter/fixes-${safe_src}-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
 
-      - name: Create or update Pull Request with fixes
-        continue-on-error: true
+      - name: Create or update Pull Request with fixes (only if there are changes)
         id: create_pr
-        # persist-credentials must be false in checkout above so this step uses GITHUB_TOKEN
+        continue-on-error: true
         uses: step-security/create-or-update-pull-request-action@v1.10.2
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
-          # The branch to push changes to (source branch of the PR created by this action)
           branch: ${{ steps.branchname.outputs.branch }}
-          # Ensure the PR target (base) is main (explicit)
           base: main
           title: "[super-linter] apply Go fixes for ${{ github.event.pull_request.number }} -> main"
           body: |
@@ -155,9 +145,12 @@ jobs:
             The PR targets **main** so you can review/merge the fixes into your main branch as requested.
             If no fixes were necessary, no PR will be created/updated.
           commit-message: "chore(lint): apply super-linter/go fixes [skip ci]"
+          author: "super-linter[bot] <super-linter@super-linter.dev>"
+          # By default the action is neutral if no changes, and outputs 'result' and 'pull-request-number'
 
       - name: Print created/updated PR url (if created)
         continue-on-error: true
         if: ${{ steps.create_pr.outputs.pull-request-number != '' }}
         run: |
           echo "Fixes PR created/updated: https://github.com/${{ github.repository }}/pull/${{ steps.create_pr.outputs.pull-request-number }}"
+ 
