@@ -75,6 +75,7 @@ jobs:
       - name: Checkout PR head branch (full history, no persisted creds)
         # persist-credentials: false so pushes from PR-creator action use GITHUB_TOKEN
         uses: actions/checkout@v6.0.0
+        continue-on-error: true
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
@@ -82,6 +83,7 @@ jobs:
 
       - name: Use Go version from repository's go.mod (no cache)
         uses: actions/setup-go@v6.1.0
+        continue-on-error: true
         with:
           # read the go version from /go.mod in repo root
           go-version-file: 'go.mod'
@@ -102,6 +104,7 @@ jobs:
           # FILTER_REGEX_INCLUDE: '.*\.go$'
 
       - name: Run go mod tidy for every module (explicit, deterministic)
+        continue-on-error: true
         # if a module's go.mod was changed by Super-Linter (or needs tidy), this ensures go.mod/go.sum are tidy
         run: |
           set -euo pipefail
@@ -120,11 +123,13 @@ jobs:
         shell: bash
 
       - name: Configure git user for automated commit
+        continue-on-error: true
         run: |
           git config user.name "super-linter[bot]"
           git config user.email "super-linter@super-linter.dev"
 
       - name: Prepare fixes branch name
+        continue-on-error: true
         id: branchname
         run: |
           # sanitize source branch name for readability, append run id for uniqueness
@@ -133,6 +138,7 @@ jobs:
           echo "branch=super-linter/fixes-${safe_src}-${{ github.run_id }}" >> $GITHUB_OUTPUT
 
       - name: Create or update Pull Request with fixes
+        continue-on-error: true
         id: create_pr
         # persist-credentials must be false in checkout above so this step uses GITHUB_TOKEN
         uses: step-security/create-or-update-pull-request-action@v1.10.2
@@ -151,6 +157,7 @@ jobs:
           commit-message: "chore(lint): apply super-linter/go fixes [skip ci]"
 
       - name: Print created/updated PR url (if created)
+        continue-on-error: true
         if: ${{ steps.create_pr.outputs.pull-request-number != '' }}
         run: |
           echo "Fixes PR created/updated: https://github.com/${{ github.repository }}/pull/${{ steps.create_pr.outputs.pull-request-number }}"
