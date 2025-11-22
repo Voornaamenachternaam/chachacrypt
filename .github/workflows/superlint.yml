@@ -24,104 +24,133 @@ permissions:
   security-events: write
   statuses: write
 
+concurrency:
+  group: superlinter-fix-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     name: Lint (check-only)
-    continue-on-error: true
     runs-on: ubuntu-latest
+    continue-on-error: true
     permissions:
-      actions: write
+      contents: read
       checks: write
-      contents: write
-      deployments: write
-      id-token: write
-      issues: write
-      discussions: write
-      packages: write
-      pages: write
       pull-requests: write
-      repository-projects: write
-      security-events: write
-      statuses: write
     steps:
-      - name: Checkout repository (for lint check)
-        continue-on-error: true
-        uses: actions/checkout@v5.0.1
+      - name: Checkout (for lint check)
+        uses: actions/checkout@v6.0.0
         with:
           fetch-depth: 0
-          persist-credentials: false
+          persist-credentials: true
 
       - name: Super-Linter (check-only)
-        continue-on-error: true
         uses: super-linter/super-linter@v8.2.1
-        # check-only: do NOT enable FIX_* here
+        continue-on-error: true
         env:
-          # Use the repo secret you requested (exposed as GITHUB_TOKEN for the container)
-          GITHUB_TOKEN: ${{ secrets.GH2_TOKEN }}
-          # explicitly validate Go so Super-Linter knows to look for Go files
+          # use repository token provided to workflow (no PAT)
+          GITHUB_TOKEN: ${{ github.token }}
           VALIDATE_GO: true
           VALIDATE_GO_MODULES: true
 
-  fix-lint-issues:
-    name: Fix linting issues and push back to PR (Go)
-    continue-on-error: true
+  fix-go:
+    name: Fix Go (autofix) and open fixes PR -> target main
     runs-on: ubuntu-latest
-    # write permission needed to push commits & update statuses
+    needs: lint
+    continue-on-error: false
+
+    # Avoid running on bot actors (reduces recursion/loops)
+    if: >
+      github.event_name == 'pull_request' &&
+      github.actor != 'github-actions[bot]' &&
+      github.actor != 'dependabot[bot]'
+
     permissions:
       contents: write
-      checks: write
       pull-requests: write
-      security-events: write
+      checks: write
       statuses: write
-      issues: write
-    # set the GITHUB_TOKEN to your secret so downstream steps/actions use that token
-    env:
-      GITHUB_TOKEN: ${{ secrets.GH2_TOKEN }}
 
     steps:
-      - name: Checkout PR head branch (full history)
-        continue-on-error: true
-        uses: actions/checkout@v5.0.1
+      - name: Checkout PR head branch (full history, no persisted creds)
+        # persist-credentials: false so pushes from PR-creator action use GITHUB_TOKEN
+        uses: actions/checkout@v6.0.0
         with:
-          # make sure we check out the PR head branch (not a detached commit)
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
-          # use your provided token (GH2_TOKEN). If GH2_TOKEN is a PAT, it will allow pushes to protected files/branches.
-          token: ${{ secrets.GH2_TOKEN }}
           persist-credentials: false
 
-      - name: Super-Linter (auto-fix for Go)
-        continue-on-error: true
-        uses: super-linter/super-linter@v8.2.1
-        env:
-          # expose the token requested by you as GITHUB_TOKEN inside the container
-          GITHUB_TOKEN: ${{ secrets.GH2_TOKEN }}
+      - name: Use Go version from repository's go.mod (no cache)
+        uses: actions/setup-go@v6.1.0
+        with:
+          # read the go version from /go.mod in repo root
+          go-version-file: 'go.mod'
+          cache: false
+          # explicit token is not required for public repos; action defaults to github.token
+          token: ${{ github.token }}
 
-          # --- Enable Go fix modes ---
-          # enable validation (required for fix mode)
+      - name: Super-Linter (auto-fix for Go)
+        uses: super-linter/super-linter@v8.2.1
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
           VALIDATE_GO: true
           VALIDATE_GO_MODULES: true
-          # enable automatic fixes for Go and go modules
           FIX_GO: true
           FIX_GO_MODULES: true
+          # If you want only Go to be considered, uncomment this:
+          # FILTER_REGEX_INCLUDE: '.*\.go$'
 
-          # Optional: tune other fixters only if you want them
-          # e.g. FIX_SHELL_SHFMT: true
+      - name: Run go mod tidy for every module (explicit, deterministic)
+        # if a module's go.mod was changed by Super-Linter (or needs tidy), this ensures go.mod/go.sum are tidy
+        run: |
+          set -euo pipefail
+          echo "Looking for go.mod files tracked by git..."
+          # List only tracked go.mod files to avoid vendor/tmp scanning
+          mapfile -t mods < <(git ls-files -- '*/go.mod' 'go.mod' || true)
+          if [ ${#mods[@]} -eq 0 ]; then
+            echo "No go.mod files found."
+            exit 0
+          fi
+          for gm in "${mods[@]}"; do
+            moddir=$(dirname "$gm")
+            echo "Running 'go mod tidy' in: $moddir"
+            (cd "$moddir" && go mod tidy)
+          done
+        shell: bash
 
-          # NOTE: enabling a FIX_* implies the corresponding VALIDATE_* must be true,
-          # otherwise super-linter will fail with a configuration error. See docs.
-          # (We set VALIDATE_GO / VALIDATE_GO_MODULES above accordingly.)
-      - name: Commit and push linting fixes
-        continue-on-error: true
-        # run only for PRs and avoid attempting to push fixes to the default branch
-        if: >
-          github.event_name == 'pull_request' &&
-          github.ref_name != github.event.repository.default_branch
-        uses: stefanzweifel/git-auto-commit-action@v7.0.0
+      - name: Configure git user for automated commit
+        run: |
+          git config user.name "super-linter[bot]"
+          git config user.email "super-linter@super-linter.dev"
+
+      - name: Prepare fixes branch name
+        id: branchname
+        run: |
+          # sanitize source branch name for readability, append run id for uniqueness
+          src="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-unknown}}"
+          safe_src=$(echo "$src" | tr '/ ' '-' | tr -cd '[:alnum:]-' | sed 's/^-*//;s/-*$//')
+          echo "branch=super-linter/fixes-${safe_src}-${{ github.run_id }}" >> $GITHUB_OUTPUT
+
+      - name: Create or update Pull Request with fixes (target: main)
+        id: create_pr
+        # persist-credentials must be false in checkout above so this step uses GITHUB_TOKEN
+        uses: step-security/create-or-update-pull-request-action@v1.10.2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         with:
-          # push back to the same branch that opened the PR
-          branch: ${{ github.event.pull_request.head.ref || github.head_ref || github.ref }}
-          # include the skip token recommended when using a PAT to avoid workflow loops
-          commit_message: "chore: fix linting issues [skip-checks:true]"
-          commit_user_name: super-linter
-          commit_user_email: super-linter@super-linter.dev
+          # The branch to push changes to (source branch of the PR created by this action)
+          branch: ${{ steps.branchname.outputs.branch }}
+          # Ensure the PR target (base) is main (explicit)
+          base: main
+          title: "[super-linter] apply Go fixes for ${{ github.event.pull_request.number }} -> main"
+          body: |
+            This PR contains automatic Go formatting/module fixes generated by Super-Linter (gofmt/goimports, golangci-lint autofixes, and an explicit `go mod tidy`).
+            The PR targets **main** so you can review/merge the fixes into your main branch as requested.
+            If no fixes were necessary, no PR will be created/updated.
+          commit-message: "chore(lint): apply super-linter/go fixes [skip ci]"
+
+      - name: Print created/updated PR url (if created)
+        if: ${{ steps.create_pr.outputs.pull-request-number != '' }}
+        run: |
+          echo "Fixes PR created/updated: https://github.com/${{ github.repository }}/pull/${{ steps.create_pr.outputs.pull-request-number }}"
