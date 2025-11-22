@@ -57,9 +57,9 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
 
-    # Keep the same guard — run only for pull_request events and avoid bot actors
+    # Allow PR events OR manual workflow_dispatch runs; still skip runs started by common bots
     if: >
-      github.event_name == 'pull_request' &&
+      (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
       github.actor != 'github-actions[bot]' &&
       github.actor != 'dependabot[bot]'
 
@@ -73,7 +73,8 @@ jobs:
       - name: Checkout PR head branch (full history, no persisted creds)
         uses: actions/checkout@v6.0.0
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
+          # pick the most appropriate ref: PR head -> head_ref; else fallback to ref_name or full ref
+          ref: ${{ github.event.pull_request.head.ref || github.head_ref || github.ref_name || github.ref }}
           fetch-depth: 0
           # keep false so the PR creator action uses the explicit token we pass
           persist-credentials: false
@@ -114,7 +115,11 @@ jobs:
       - name: Prepare fixes branch name (minimal, deterministic)
         id: branchname
         run: |
-          src="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-unknown}}"
+          # pick a source branch name robustly from envs available in PR / workflow_dispatch
+          src="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-${GITHUB_REF##*/}}}"
+          if [ -z "$src" ]; then
+            src="unknown"
+          fi
           safe_src=$(echo "$src" | tr '/ ' '-' | tr -cd '[:alnum:]-' | sed 's/^-*//;s/-*$//')
           echo "branch=super-linter/fixes-${safe_src}-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
 
