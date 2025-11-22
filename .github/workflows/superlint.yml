@@ -57,7 +57,7 @@ jobs:
     name: Fix Go (autofix) and open fixes PR -> target main
     runs-on: ubuntu-latest
     needs: lint
-    continue-on-error: false
+    continue-on-error: true
 
     # Avoid running on bot actors (reduces recursion/loops)
     if: >
