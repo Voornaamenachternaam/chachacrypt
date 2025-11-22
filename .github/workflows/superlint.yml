@@ -57,9 +57,9 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
 
-    # Run for PR events or manual dispatch; still skip common bot actors
+    # Run for all events (PR, workflow_dispatch, schedule) for human actors.
+    # This avoids the 'This job was skipped' case you experienced when running via workflow_dispatch.
     if: >
-      (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
       github.actor != 'github-actions[bot]' &&
       github.actor != 'dependabot[bot]'
 
@@ -70,7 +70,7 @@ jobs:
       statuses: write
 
     steps:
-      - name: Checkout PR head branch (full history, no persisted creds)
+      - name: Checkout target branch / head (full history, no persisted creds)
         uses: actions/checkout@v6.0.0
         with:
           # robust ref selection for PR vs workflow_dispatch runs
@@ -89,16 +89,24 @@ jobs:
         uses: super-linter/super-linter@v8.2.1
         continue-on-error: true
         env:
+          # token
           GITHUB_TOKEN: ${{ github.token }}
+
+          # enable Go fixes
           VALIDATE_GO: true
           VALIDATE_GO_MODULES: true
           FIX_GO: true
           FIX_GO_MODULES: true
 
+          # IMPORTANT: prevent super-linter from writing output files that break git checkouts.
+          # These tell Super-Linter NOT to save outputs or write the markdown summary into the workspace.
+          SAVE_SUPER_LINTER_OUTPUT: 'false'
+          SAVE_SUPER_LINTER_SUMMARY: 'false'
+          ENABLE_GITHUB_ACTIONS_STEP_SUMMARY: 'false'
+
       - name: Run go mod tidy for every tracked module (explicit)
         run: |
           set -euo pipefail
-          echo "Finding tracked go.mod files..."
           mapfile -t mods < <(git ls-files -- '*/go.mod' 'go.mod' || true)
           if [ ${#mods[@]} -eq 0 ]; then
             echo "No go.mod files found."
@@ -111,28 +119,37 @@ jobs:
           done
         shell: bash
 
-      - name: Upload Super-Linter output as artifact (always)
+      - name: Create an artifacts status file (always) - minimal, required artifact upload
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p .super-linter-artifacts
+          cat > .super-linter-artifacts/run-info.txt <<'EOF'
+          run_id=${{ github.run_id }}
+          repo=${{ github.repository }}
+          actor=${{ github.actor }}
+          event=${{ github.event_name }}
+          ref=${{ github.ref }}
+          EOF
+        shell: bash
+
+      - name: Upload run status artifact (always)
         if: always()
         uses: actions/upload-artifact@v5.0.0
         with:
-          name: super-linter-output-${{ github.run_id }}
-          path: |
-            super-linter-output
-            super-linter-report.html
-            super-linter-report.json
+          name: superlinter-run-info-${{ github.run_id }}
+          path: .super-linter-artifacts
 
-      - name: Ensure working tree is clean (remove linter output / other untracked files)
+      - name: Ensure workspace is clean (safety)
         run: |
-          # Remove commonly created linter output to avoid branch-checkout conflicts.
-          # This does not affect the uploaded artifact (upload already happened).
+          # If the linter or any step created files, remove them before create-pull-request.
+          # This is defensive: we already disabled Super-Linter outputs, but keep cleanup to be safe.
           set -euo pipefail
-          if [ -d "super-linter-output" ]; then
-            rm -rf super-linter-output || true
-          fi
-          # Remove other known generated files that might block checkout (optional safety)
-          rm -f super-linter-report.html || true
-          rm -f super-linter-report.json || true
-          # Remove any remaining untracked files to guarantee clean checkout for PR action.
+          rm -rf super-linter-output || true
+          rm -f super-linter-report.html super-linter-report.json || true
+          # Remove our temporary artifact folder (artifact already uploaded)
+          rm -rf .super-linter-artifacts || true
+          # remove any other untracked files to guarantee clean checkout for PR action
           git clean -fdx || true
         shell: bash
 
@@ -145,6 +162,7 @@ jobs:
           fi
           safe_src=$(echo "$src" | tr '/ ' '-' | tr -cd '[:alnum:]-' | sed 's/^-*//;s/-*$//')
           echo "branch=super-linter/fixes-${safe_src}-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+        shell: bash
 
       - name: Create or update Pull Request with fixes
         id: create_pr
@@ -165,4 +183,5 @@ jobs:
         if: ${{ steps.create_pr.outputs.pull-request-number != '' }}
         run: |
           echo "Fixes PR created/updated: https://github.com/${{ github.repository }}/pull/${{ steps.create_pr.outputs.pull-request-number }}"
+        shell: bash
  
