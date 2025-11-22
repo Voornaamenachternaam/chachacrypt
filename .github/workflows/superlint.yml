@@ -57,7 +57,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
 
-    # Allow PR events OR manual workflow_dispatch runs; still skip runs started by common bots
+    # Run for PR events or manual dispatch; still skip common bot actors
     if: >
       (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
       github.actor != 'github-actions[bot]' &&
@@ -73,10 +73,9 @@ jobs:
       - name: Checkout PR head branch (full history, no persisted creds)
         uses: actions/checkout@v6.0.0
         with:
-          # pick the most appropriate ref: PR head -> head_ref; else fallback to ref_name or full ref
+          # robust ref selection for PR vs workflow_dispatch runs
           ref: ${{ github.event.pull_request.head.ref || github.head_ref || github.ref_name || github.ref }}
           fetch-depth: 0
-          # keep false so the PR creator action uses the explicit token we pass
           persist-credentials: false
 
       - name: Use Go version from repository's go.mod (no cache)
@@ -112,10 +111,34 @@ jobs:
           done
         shell: bash
 
+      - name: Upload Super-Linter output as artifact (always)
+        if: always()
+        uses: actions/upload-artifact@v5.0.0
+        with:
+          name: super-linter-output-${{ github.run_id }}
+          path: |
+            super-linter-output
+            super-linter-report.html
+            super-linter-report.json
+
+      - name: Ensure working tree is clean (remove linter output / other untracked files)
+        run: |
+          # Remove commonly created linter output to avoid branch-checkout conflicts.
+          # This does not affect the uploaded artifact (upload already happened).
+          set -euo pipefail
+          if [ -d "super-linter-output" ]; then
+            rm -rf super-linter-output || true
+          fi
+          # Remove other known generated files that might block checkout (optional safety)
+          rm -f super-linter-report.html || true
+          rm -f super-linter-report.json || true
+          # Remove any remaining untracked files to guarantee clean checkout for PR action.
+          git clean -fdx || true
+        shell: bash
+
       - name: Prepare fixes branch name (minimal, deterministic)
         id: branchname
         run: |
-          # pick a source branch name robustly from envs available in PR / workflow_dispatch
           src="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-${GITHUB_REF##*/}}}"
           if [ -z "$src" ]; then
             src="unknown"
