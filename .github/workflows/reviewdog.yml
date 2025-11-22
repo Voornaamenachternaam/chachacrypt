@@ -25,7 +25,7 @@ on:
 
 jobs:
   lint-and-upload:
-    name: golangci-lint (v2.5.0) → SARIF → artifact → reviewdog (action v2.8.0)
+    name: golangci-lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -36,15 +36,9 @@ jobs:
       - name: Ensure reports dir exists
         run: mkdir -p reports
 
-      # Run reviewdog/action-golangci-lint@v2.8.0 which will:
-      #  - install golangci-lint v2.5.0
-      #  - run golangci-lint with the provided flags
-      #  - run reviewdog to post PR annotations
-      # We pass flags so golangci-lint writes SARIF to reports/golangci.sarif
       - name: Run golangci-lint (via reviewdog action) — generate SARIF & annotate PR
         uses: reviewdog/action-golangci-lint@v2.8.0
         with:
-          # pin golangci-lint to v2.5.0 (your requested version)
           golangci_lint_version: v2.6.2
           # instruct golangci-lint to write SARIF to reports/golangci.sarif
           # and print text to stdout for reviewdog to parse.
