@@ -40,18 +40,10 @@ jobs:
         uses: reviewdog/action-golangci-lint@v2.8.0
         with:
           golangci_lint_version: v2.6.2
-          # instruct golangci-lint to write SARIF to reports/golangci.sarif
-          # and print text to stdout for reviewdog to parse.
-          # Note: flags follow golangci-lint v2 semantics (output.* flags).
           golangci_lint_flags: '--fix --output.sarif.path=reports/golangci.sarif --output.text.path=stdout'
-          # ensure reviewdog posts a PR check (same as before)
           reporter: github-pr-check
-          # do not use reviewdog action cache
           cache: false
-          # set the reviewdog level / behavior if desired
           level: error
-          # default GitHub token is used; explicit passed if you prefer:
-          # github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Show reports directory & SARIF head (debug)
         run: |
