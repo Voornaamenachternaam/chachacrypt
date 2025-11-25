@@ -9,8 +9,22 @@ updates:
     directory: "/" # Location of package manifests
     schedule:
       interval: "daily"
+    exclude-paths:
+      - "/.github/workflows/test/assets/CI.yaml"
+      - "/.github/workflows/test/assets/CI2.yaml"
+      - "/.github/workflows/test/assets/CI3_backup.yml"
+      - "/.github/workflows/test/assets/CI3backup.yml"
+      - "/.github/workflows/test/assets/CI_ChatGPT.yml"
+      - "/.github/workflows/test/assets/CI_Gemini.yml"
 
   - package-ecosystem: "gomod" # See documentation for possible values
     directory: "/" # Location of package manifests
     schedule:
-      interval: "daily"    
+      interval: "daily"
+    exclude-paths:
+      - "/.github/workflows/test/assets/CI.yaml"
+      - "/.github/workflows/test/assets/CI2.yaml"
+      - "/.github/workflows/test/assets/CI3_backup.yml"
+      - "/.github/workflows/test/assets/CI3backup.yml"
+      - "/.github/workflows/test/assets/CI_ChatGPT.yml"
+      - "/.github/workflows/test/assets/CI_Gemini.yml"      
