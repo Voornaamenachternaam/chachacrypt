@@ -25,7 +25,7 @@ jobs:
             goarch: arm64
 
     steps:
-      - uses: actions/checkout@v5.0.1
+      - uses: actions/checkout@v6.0.0
       - name: Build and release binaries
         uses: wangyoucao577/go-release-action@v1.53
         with:
