@@ -134,7 +134,7 @@ jobs:
 
       - name: Create or update Pull Request with fixes (will only create PR if branch is ahead of main)
         id: create_pr
-        uses: peter-evans/create-pull-request@v7.0.8
+        uses: peter-evans/create-pull-request@v7.0.9
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
