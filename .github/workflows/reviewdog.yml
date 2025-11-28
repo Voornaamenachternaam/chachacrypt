@@ -1,4 +1,4 @@
-name: reviewdog (golangci → SARIF + artifact, reviewdog action)
+name: reviewdog
 
 permissions:
   actions: write
@@ -18,7 +18,7 @@ permissions:
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 2 * * *'  
+    - cron: '0 2 * * *'
   push:
     tags:
       - 'v*'
@@ -36,21 +36,15 @@ jobs:
       - name: Ensure reports dir exists
         run: mkdir -p reports
 
-      - name: Run golangci-lint (via reviewdog action) — generate SARIF & annotate PR
+      - name: Run golangci-lint (via reviewdog action)
         uses: reviewdog/action-golangci-lint@v2.8.0
         with:
           golangci_lint_version: v2.6.2
+          # We generate the SARIF here for the artifact upload
           golangci_lint_flags: '--fix --output.sarif.path=reports/golangci.sarif --output.text.path=stdout'
           reporter: github-pr-check
           cache: false
           level: error
-
-      - name: Show reports directory & SARIF head (debug)
-        run: |
-          echo "PWD: $(pwd)"
-          ls -la reports || true
-          echo "---- head of SARIF ----"
-          head -n 200 reports/golangci.sarif || true
 
       - name: Upload SARIF as GitHub Actions artifact
         if: always()
@@ -66,6 +60,10 @@ jobs:
           sarif_file: reports/golangci.sarif
           wait-for-processing: true
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Remove SARIF report before PR creation
+        if: always()
+        run: rm -rf reports
 
       - name: Create Pull Request with Fixes
         uses: peter-evans/create-pull-request@v7.0.9
