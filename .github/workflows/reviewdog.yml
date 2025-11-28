@@ -66,3 +66,13 @@ jobs:
           sarif_file: reports/golangci.sarif
           wait-for-processing: true
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Pull Request with Fixes
+        uses: peter-evans/create-pull-request@v7.0.9
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore: auto-fix golangci-lint issues"
+          title: "chore: auto-fix golangci-lint issues"
+          body: "Automated fixes applied by golangci-lint."
+          branch: "fix/golangci-lint-auto-fixes"
+          base: "main"
