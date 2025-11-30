@@ -43,7 +43,7 @@ jobs:
         run: |
           set -eux
           mkdir -p "${{ env.ARTIFACT_DIR }}"
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "${GOBIN:-$HOME/go/bin}" v2.5.0 || true
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "${GOBIN:-$HOME/go/bin}" v2.6.2 || true
           go install golang.org/x/tools/cmd/goimports@latest || true
           echo "${GOBIN:-$HOME/go/bin}" >> $GITHUB_PATH
           export PATH="${GOBIN:-$HOME/go/bin}:$PATH"
