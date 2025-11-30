@@ -1,16 +1,16 @@
 #name: CI_ChatGPT
 
 #on:
-  workflow_dispatch:
+  #workflow_dispatch:
 
 #permissions:
-  contents: write
-  checks: write
-  pull-requests: write
+ # contents: write
+  #checks: write
+  #pull-requests: write
 
 #env:
-  DEFAULT_AI_MODEL: tngtech/deepseek-r1t2-chimera:free
-  DEFAULT_BRANCH: main
+  #DEFAULT_AI_MODEL: tngtech/deepseek-r1t2-chimera:free
+  #DEFAULT_BRANCH: main
 
 #jobs:
   lint-fix-and-ai:
