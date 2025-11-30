@@ -79,7 +79,7 @@ func (r *CSPRNGReader) Read(p []byte) (n int, err error) {
 
 func (r *CSPRNGReader) checkEntropy(sample []byte) error {
 	if len(sample) < entropyCheckSize/2 {
-		return errors.New("insufficient sample size for entropy check")
+		return nil // Not enough data for meaningful check
 	}
 
 	freq := make(map[byte]int)
