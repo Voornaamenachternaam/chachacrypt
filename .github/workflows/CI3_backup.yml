@@ -1,18 +1,18 @@
 #name: "CI3 - backup"
 
 #permissions:
-  contents: write
-  pull-requests: write
+  #contents: write
+  #pull-requests: write
 
 #on:
-  workflow_dispatch:
+ # workflow_dispatch:
 
 #jobs:
-  update-and-test:
-    name: Update Go & Deps, Run Tests & Auto‐Fix
-    runs-on: ubuntu-latest
-    env:
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+  #update-and-test:
+    #name: Update Go & Deps, Run Tests & Auto‐Fix
+    #runs-on: ubuntu-latest
+    #env:
+      #OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 
     steps:
       - name: Checkout repository
