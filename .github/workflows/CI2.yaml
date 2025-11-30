@@ -16,12 +16,12 @@
   statuses: write
   
 #on:
-  schedule:
-    - cron: '0 2 * * *'
-  workflow_dispatch:
-  pull_request:
-    types:
-      - opened
+  #schedule:
+   # - cron: '0 2 * * *'
+  #workflow_dispatch:
+  #pull_request:
+    #types:
+      #- opened
 
 #jobs:
   bump:
