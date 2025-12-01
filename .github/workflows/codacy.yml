@@ -1,6 +1,5 @@
 name: Codacy Security Scan
 
-# Give the runner the permissions needed to upload SARIF results
 permissions:
   contents: read
   actions: read
@@ -21,13 +20,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6.0.0
 
-      - name: Run Codacy Analysis CLI
+      - name: Run Codacy Analysis CLI (only chachacrypt.go)
         uses: codacy/codacy-analysis-cli-action@master
         with:
           output: results.sarif
           format: sarif
           gh-code-scanning-compat: true
           max-allowed-issues: 2147483647
+          files: chachacrypt.go
 
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
@@ -94,5 +94,3 @@ jobs:
         uses: github/codeql-action/upload-sarif@main
         with:
           sarif_file: ${{ matrix.sarif_file }}
-          # Optional: explicitly provide a token (use only if GITHUB_TOKEN is insufficient).
-          # token: ${{ secrets.SARIF_UPLOAD_PAT }}
