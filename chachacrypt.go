@@ -16,20 +16,19 @@ import (
 	"time"
 
 	"golang.org/x/crypto/argon2"
-	"golang.org/x/crypto/chacha20poly1305"
 )
 
 var fileMagicV2 = [8]byte{'C', 'C', 'R', 'Y', 'P', 'T', 'V', '2'}
 
 const (
-	FileVersionV1   = uint32(1)
-	FileVersionV2   = uint32(2)
-	DefaultSaltSize = 32
-	DefaultKeySize  = 32
-	IntegritySize   = 32
-	DefaultChunkSize = 1 << 20
-	DefaultArgonTime = 3
-	DefaultArgonMem  = 13
+	FileVersionV1       = uint32(1)
+	FileVersionV2       = uint32(2)
+	DefaultSaltSize     = 32
+	DefaultKeySize      = 32
+	IntegritySize       = 32
+	DefaultChunkSize    = 1 << 20
+	DefaultArgonTime    = 3
+	DefaultArgonMem     = 13
 	DefaultArgonThreads = 1
 )
 
@@ -443,7 +442,6 @@ func streamDecryptInto(in io.Reader, out io.Writer, aead cipher.AEAD, header Fil
 // constant-time compare, salt uniqueness, chunk encryption/decryption)
 // These are implemented to satisfy unit tests and to be safe, minimal, and
 // correct. They are intentionally self-contained and use existing helpers.
-
 
 // config defines parameters used for header creation in tests.
 type config struct {
