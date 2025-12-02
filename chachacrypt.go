@@ -21,19 +21,16 @@ import (
 var fileMagicV2 = [8]byte{'C', 'C', 'R', 'Y', 'P', 'T', 'V', '2'}
 
 const (
-	FileVersionV1 = uint32(1)
-	FileVersionV2 = uint32(2)
-)
-
-const (
-	DefaultSaltSize   = 32
-	DefaultKeySize    = 32 // bytes for XChaCha20-Poly1305
-	IntegritySize     = 32 // bytes (HMAC-SHA256)
-	DefaultChunkSize  = 1 << 20 // 1 MiB
-	DefaultArgonTime  = 3
-	DefaultArgonMem   = 131072 // in KiB (128 MiB)
+	FileVersionV1      = uint32(1)
+	FileVersionV2      = uint32(2)
+	DefaultSaltSize    = 32
+	DefaultKeySize     = 32
+	IntegritySize      = 32
+	DefaultChunkSize   = 1 << 20
+	DefaultArgonTime   = 3
+	DefaultArgonMem    = 131072
 	DefaultArgonThreads = 4
-	MacKeyLen         = 32
+	MacKeyLen          = 32
 )
 
 var sink byte
@@ -85,34 +82,17 @@ func zeroBytes(b []byte) {
 }
 
 type FileHeader struct {
-	Version uint32
-
-	KeyVersion uint32
-
-	ArgonTime    uint32 // iterations
-	ArgonMem     uint32 // KiB
-	ArgonThreads uint8  // parallelism
-
-	// Key size in bytes (e.g. 32)
-	KeySize uint16
-
-	// Salt size in bytes (e.g. 32)
-	SaltSize uint16
-
-	// Chunk size for streaming encryption
-	ChunkSize uint32
-
-	// Reserved bytes for future use / alignment
-	reserved uint32
-
-	// Integrity HMAC-SHA256 (32 bytes)
-	Integrity [IntegritySize]byte
-
-	// Current struct size: should be small and fixed
+	Version      uint32
+	KeyVersion   uint32
+	ArgonTime    uint32
+	ArgonMem     uint32
+	ArgonThreads uint8
+	KeySize      uint16
+	SaltSize     uint16
+	ChunkSize    uint32
+	reserved     uint32
+	Integrity    [IntegritySize]byte
 }
-
-// headerSize is the serialized size of FileHeader
-var headerSize = binary.Size(FileHeader{})
 
 var (
 	saltMu    sync.Mutex
@@ -127,12 +107,10 @@ func recordSalt(salt []byte, ttl time.Duration) error {
 	if _, ok := saltCache[hex]; ok {
 		return fmt.Errorf("salt reuse detected in current process")
 	}
-	// copy salt
 	cp := make([]byte, len(salt))
 	copy(cp, salt)
 	saltCache[hex] = cp
 
-	// schedule eviction with zeroing
 	go func(key string, out []byte) {
 		timer := time.NewTimer(ttl)
 		<-timer.C
@@ -354,7 +332,6 @@ func encryptFile(inPath, outPath string, password *SecureBuffer, cfg *EncryptCon
 	header.SaltSize = uint16(cfg.SaltSize)
 	header.ChunkSize = uint32(cfg.ChunkSize)
 
-	// derive keys: encKeyLen + mackeylen
 	encKey, macKey, err := deriveKeys(password.Bytes(), salt, header, int(header.KeySize), MacKeyLen)
 	if err != nil {
 		return err
@@ -362,14 +339,12 @@ func encryptFile(inPath, outPath string, password *SecureBuffer, cfg *EncryptCon
 	defer encKey.Close()
 	defer func() { zeroBytes(macKey) }()
 
-	// compute header integrity using macKey
 	integrity, err := computeHeaderHMACWithKey(header, macKey)
 	if err != nil {
 		return err
 	}
 	header.Integrity = integrity
 
-	// Write V2 magic, salt (length+bytes), header
 	if _, err := outFile.Write(fileMagicV2[:]); err != nil {
 		return err
 	}
@@ -380,12 +355,10 @@ func encryptFile(inPath, outPath string, password *SecureBuffer, cfg *EncryptCon
 		return err
 	}
 
-	// begin streaming encryption using encKey
 	if err := streamEncryptInto(encKey.Bytes(), inFile, outFile, int(header.ChunkSize)); err != nil {
 		return err
 	}
 
-	// success: zero temporary secrets
 	encKey.Close()
 	zeroBytes(macKey)
 	zeroBytes(salt)
@@ -410,14 +383,12 @@ func decryptFile(inPath, outPath string, password *SecureBuffer) error {
 		}
 	}()
 
-	// Peek first 8 bytes to detect magic
 	var magic [8]byte
 	if _, err := io.ReadFull(inFile, magic[:]); err != nil {
 		return err
 	}
 
 	if bytes.Equal(magic[:], fileMagicV2[:]) {
-		// V2 layout: salt first, then header
 		if err := handleDecryptV2(inFile, outFile, password); err != nil {
 			return err
 		}
@@ -434,30 +405,24 @@ func decryptFile(inPath, outPath string, password *SecureBuffer) error {
 }
 
 func handleDecryptV2(inFile *os.File, outFile *os.File, password *SecureBuffer) error {
-	// We expect magic already consumed by caller.
-	// Read salt
 	salt, err := readSalt(inFile)
 	if err != nil {
 		return err
 	}
 	defer func() { zeroBytes(salt) }()
 
-	// read header
 	header, err := readHeader(inFile)
 	if err != nil {
 		return err
 	}
 
-	// Sanity checks
 	if header.Version != FileVersionV2 {
 		return fmt.Errorf("unexpected file version: %d (expected v2)", header.Version)
 	}
 	if int(header.SaltSize) != len(salt) {
-		// mismatch between header's salt size and actual salt bytes
 		return fmt.Errorf("salt size mismatch: header=%d actual=%d", header.SaltSize, len(salt))
 	}
 
-	// derive keys
 	encKey, macKey, err := deriveKeys(password.Bytes(), salt, header, int(header.KeySize), MacKeyLen)
 	if err != nil {
 		return err
@@ -465,12 +430,10 @@ func handleDecryptV2(inFile *os.File, outFile *os.File, password *SecureBuffer) 
 	defer encKey.Close()
 	defer func() { zeroBytes(macKey) }()
 
-	// Verify header HMAC with macKey
 	if err := verifyHeaderHMACWithKey(header, macKey); err != nil {
 		return err
 	}
 
-	// Now decrypt stream
 	if err := streamDecryptInto(encKey.Bytes(), inFile, outFile, int(header.ChunkSize)); err != nil {
 		return err
 	}
@@ -478,14 +441,9 @@ func handleDecryptV2(inFile *os.File, outFile *os.File, password *SecureBuffer) 
 }
 
 func handleDecryptV1(inFile *os.File, outFile *os.File, password *SecureBuffer) error {
-	// read header first
 	header, err := readHeader(inFile)
 	if err != nil {
 		return err
-	}
-	if header.Version != FileVersionV1 {
-		// it's possible original version field was v1; if different, still attempt legacy flow.
-		// We proceed but log version mismatch.
 	}
 
 	salt, err := readSalt(inFile)
@@ -532,7 +490,7 @@ func streamEncryptInto(encKey []byte, in io.Reader, out io.Writer, chunkSize int
 			return err
 		}
 		ciphertext := aead.Seal(nil, nonce, plaintext, nil)
-		
+
 		if err := binary.Write(out, binary.LittleEndian, uint32(len(ciphertext))); err != nil {
 			zeroBytes(nonce)
 			zeroBytes(ciphertext)
@@ -606,7 +564,6 @@ func streamDecryptInto(encKey []byte, in io.Reader, out io.Writer, chunkSize int
 		zeroBytes(nonce)
 		zeroBytes(ciphertext)
 		zeroBytes(plaintext)
-
 	}
 }
 
