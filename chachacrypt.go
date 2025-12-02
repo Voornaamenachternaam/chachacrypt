@@ -389,7 +389,7 @@ func main() {
 		pw.Parse(os.Args[2:])
 		password, err := getPassword(*size)
 		if err != nil {
-			log.Fatal(err)
+			log.Fatal("Failed to generate password")
 		}
 		fmt.Println(password)
 
