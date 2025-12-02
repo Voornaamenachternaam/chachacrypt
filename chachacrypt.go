@@ -21,16 +21,16 @@ import (
 var fileMagicV2 = [8]byte{'C', 'C', 'R', 'Y', 'P', 'T', 'V', '2'}
 
 const (
-	FileVersionV1      = uint32(1)
-	FileVersionV2      = uint32(2)
-	DefaultSaltSize    = 32
-	DefaultKeySize     = 32
-	IntegritySize      = 32
-	DefaultChunkSize   = 1 << 20
-	DefaultArgonTime   = 3
-	DefaultArgonMem    = 131072
+	FileVersionV1       = uint32(1)
+	FileVersionV2       = uint32(2)
+	DefaultSaltSize     = 32
+	DefaultKeySize      = 32
+	IntegritySize       = 32
+	DefaultChunkSize    = 1 << 20
+	DefaultArgonTime    = 3
+	DefaultArgonMem     = 131072
 	DefaultArgonThreads = 4
-	MacKeyLen          = 32
+	MacKeyLen           = 32
 )
 
 var sink byte
