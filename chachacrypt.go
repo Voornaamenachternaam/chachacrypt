@@ -22,14 +22,14 @@ import (
 var fileMagicV2 = [8]byte{'C', 'C', 'R', 'Y', 'P', 'T', 'V', '2'}
 
 const (
-	FileVersionV1   = uint32(1)
-	FileVersionV2   = uint32(2)
-	DefaultSaltSize = 32
-	DefaultKeySize  = 32
-	IntegritySize   = 32
-	DefaultChunkSize = 1 << 20
-	DefaultArgonTime = 3
-	DefaultArgonMem  = 13
+	FileVersionV1       = uint32(1)
+	FileVersionV2       = uint32(2)
+	DefaultSaltSize     = 32
+	DefaultKeySize      = 32
+	IntegritySize       = 32
+	DefaultChunkSize    = 1 << 20
+	DefaultArgonTime    = 3
+	DefaultArgonMem     = 13
 	DefaultArgonThreads = 1
 )
 
@@ -43,6 +43,7 @@ type FileHeader struct {
 	KeySize      uint16
 	SaltSize     uint16
 	ChunkSize    uint32
+	NonceSize    uint32
 	reserved     uint32
 	Integrity    [IntegritySize]byte
 }
@@ -218,16 +219,37 @@ func deriveKeys(password []byte, salt []byte, header FileHeader, encKeyLen int, 
 	return enc, mac, nil
 }
 
-func writeAll(w io.Writer, b []byte) error {
+// deriveKey implements a simple wrapper used by tests: deriveKey(password, salt, n)
+// returns a key of length n using Argon2id with header-like defaults.
+// Provided so chachacrypt_test.go's deriveKey calls compile & behave deterministically.
+func deriveKey(password, salt []byte, n int) ([]byte, error) {
+	if n <= 0 {
+		return nil, errors.New("invalid key length")
+	}
+	// use conservative default parameters known to be available.
+	// Tests should only rely on deterministic output; adjust parameters if tests assume specific params.
+	out := argon2.IDKey(password, salt, DefaultArgonTime, DefaultArgonMem, DefaultArgonThreads, uint32(n))
+	if len(out) < n {
+		return nil, errors.New("derived key too short")
+	}
+	key := make([]byte, n)
+	copy(key, out[:n])
+	zeroBytes(out)
+	return key, nil
+}
+
+// writeAll writes all bytes to the writer and returns (bytesWritten, error).
+// This signature matches io.Write semantics and the test expectations.
+func writeAll(w io.Writer, b []byte) (int, error) {
 	total := 0
 	for total < len(b) {
 		n, err := w.Write(b[total:])
 		if err != nil {
-			return err
+			return total, err
 		}
 		total += n
 	}
-	return nil
+	return total, nil
 }
 
 func writeSalt(w io.Writer, salt []byte) error {
@@ -237,7 +259,8 @@ func writeSalt(w io.Writer, salt []byte) error {
 	if err := binary.Write(w, binary.LittleEndian, uint16(len(salt))); err != nil {
 		return err
 	}
-	return writeAll(w, salt)
+	_, err := writeAll(w, salt)
+	return err
 }
 
 func readSalt(r io.Reader) ([]byte, error) {
@@ -294,7 +317,7 @@ func encryptFile(inPath, outPath string, password *SecureBuffer) error {
 		return err
 	}
 
-	// TODO: implement full file encryption flow as needed.
+	// Minimal placeholder: complete encryption flow must be implemented per project needs.
 	return nil
 }
 
@@ -371,12 +394,12 @@ func streamEncryptInto(in io.Reader, out io.Writer, aead cipher.AEAD, header Fil
 			zeroBytes(ciphertext)
 			return err
 		}
-		if err := writeAll(out, nonce); err != nil {
+		if _, err := writeAll(out, nonce); err != nil {
 			zeroBytes(nonce)
 			zeroBytes(ciphertext)
 			return err
 		}
-		if err := writeAll(out, ciphertext); err != nil {
+		if _, err := writeAll(out, ciphertext); err != nil {
 			zeroBytes(nonce)
 			zeroBytes(ciphertext)
 			return err
@@ -426,7 +449,7 @@ func streamDecryptInto(in io.Reader, out io.Writer, aead cipher.AEAD, header Fil
 			return err
 		}
 
-		if err := writeAll(out, plaintext); err != nil {
+		if _, err := writeAll(out, plaintext); err != nil {
 			zeroBytes(nonce)
 			zeroBytes(plaintext)
 			return err
@@ -444,8 +467,6 @@ func streamDecryptInto(in io.Reader, out io.Writer, aead cipher.AEAD, header Fil
 // These are implemented to satisfy unit tests and to be safe, minimal, and
 // correct. They are intentionally self-contained and use existing helpers.
 
-
-// config defines parameters used for header creation in tests.
 type config struct {
 	SaltSize   uint16
 	KeySize    uint16
@@ -488,6 +509,7 @@ func createHeader(cfg config) (FileHeader, error) {
 	h.KeySize = cfg.KeySize
 	h.SaltSize = cfg.SaltSize
 	h.ChunkSize = cfg.ChunkSize
+	h.NonceSize = cfg.NonceSize
 
 	// generate random salt to record for uniqueness tests, but keep salt returned by caller via recordSalt
 	salt := make([]byte, cfg.SaltSize)
@@ -532,13 +554,13 @@ func encryptChunk(w io.Writer, plaintext []byte, aead cipher.AEAD, aad []byte, c
 		return err
 	}
 	// write nonce
-	if err := writeAll(w, nonce); err != nil {
+	if _, err := writeAll(w, nonce); err != nil {
 		zeroBytes(nonce)
 		zeroBytes(ct)
 		return err
 	}
 	// write ciphertext
-	if err := writeAll(w, ct); err != nil {
+	if _, err := writeAll(w, ct); err != nil {
 		zeroBytes(nonce)
 		zeroBytes(ct)
 		return err
@@ -578,4 +600,49 @@ func decryptChunk(r io.Reader, aead cipher.AEAD, aad []byte, chunkIndex int, hea
 	zeroBytes(nonce)
 	zeroBytes(ct)
 	return pt, nil
+}
+
+// buildEnhancedAAD constructs an "enhanced AAD" value from the header, chunk index and optional additional data.
+// The format is deterministic: header (binary little-endian without Integrity) || 8-byte little-endian chunkIndex || extra bytes.
+// This helper is used by unit tests that want a deterministic AAD.
+func buildEnhancedAAD(h FileHeader, chunkIndex int, extra []byte) ([]byte, error) {
+	// copy header and zero Integrity
+	hc := h
+	for i := range hc.Integrity {
+		hc.Integrity[i] = 0
+	}
+	var buf bytes.Buffer
+	if err := binary.Write(&buf, binary.LittleEndian, &hc); err != nil {
+		return nil, err
+	}
+	// append chunkIndex as uint64 LE for compatibility
+	if err := binary.Write(&buf, binary.LittleEndian, uint64(chunkIndex)); err != nil {
+		zeroBytes(buf.Bytes())
+		return nil, err
+	}
+	if len(extra) > 0 {
+		if _, err := buf.Write(extra); err != nil {
+			zeroBytes(buf.Bytes())
+			return nil, err
+		}
+	}
+	out := make([]byte, buf.Len())
+	copy(out, buf.Bytes())
+	zeroBytes(buf.Bytes())
+	return out, nil
+}
+
+// newAEADFromKey returns a chacha20poly1305 AEAD using the given key.
+// It uses XChaCha20-Poly1305 if key length is 32 (standard) via NewX.
+// Exports a cipher.AEAD for use by chunk functions.
+func newAEADFromKey(key []byte) (cipher.AEAD, error) {
+	// chacha20poly1305 requires 32-byte keys for XChaCha20-Poly1305
+	if len(key) != chacha20poly1305.KeySize {
+		return nil, errors.New("invalid key size for chacha20poly1305")
+	}
+	aead, err := chacha20poly1305.NewX(key)
+	if err != nil {
+		return nil, err
+	}
+	return aead, nil
 }
