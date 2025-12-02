@@ -9,43 +9,20 @@ on:
   schedule:
     - cron: '0 2 * * *'
 
-# Minimal permissions required for typical test/checkout operations
-permissions:
-  contents: read
-
 jobs:
-  coverage:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6.0.0
-
-      - name: Use Go version from repository's go.mod (no cache)
-        uses: actions/setup-go@v6.1.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-          token: ${{ github.token }}
-
-      - name: Print Go and environment info
-        run: |
-          go version
-          go env GOPATH GOMODCACHE GOWORK
-
-      - name: Install module dependencies
-        run: |
-          # ensure modules are downloaded (fast and deterministic)
-          go mod download
-
-      - name: Run tests with coverage
-        continue-on-error: true
-        run: |
-          # produce a repository-wide coverage profile that go-test-coverage can analyze
-          go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=./...
-
-      - name: Check test coverage (go-test-coverage action)
-        continue-on-error: true
-        uses: vladopajic/go-test-coverage@v2.18.0
-        with:
-          # action will read this config file to decide pass/fail thresholds
-          config: ./.testcoverage.yml
+    - name: Checkout code
+      uses: actions/checkout@v6.0.1
+    - name: Set up Go
+      uses: actions/setup-go@v6.1.0
+      with:
+        go-version: '1.25.4'
+    - name: Run tests with coverage
+      run: |
+        go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=./...
+    - name: Upload coverage
+      uses: codecov/codecov-action@v5.5.1
+      with:
+        file: cover.out
