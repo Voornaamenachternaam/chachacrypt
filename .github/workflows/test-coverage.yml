@@ -20,11 +20,9 @@ jobs:
       uses: actions/setup-go@v6.1.0
       with:
         go-version: '1.25.5'
-    - name: Run tests with coverage
-      continue-on-error: true
+    - name: Run tests with race detector and coverage
       run: |
-        go test ./... -coverprofile=cover.out -covermode=atomic -coverpkg=./...
-    - name: Upload coverage
-      uses: codecov/codecov-action@v5.5.1
-      with:
-        file: cover.out
+          go test ./... -race -covermode=atomic -coverprofile=coverage.out
+    - name: Display test coverage
+      run: go tool cover -func=coverage.out
+
