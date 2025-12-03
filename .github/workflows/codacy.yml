@@ -18,7 +18,7 @@ jobs:
       sarif_files: ${{ steps.split.outputs.sarif_files }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
 
       - name: Run Codacy Analysis CLI (only chachacrypt.go)
         uses: codacy/codacy-analysis-cli-action@master
@@ -77,7 +77,7 @@ jobs:
         sarif_file: ${{ fromJson(needs.codacy-security-scan.outputs.sarif_files) }}
     steps:
       - name: Checkout code (optional)
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
 
       - name: Download SARIF artifacts
         uses: actions/download-artifact@v6.0.0

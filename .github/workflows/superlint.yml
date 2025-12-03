@@ -37,7 +37,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Checkout (for lint check)
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
         with:
           fetch-depth: 0
           persist-credentials: true
@@ -67,7 +67,7 @@ jobs:
 
     steps:
       - name: Checkout head or specified ref (full history, no persisted creds)
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6.0.1
         with:
           ref: ${{ github.event.pull_request.head.ref || github.head_ref || github.ref_name || github.ref }}
           fetch-depth: 0
