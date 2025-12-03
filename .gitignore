@@ -9,3 +9,5 @@ ci-artifacts*
 gha-creds-*.json
 
 sonar-project.properties
+
+**chachacryptdotgo**
