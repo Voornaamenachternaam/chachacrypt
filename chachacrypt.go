@@ -32,12 +32,11 @@ import (
 )
 
 const (
-	MagicNumber  = "CHACRYPT"
-	FileVersion  = byte(2)
-	defaultSalt  = 32
-	defaultKey   = 32
-	defaultNonce = chacha20poly1305.NonceSizeX
-
+	MagicNumber         = "CHACRYPT"
+	FileVersion         = byte(2)
+	defaultSalt         = 32
+	defaultKey          = 32
+	defaultNonce        = chacha20poly1305.NonceSizeX
 	defaultArgonTime    = 6
 	defaultArgonMemory  = 256 * 1024
 	defaultArgonThreads = 2
@@ -55,7 +54,7 @@ const (
 	maxKeyVersion = 255
 )
 
-var zeroBuf = make([]byte, 64) // Buffer of zeros for secure clearing [[12]]
+var zeroBuf = make([]byte, 64) // Buffer of zeros for secure clearing
 
 func minInt(a, b int) int {
 	if a < b {
@@ -83,7 +82,6 @@ func (r *CSPRNGReader) checkEntropy(sample []byte) error {
 	if len(sample) < entropyCheckSize/2 {
 		return nil // Not enough data for meaningful check
 	}
-
 	freq := make(map[byte]int)
 	for _, b := range sample {
 		freq[b]++
@@ -93,7 +91,6 @@ func (r *CSPRNGReader) checkEntropy(sample []byte) error {
 		p := float64(count) / float64(len(sample))
 		entropy -= p * math.Log2(p)
 	}
-
 	maxPossible := math.Log2(math.Min(256.0, float64(len(sample))))
 	if minEntropyBits > maxPossible {
 		return fmt.Errorf(
@@ -101,7 +98,6 @@ func (r *CSPRNGReader) checkEntropy(sample []byte) error {
 			len(sample), maxPossible, minEntropyBits,
 		)
 	}
-
 	if entropy < minEntropyBits {
 		return fmt.Errorf("insufficient entropy: %f < %f", entropy, minEntropyBits)
 	}
@@ -112,7 +108,7 @@ var (
 	csprng    = &CSPRNGReader{}
 	saltCache = make(map[string][]byte)
 	saltMu    sync.RWMutex
-	saltWg    sync.WaitGroup // For managing cleanup goroutine lifecycle [[3]]
+	saltWg    sync.WaitGroup // For managing cleanup goroutine lifecycle
 )
 
 func sink(b []byte) {
@@ -152,6 +148,9 @@ type SecureBuffer struct {
 }
 
 func NewSecureBuffer(size int) *SecureBuffer {
+	if size < 0 {
+		size = 0
+	}
 	return &SecureBuffer{
 		data: make([]byte, size),
 	}
@@ -169,9 +168,14 @@ func (sb *SecureBuffer) Zero() {
 	}
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
-	copy(sb.data, zeroBuf) // Prevent compiler optimization [[12]]
+	if sb.zeroed.Load() {
+		return
+	}
+	for i := range sb.data {
+		sb.data[i] = 0
+	}
 	sb.zeroed.Store(true)
-	runtime.KeepAlive(sb.data)
+	sink(sb.data)
 }
 
 func (sb *SecureBuffer) IsZeroed() bool {
@@ -184,27 +188,25 @@ func (sb *SecureBuffer) Close() error {
 }
 
 func ConstantTimeEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
 	return subtle.ConstantTimeCompare(a, b) == 1
 }
 
 func validateSaltUniqueness(salt []byte) error {
 	saltHex := hex.EncodeToString(salt)
-
 	saltMu.RLock()
 	_, exists := saltCache[saltHex]
 	saltMu.RUnlock()
 	if exists {
 		return errors.New("salt has been used before - potential security issue")
 	}
-
 	cp := make([]byte, len(salt))
 	copy(cp, salt)
-
 	saltMu.Lock()
 	saltCache[saltHex] = cp
 	saltMu.Unlock()
-
-	// Start cleanup goroutine in a WaitGroup to ensure it exits cleanly [[3]]
 	saltWg.Add(1)
 	go func(key string) {
 		defer saltWg.Done()
@@ -213,7 +215,6 @@ func validateSaltUniqueness(salt []byte) error {
 		delete(saltCache, key)
 		saltMu.Unlock()
 	}(saltHex)
-
 	return nil
 }
 
@@ -221,17 +222,14 @@ func createFileIntegrity(header FileHeader, salt []byte) ([32]byte, error) {
 	headerCopy := header
 	var zeroIntegrity [32]byte
 	headerCopy.Integrity = zeroIntegrity
-
 	var headerBuf bytes.Buffer
 	if err := binary.Write(&headerBuf, binary.LittleEndian, headerCopy); err != nil {
 		return zeroIntegrity, fmt.Errorf("failed to serialize header: %w", err)
 	}
-
 	mac := hmac.New(sha256.New, salt)
 	if _, err := mac.Write(headerBuf.Bytes()); err != nil {
 		return zeroIntegrity, fmt.Errorf("hmac write failed: %w", err)
 	}
-
 	var integrity [32]byte
 	copy(integrity[:], mac.Sum(nil))
 	return integrity, nil
@@ -242,7 +240,7 @@ func verifyFileIntegrity(header FileHeader, salt []byte) error {
 	if err != nil {
 		return fmt.Errorf("integrity check failed: %w", err)
 	}
-	if !hmac.Equal(header.Integrity[:], expected[:]) { // Use constant-time comparison [[15]]
+	if !hmac.Equal(header.Integrity[:], expected[:]) {
 		return errors.New("file metadata has been tampered with")
 	}
 	return nil
@@ -250,7 +248,6 @@ func verifyFileIntegrity(header FileHeader, salt []byte) error {
 
 func buildEnhancedAAD(header FileHeader, chunkSeq uint64) ([]byte, error) {
 	var aad bytes.Buffer
-
 	if err := binary.Write(&aad, binary.LittleEndian, header.Magic); err != nil {
 		return nil, err
 	}
@@ -275,13 +272,11 @@ func buildEnhancedAAD(header FileHeader, chunkSeq uint64) ([]byte, error) {
 	if err := binary.Write(&aad, binary.LittleEndian, header.Timestamp); err != nil {
 		return nil, err
 	}
-
 	var seqBytes [8]byte
 	binary.BigEndian.PutUint64(seqBytes[:], chunkSeq)
 	if _, err := aad.Write(seqBytes[:]); err != nil {
 		return nil, err
 	}
-
 	return aad.Bytes(), nil
 }
 
@@ -290,7 +285,6 @@ func main() {
 		showHelp()
 		os.Exit(1)
 	}
-
 	switch os.Args[1] {
 	case "enc":
 		if err := handleEncrypt(context.Background()); err != nil {
@@ -328,20 +322,17 @@ func handleEncrypt(ctx context.Context) error {
 	if err := enc.Parse(os.Args[2:]); err != nil {
 		return fmt.Errorf("flag parsing failed: %w", err)
 	}
-
 	if err := validateFileInput(*in, *out); err != nil {
 		return fmt.Errorf("input validation failed: %w", err)
 	}
 	if *in == *out {
 		return errors.New("input and output file must be different")
 	}
-
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
 	}
-
 	password, err := readPasswordPromptConfirm("Enter a strong password: ", "Confirm password: ")
 	if err != nil {
 		return fmt.Errorf("password input failed: %w", err)
@@ -354,12 +345,10 @@ func handleEncrypt(ctx context.Context) error {
 			log.Printf("close error: %v", cerr)
 		}
 	}(password)
-
 	cfg, err := buildConfig(*argTime, *argMem, *argThreads, *chunkSize, *saltSize, *keySize, byte(*keyVersion))
 	if err != nil {
 		return fmt.Errorf("configuration validation failed: %w", err)
 	}
-
 	start := time.Now()
 	if err := encryptFile(ctx, *in, *out, password, cfg); err != nil {
 		return fmt.Errorf("encryption failed: %w", err)
@@ -375,20 +364,17 @@ func handleDecrypt(ctx context.Context) error {
 	if err := dec.Parse(os.Args[2:]); err != nil {
 		return fmt.Errorf("flag parsing failed: %w", err)
 	}
-
 	if err := validateFileInput(*in, *out); err != nil {
 		return fmt.Errorf("input validation failed: %w", err)
 	}
 	if *in == *out {
 		return errors.New("input and output file must be different")
 	}
-
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
 	}
-
 	if !isTerminal(os.Stdin.Fd()) {
 		return errors.New("interactive input required")
 	}
@@ -399,7 +385,6 @@ func handleDecrypt(ctx context.Context) error {
 		return fmt.Errorf("password read failed: %w", err)
 	}
 	defer zeroBytes(pwBytes)
-
 	cfg := config{}
 	start := time.Now()
 	if err := decryptFile(ctx, *in, *out, pwBytes, cfg); err != nil {
@@ -431,17 +416,14 @@ func handleKeyRotation(ctx context.Context) error {
 	if err := rot.Parse(os.Args[2:]); err != nil {
 		return fmt.Errorf("flag parsing failed: %w", err)
 	}
-
 	if err := validateFileInput(*in, *out); err != nil {
 		return fmt.Errorf("input validation failed: %w", err)
 	}
-
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
 	}
-
 	if !isTerminal(os.Stdin.Fd()) {
 		return errors.New("interactive input required")
 	}
@@ -452,11 +434,9 @@ func handleKeyRotation(ctx context.Context) error {
 		return fmt.Errorf("password read failed: %w", err)
 	}
 	defer zeroBytes(pwBytes)
-
 	if *newVersion > maxKeyVersion {
 		return fmt.Errorf("key version too large (max %d): %d", maxKeyVersion, *newVersion)
 	}
-
 	return rotateKey(ctx, *in, *out, pwBytes, byte(*newVersion))
 }
 
@@ -479,7 +459,6 @@ func buildConfig(argTime, argMem, argThreads, chunkSize, saltSize, keySize int, 
 	if keySize < 16 || keySize > maxKeySize {
 		return config{}, fmt.Errorf("key-size out of bounds (16-%d bytes): %d", maxKeySize, keySize)
 	}
-
 	return config{
 		SaltSize:   uint32(saltSize),
 		KeySize:    uint32(keySize),
@@ -494,10 +473,10 @@ func buildConfig(argTime, argMem, argThreads, chunkSize, saltSize, keySize int, 
 
 func showHelp() {
 	fmt.Println("Usage:")
-	fmt.Println("  Encrypt a file:     chachacrypt enc -i input.txt -o output.enc")
-	fmt.Println("  Decrypt a file:     chachacrypt dec -i input.enc -o decrypted.txt")
-	fmt.Println("  Generate a password: chachacrypt pw -s 15")
-	fmt.Println("  Rotate key:         chachacrypt rotate -i input.enc -o output.enc -new-version 1")
+	fmt.Println(" Encrypt a file: chachacrypt enc -i input.txt -o output.enc")
+	fmt.Println(" Decrypt a file: chachacrypt dec -i input.enc -o decrypted.txt")
+	fmt.Println(" Generate a password: chachacrypt pw -s 15")
+	fmt.Println(" Rotate key: chachacrypt rotate -i input.enc -o output.enc -new-version 1")
 }
 
 func validateFilePath(p string) error {
@@ -543,21 +522,22 @@ func isTerminal(fd uintptr) bool {
 }
 
 func zeroBytes(b []byte) {
-	copy(b, zeroBuf)
+	for i := range b {
+		b[i] = 0
+	}
+	sink(b)
 }
 
 func readPasswordPromptConfirm(prompt, confirmPrompt string) (*SecureBuffer, error) {
 	if !isTerminal(os.Stdin.Fd()) {
 		return nil, errors.New("interactive input required")
 	}
-
 	fmt.Print(prompt)
 	p1, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
 	if err != nil {
 		return nil, fmt.Errorf("password read failed: %w", err)
 	}
-
 	fmt.Print(confirmPrompt)
 	p2, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
@@ -565,13 +545,11 @@ func readPasswordPromptConfirm(prompt, confirmPrompt string) (*SecureBuffer, err
 		zeroBytes(p1)
 		return nil, fmt.Errorf("password confirmation failed: %w", err)
 	}
-
 	if len(p1) != len(p2) || !ConstantTimeEqual(p1, p2) {
 		zeroBytes(p1)
 		zeroBytes(p2)
 		return nil, errors.New("password mismatch")
 	}
-
 	sb := NewSecureBuffer(len(p1))
 	copy(sb.Bytes(), p1)
 	zeroBytes(p1)
@@ -584,10 +562,8 @@ func generatePassword(n int) (string, error) {
 	if n <= 0 {
 		return "", errors.New("invalid password length")
 	}
-
 	var result strings.Builder
 	result.Grow(n)
-
 	for i := 0; i < n; i++ {
 		idx, err := rand.Int(csprng, big.NewInt(int64(len(letters))))
 		if err != nil {
@@ -595,7 +571,6 @@ func generatePassword(n int) (string, error) {
 		}
 		result.WriteByte(letters[idx.Int64()])
 	}
-
 	return result.String(), nil
 }
 
@@ -606,13 +581,11 @@ func encryptFile(ctx context.Context, inputFile, outputFile string, password *Se
 	if err := validateFilePath(outputFile); err != nil {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
-
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
 	}
-
 	outFile, err := os.Create(outputFile)
 	if err != nil {
 		return fmt.Errorf("file creation failed: %w", err)
@@ -622,7 +595,6 @@ func encryptFile(ctx context.Context, inputFile, outputFile string, password *Se
 			log.Printf("close error: %v", cerr)
 		}
 	}()
-
 	inFile, err := os.Open(inputFile)
 	if err != nil {
 		return fmt.Errorf("file access failed: %w", err)
@@ -632,7 +604,6 @@ func encryptFile(ctx context.Context, inputFile, outputFile string, password *Se
 			log.Printf("close error: %v", cerr)
 		}
 	}()
-
 	salt, err := generateSalt(cfg.SaltSize)
 	if err != nil {
 		return fmt.Errorf("salt generation failed: %w", err)
@@ -645,30 +616,24 @@ func encryptFile(ctx context.Context, inputFile, outputFile string, password *Se
 			log.Printf("close error: %v", cerr)
 		}
 	}(salt)
-
 	header, err := createHeader(cfg)
 	if err != nil {
 		return fmt.Errorf("header creation failed: %w", err)
 	}
-
 	if err := validateSaltUniqueness(salt.Bytes()); err != nil {
 		return fmt.Errorf("salt validation failed: %w", err)
 	}
-
 	integrity, err := createFileIntegrity(header, salt.Bytes())
 	if err != nil {
 		return fmt.Errorf("integrity creation failed: %w", err)
 	}
 	header.Integrity = integrity
-
 	if err := writeHeader(outFile, header); err != nil {
 		return fmt.Errorf("header write failed: %w", err)
 	}
-
 	if err := writeSalt(outFile, salt.Bytes()); err != nil {
 		return fmt.Errorf("salt write failed: %w", err)
 	}
-
 	key, err := deriveKey(password.Bytes(), salt.Bytes(), header)
 	if err != nil {
 		return fmt.Errorf("key derivation failed: %w", err)
@@ -681,7 +646,6 @@ func encryptFile(ctx context.Context, inputFile, outputFile string, password *Se
 			log.Printf("close error: %v", cerr)
 		}
 	}(key)
-
 	return processFile(ctx, inFile, outFile, key, cfg, header)
 }
 
@@ -692,13 +656,11 @@ func decryptFile(ctx context.Context, inputFile, outputFile string, password []b
 	if err := validateFilePath(outputFile); err != nil {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
-
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
 	}
-
 	inFile, err := os.Open(inputFile)
 	if err != nil {
 		return fmt.Errorf("file access failed: %w", err)
@@ -708,12 +670,10 @@ func decryptFile(ctx context.Context, inputFile, outputFile string, password []b
 			log.Printf("close error: %v", cerr)
 		}
 	}()
-
 	header, err := readHeader(inFile)
 	if err != nil {
 		return fmt.Errorf("file format error: %w", err)
 	}
-
 	salt, err := readSalt(inFile, header.SaltSize)
 	if err != nil {
 		return fmt.Errorf("salt read failed: %w", err)
@@ -726,11 +686,9 @@ func decryptFile(ctx context.Context, inputFile, outputFile string, password []b
 			log.Printf("close error: %v", cerr)
 		}
 	}(salt)
-
 	if err := verifyFileIntegrity(header, salt.Bytes()); err != nil {
 		return fmt.Errorf("integrity verification failed: %w", err)
 	}
-
 	key, err := deriveKey(password, salt.Bytes(), header)
 	if err != nil {
 		return fmt.Errorf("key derivation failed: %w", err)
@@ -743,7 +701,6 @@ func decryptFile(ctx context.Context, inputFile, outputFile string, password []b
 			log.Printf("close error: %v", cerr)
 		}
 	}(key)
-
 	outFile, err := os.Create(outputFile)
 	if err != nil {
 		return fmt.Errorf("file creation failed: %w", err)
@@ -753,7 +710,6 @@ func decryptFile(ctx context.Context, inputFile, outputFile string, password []b
 			log.Printf("close error: %v", cerr)
 		}
 	}()
-
 	return decryptProcess(ctx, inFile, outFile, key, header)
 }
 
@@ -764,13 +720,11 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 	if err := validateFilePath(outputFile); err != nil {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
-
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
 	}
-
 	inFile, err := os.Open(inputFile)
 	if err != nil {
 		return fmt.Errorf("file access failed: %w", err)
@@ -780,12 +734,10 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 			log.Printf("close error: %v", cerr)
 		}
 	}()
-
 	header, err := readHeader(inFile)
 	if err != nil {
 		return fmt.Errorf("file format error: %w", err)
 	}
-
 	salt, err := readSalt(inFile, header.SaltSize)
 	if err != nil {
 		return fmt.Errorf("salt read failed: %w", err)
@@ -798,7 +750,6 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 			log.Printf("close error: %v", cerr)
 		}
 	}(salt)
-
 	originalKey, err := deriveKey(password, salt.Bytes(), header)
 	if err != nil {
 		return fmt.Errorf("key derivation failed: %w", err)
@@ -811,16 +762,13 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 			log.Printf("close error: %v", cerr)
 		}
 	}(originalKey)
-
 	header.KeyVersion = newVersion
 	header.Timestamp = uint64(time.Now().Unix())
-
 	integrity, err := createFileIntegrity(header, salt.Bytes())
 	if err != nil {
 		return fmt.Errorf("integrity creation failed: %w", err)
 	}
 	header.Integrity = integrity
-
 	outFile, err := os.Create(outputFile)
 	if err != nil {
 		return fmt.Errorf("file creation failed: %w", err)
@@ -830,18 +778,15 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 			log.Printf("close error: %v", cerr)
 		}
 	}()
-
 	if err := writeHeader(outFile, header); err != nil {
 		return fmt.Errorf("header write failed: %w", err)
 	}
 	if err := writeSalt(outFile, salt.Bytes()); err != nil {
 		return fmt.Errorf("salt write failed: %w", err)
 	}
-
 	if _, err := inFile.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("seek failed: %w", err)
 	}
-
 	return processKeyRotation(ctx, inFile, outFile, originalKey, header)
 }
 
@@ -850,12 +795,10 @@ func processKeyRotation(ctx context.Context, inFile, outFile *os.File, key *Secu
 	if err != nil {
 		return fmt.Errorf("AEAD initialization failed: %w", err)
 	}
-
 	baseAAD, err := buildEnhancedAAD(header, 0)
 	if err != nil {
 		return fmt.Errorf("AAD construction failed: %w", err)
 	}
-
 	headerSize := binary.Size(header)
 	if headerSize <= 0 {
 		return errors.New("invalid header size")
@@ -863,24 +806,20 @@ func processKeyRotation(ctx context.Context, inFile, outFile *os.File, key *Secu
 	if _, err := inFile.Seek(int64(headerSize)+int64(header.SaltSize), io.SeekStart); err != nil {
 		return fmt.Errorf("seek failed: %w", err)
 	}
-
 	nonceSize := int(header.NonceSize)
 	var seq uint64
-
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-
 		nonce := make([]byte, nonceSize)
 		if _, err := io.ReadFull(inFile, nonce); err == io.EOF {
 			break
 		} else if err != nil {
 			return fmt.Errorf("nonce read failed: %w", err)
 		}
-
 		var clen uint32
 		if err := binary.Read(inFile, binary.LittleEndian, &clen); err != nil {
 			return fmt.Errorf("length read failed: %w", err)
@@ -888,40 +827,32 @@ func processKeyRotation(ctx context.Context, inFile, outFile *os.File, key *Secu
 		if clen > uint32(maxChunkSize) {
 			return errors.New("chunk size exceeds limit")
 		}
-
 		ct := make([]byte, clen)
 		if _, err := io.ReadFull(inFile, ct); err != nil {
 			return fmt.Errorf("ciphertext read failed: %w", err)
 		}
-
 		plain, err := aead.Open(nil, nonce, ct, baseAAD)
 		zeroBytes(ct)
 		if err != nil {
 			return fmt.Errorf("decryption failed during rotation: %w", err)
 		}
-
 		newAAD, err := buildEnhancedAAD(header, seq)
 		if err != nil {
 			zeroBytes(plain)
 			return fmt.Errorf("AAD reconstruction failed: %w", err)
 		}
-
 		newNonce := make([]byte, nonceSize)
 		if _, err := csprng.Read(newNonce); err != nil {
 			zeroBytes(plain)
 			return fmt.Errorf("nonce generation failed: %w", err)
 		}
-
 		newCT := aead.Seal(nil, newNonce, plain, newAAD)
 		zeroBytes(plain)
-
 		if err := writeChunk(outFile, newNonce, newCT); err != nil {
 			return fmt.Errorf("chunk write failed: %w", err)
 		}
-
 		seq++
 	}
-
 	return nil
 }
 
@@ -949,13 +880,11 @@ func createHeader(cfg config) (FileHeader, error) {
 	header.NonceSize = uint32(cfg.NonceSize)
 	header.KeyVersion = cfg.KeyVersion
 	header.Timestamp = uint64(time.Now().Unix())
-
 	for i := range header.Padding {
 		if header.Padding[i] != 0 {
 			return FileHeader{}, errors.New("non-zero padding detected")
 		}
 	}
-
 	return header, nil
 }
 
@@ -981,11 +910,9 @@ func deriveKey(password []byte, salt []byte, header FileHeader) (*SecureBuffer, 
 	key := NewSecureBuffer(int(header.KeySize))
 	derived := argon2.IDKey(password, salt, header.ArgonTime, header.ArgonMem, header.ArgonUtil, header.KeySize)
 	copy(key.Bytes(), derived)
-
 	for i := range derived {
 		derived[i] = 0
 	}
-
 	if _, err := chacha20poly1305.NewX(key.Bytes()); err != nil {
 		key.Zero()
 		return nil, fmt.Errorf("AEAD initialization failed: %w", err)
@@ -998,7 +925,6 @@ func processFile(ctx context.Context, inFile *os.File, outFile *os.File, key *Se
 	if err != nil {
 		return fmt.Errorf("AEAD initialization failed: %w", err)
 	}
-
 	plainBuf := NewSecureBuffer(cfg.ChunkSize)
 	defer func(sb *SecureBuffer) {
 		if sb == nil {
@@ -1008,12 +934,10 @@ func processFile(ctx context.Context, inFile *os.File, outFile *os.File, key *Se
 			log.Printf("close error: %v", cerr)
 		}
 	}(plainBuf)
-
 	baseAAD, err := buildEnhancedAAD(header, 0)
 	if err != nil {
 		return fmt.Errorf("AAD construction failed: %w", err)
 	}
-
 	var seq uint64
 	for {
 		select {
@@ -1021,7 +945,6 @@ func processFile(ctx context.Context, inFile *os.File, outFile *os.File, key *Se
 			return ctx.Err()
 		default:
 		}
-
 		n, readErr := inFile.Read(plainBuf.Bytes())
 		if n > 0 {
 			if err := encryptChunk(outFile, plainBuf.Bytes()[:n], aead, baseAAD, seq, header); err != nil {
@@ -1045,14 +968,11 @@ func encryptChunk(outFile *os.File, plainBuf []byte, aead cipher.AEAD, baseAAD [
 	if _, err := csprng.Read(nonce); err != nil {
 		return fmt.Errorf("nonce generation failed: %w", err)
 	}
-
 	aad, err := buildEnhancedAAD(header, seq)
 	if err != nil {
 		return fmt.Errorf("AAD construction failed: %w", err)
 	}
-
 	ct := aead.Seal(nil, nonce, plainBuf, aad)
-
 	if err := writeChunk(outFile, nonce, ct); err != nil {
 		return fmt.Errorf("chunk write failed: %w", err)
 	}
@@ -1078,21 +998,17 @@ func readHeader(inFile *os.File) (FileHeader, error) {
 	if err := binary.Read(inFile, binary.LittleEndian, &header); err != nil {
 		return FileHeader{}, fmt.Errorf("header read failed: %w", err)
 	}
-
 	if string(header.Magic[:]) != MagicNumber {
 		return FileHeader{}, errors.New("invalid file format")
 	}
-
 	if header.Version > FileVersion {
 		return FileHeader{}, fmt.Errorf("unsupported file version: %d", header.Version)
 	}
-
 	for i, b := range header.Padding {
 		if b != 0 {
 			return FileHeader{}, fmt.Errorf("non-zero padding at byte %d", i)
 		}
 	}
-
 	return header, nil
 }
 
@@ -1113,17 +1029,14 @@ func decryptProcess(ctx context.Context, inFile *os.File, outFile *os.File, key 
 	if err != nil {
 		return fmt.Errorf("AEAD initialization failed: %w", err)
 	}
-
 	nonceSize := int(header.NonceSize)
 	if nonceSize != aead.NonceSize() {
 		return errors.New("invalid file format")
 	}
-
 	baseAAD, err := buildEnhancedAAD(header, 0)
 	if err != nil {
 		return fmt.Errorf("AAD construction failed: %w", err)
 	}
-
 	var seq uint64
 	for {
 		select {
@@ -1131,7 +1044,6 @@ func decryptProcess(ctx context.Context, inFile *os.File, outFile *os.File, key 
 			return ctx.Err()
 		default:
 		}
-
 		plain, err := decryptChunk(inFile, aead, baseAAD, seq, header)
 		if err == io.EOF {
 			break
@@ -1139,13 +1051,11 @@ func decryptProcess(ctx context.Context, inFile *os.File, outFile *os.File, key 
 		if err != nil {
 			return fmt.Errorf("processing failed for chunk %d: %w", seq, err)
 		}
-
 		if _, err := outFile.Write(plain); err != nil {
 			zeroBytes(plain)
 			return fmt.Errorf("write failed: %w", err)
 		}
 		zeroBytes(plain)
-
 		seq++
 	}
 	return nil
@@ -1159,7 +1069,6 @@ func decryptChunk(inFile *os.File, aead cipher.AEAD, baseAAD []byte, seq uint64,
 	} else if err != nil {
 		return nil, fmt.Errorf("nonce read failed: %w", err)
 	}
-
 	var clen uint32
 	if err := binary.Read(inFile, binary.LittleEndian, &clen); err != nil {
 		return nil, fmt.Errorf("length read failed: %w", err)
@@ -1171,13 +1080,11 @@ func decryptChunk(inFile *os.File, aead cipher.AEAD, baseAAD []byte, seq uint64,
 	if _, err := io.ReadFull(inFile, ct); err != nil {
 		return nil, fmt.Errorf("ciphertext read failed: %w", err)
 	}
-
 	aad, err := buildEnhancedAAD(header, seq)
 	if err != nil {
 		zeroBytes(ct)
 		return nil, fmt.Errorf("AAD construction failed: %w", err)
 	}
-
 	plain, err := aead.Open(nil, nonce, ct, aad)
 	zeroBytes(ct)
 	if err != nil {
