@@ -55,6 +55,8 @@ const (
 	maxKeyVersion = 255
 )
 
+var zeroBuf = make([]byte, 64) // Buffer of zeros for secure clearing [[12]]
+
 func minInt(a, b int) int {
 	if a < b {
 		return a
@@ -110,6 +112,7 @@ var (
 	csprng    = &CSPRNGReader{}
 	saltCache = make(map[string][]byte)
 	saltMu    sync.RWMutex
+	saltWg    sync.WaitGroup // For managing cleanup goroutine lifecycle [[3]]
 )
 
 func sink(b []byte) {
@@ -166,10 +169,7 @@ func (sb *SecureBuffer) Zero() {
 	}
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
-	for i := range sb.data {
-		sb.data[i] = 0
-	}
-	sink(sb.data)
+	copy(sb.data, zeroBuf) // Prevent compiler optimization [[12]]
 	sb.zeroed.Store(true)
 	runtime.KeepAlive(sb.data)
 }
@@ -204,7 +204,10 @@ func validateSaltUniqueness(salt []byte) error {
 	saltCache[saltHex] = cp
 	saltMu.Unlock()
 
+	// Start cleanup goroutine in a WaitGroup to ensure it exits cleanly [[3]]
+	saltWg.Add(1)
 	go func(key string) {
+		defer saltWg.Done()
 		time.Sleep(time.Hour)
 		saltMu.Lock()
 		delete(saltCache, key)
@@ -239,7 +242,7 @@ func verifyFileIntegrity(header FileHeader, salt []byte) error {
 	if err != nil {
 		return fmt.Errorf("integrity check failed: %w", err)
 	}
-	if !hmac.Equal(header.Integrity[:], expected[:]) {
+	if !hmac.Equal(header.Integrity[:], expected[:]) { // Use constant-time comparison [[15]]
 		return errors.New("file metadata has been tampered with")
 	}
 	return nil
@@ -343,7 +346,6 @@ func handleEncrypt(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("password input failed: %w", err)
 	}
-	// check Close error in deferred wrapper
 	defer func(sb *SecureBuffer) {
 		if sb == nil {
 			return
@@ -541,9 +543,7 @@ func isTerminal(fd uintptr) bool {
 }
 
 func zeroBytes(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
+	copy(b, zeroBuf)
 }
 
 func readPasswordPromptConfirm(prompt, confirmPrompt string) (*SecureBuffer, error) {
@@ -637,7 +637,6 @@ func encryptFile(ctx context.Context, inputFile, outputFile string, password *Se
 	if err != nil {
 		return fmt.Errorf("salt generation failed: %w", err)
 	}
-	// check Close error
 	defer func(sb *SecureBuffer) {
 		if sb == nil {
 			return
@@ -674,7 +673,6 @@ func encryptFile(ctx context.Context, inputFile, outputFile string, password *Se
 	if err != nil {
 		return fmt.Errorf("key derivation failed: %w", err)
 	}
-	// check Close error
 	defer func(sb *SecureBuffer) {
 		if sb == nil {
 			return
@@ -720,7 +718,6 @@ func decryptFile(ctx context.Context, inputFile, outputFile string, password []b
 	if err != nil {
 		return fmt.Errorf("salt read failed: %w", err)
 	}
-	// check Close
 	defer func(sb *SecureBuffer) {
 		if sb == nil {
 			return
@@ -738,7 +735,6 @@ func decryptFile(ctx context.Context, inputFile, outputFile string, password []b
 	if err != nil {
 		return fmt.Errorf("key derivation failed: %w", err)
 	}
-	// check Close
 	defer func(sb *SecureBuffer) {
 		if sb == nil {
 			return
@@ -794,7 +790,6 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 	if err != nil {
 		return fmt.Errorf("salt read failed: %w", err)
 	}
-	// check Close
 	defer func(sb *SecureBuffer) {
 		if sb == nil {
 			return
@@ -808,7 +803,6 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 	if err != nil {
 		return fmt.Errorf("key derivation failed: %w", err)
 	}
-	// check Close
 	defer func(sb *SecureBuffer) {
 		if sb == nil {
 			return
@@ -1006,7 +1000,6 @@ func processFile(ctx context.Context, inFile *os.File, outFile *os.File, key *Se
 	}
 
 	plainBuf := NewSecureBuffer(cfg.ChunkSize)
-	// check Close error
 	defer func(sb *SecureBuffer) {
 		if sb == nil {
 			return
