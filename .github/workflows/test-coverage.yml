@@ -28,3 +28,4 @@ jobs:
       continue-on-error: true
       run: go tool cover -func=coverage.out
 
+    - uses: autofix-ci/action@v1.3.2
