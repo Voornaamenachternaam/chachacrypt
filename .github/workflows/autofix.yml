@@ -1,4 +1,4 @@
-name: reviewdog
+name: autofix.ci
 
 permissions:
   actions: write
