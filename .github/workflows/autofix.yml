@@ -19,6 +19,8 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '0 2 * * *'
+  pull_request:
+    branches: [ main ]
   push:
     tags:
       - 'v*'
