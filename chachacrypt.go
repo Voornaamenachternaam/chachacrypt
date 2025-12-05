@@ -54,8 +54,6 @@ const (
 	maxKeyVersion = 255
 )
 
-var zeroBuf = make([]byte, 64) // Buffer of zeros for secure clearing
-
 func minInt(a, b int) int {
 	if a < b {
 		return a
