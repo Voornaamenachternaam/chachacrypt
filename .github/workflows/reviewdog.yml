@@ -72,3 +72,5 @@ jobs:
           body: "Automated fixes applied by golangci-lint."
           branch: "fix/golangci-lint-auto-fixes"
           base: "main"
+
+      - uses: autofix-ci/action@v1.3.2
