@@ -24,6 +24,6 @@ jobs:
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AI_PROVIDER: openrouter
-          AI_MODEL: openai/gpt-oss-20b:free
+          AI_MODEL: ${{ secrets.OPENROUTER_MODEL }}
           AI_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           INCLUDE_PATTERNS: "*.go,**/*.go,go.*"
