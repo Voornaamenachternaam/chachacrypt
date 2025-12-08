@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.1
       - name: Build and release binaries
-        uses: wangyoucao577/go-release-action@v1.53
+        uses: wangyoucao577/go-release-action@v1.54
         with:
           github_token: ${{ secrets.GH_TOKEN }}
           goos: ${{ matrix.goos }}
