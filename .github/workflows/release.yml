@@ -212,7 +212,7 @@ jobs:
           COSIGN_EXPERIMENTAL: ${{ env.COSIGN_EXPERIMENTAL }}
 
       - name: Attach SBOMs & Cosign bundles to the Release (upload canonical patterns)
-        uses: step-security/action-gh-release@v2.4.1
+        uses: step-security/action-gh-release@v2.4.2
         with:
           token: ${{ env.GITHUB_TOKEN }}
           files: |
