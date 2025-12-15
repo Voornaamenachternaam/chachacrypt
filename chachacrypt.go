@@ -535,6 +535,10 @@ func rotateKey(inputFile, outputFile string) error {
 	defer zeroize(oldEncKey)
 	defer zeroize(oldMacKey)
 
+	if err := verifyFileIntegrity(header, oldMacKey); err != nil {
+		return err
+	}
+
 	newSalt, err := generateSalt(int(header.SaltSize))
 	if err != nil {
 		return err
