@@ -70,14 +70,14 @@ jobs:
           token: ${{ secrets.GH2_TOKEN }}
 
       - name: Download artifacts (ubuntu)
-        uses: actions/download-artifact@v6.0.0
+        uses: actions/download-artifact@v7.0.0
         with:
           name: matrix-artifacts-ubuntu-latest
           path: ci-artifacts/ubuntu-latest || true
 
       - name: Download artifacts (windows)
         if: always()
-        uses: actions/download-artifact@v6.0.0
+        uses: actions/download-artifact@v7.0.0
         with:
           name: matrix-artifacts-windows-latest
           path: ci-artifacts/windows-latest || true
