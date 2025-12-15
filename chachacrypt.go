@@ -323,7 +323,6 @@ func encryptFile(inputPath, outputPath string, pass []byte) error {
 			if _, err := io.ReadFull(rand.Reader, nonceBuf); err != nil {
 				return fmt.Errorf("nonce generation failed: %w", err)
 			}
-			}
 			ciphertext := aead.Seal(nil, nonceBuf, buf[:n], nil)
 			if err := binary.Write(out, binary.LittleEndian, uint32(len(ciphertext))); err != nil {
 				return err
