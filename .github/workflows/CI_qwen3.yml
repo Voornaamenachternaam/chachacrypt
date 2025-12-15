@@ -52,7 +52,7 @@ jobs:
           go test ./... > "${{ env.ARTIFACT_DIR }}/go-test-output.txt" 2>&1 || true
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v5.0.0
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: matrix-artifacts-${{ matrix.os }}
           path: ${{ env.ARTIFACT_DIR }}
