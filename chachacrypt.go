@@ -103,17 +103,17 @@ func validateSaltUniqueness(salt []byte) error {
 	defer saltCacheMutex.Unlock()
 
 	if len(saltCache) >= maxSaltCache {
-	    var oldestKey string
-	    var oldestTime time.Time
-	    for k, v := range saltCache {
-	        if oldestKey == "" || v.Before(oldestTime) {
-	            oldestTime = v
-	            oldestKey = k
-	        }
-	    }
-	    if oldestKey != "" {
-	        delete(saltCache, oldestKey)
-	    }
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range saltCache {
+			if oldestKey == "" || v.Before(oldestTime) {
+				oldestTime = v
+				oldestKey = k
+			}
+		}
+		if oldestKey != "" {
+			delete(saltCache, oldestKey)
+		}
 	}
 	key := hex.EncodeToString(salt)
 	if _, exists := saltCache[key]; exists {
