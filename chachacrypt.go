@@ -398,7 +398,7 @@ func decryptFile(inputPath, outputPath string, pass []byte) error {
 			return err
 		}
 		if clen > uint32(header.ChunkSize)+chacha20poly1305.Overhead {
-		    return errors.New("chunk size exceeds limit")
+			return errors.New("chunk size exceeds limit")
 		}
 		nonce := make([]byte, header.NonceSize)
 		if _, err := io.ReadFull(in, nonce); err != nil {
