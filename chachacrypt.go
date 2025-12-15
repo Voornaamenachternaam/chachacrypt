@@ -323,15 +323,37 @@ func encryptFile(inputPath, outputPath string, pass []byte) error {
 			if _, err := io.ReadFull(rand.Reader, nonceBuf); err != nil {
 				return err
 			}
-			ciphertext := aead.Seal(nil, nonceBuf, buf[:n], nil)
-			if err := binary.Write(out, binary.LittleEndian, uint32(len(ciphertext))); err != nil {
-				return err
-			}
-			if _, err := out.Write(nonceBuf); err != nil {
-				return err
-			}
-			if _, err := out.Write(ciphertext); err != nil {
-				return err
+			var seq uint64
+
+			for {
+				n, er := in.Read(buf)
+				if n > 0 {
+					if _, err := io.ReadFull(rand.Reader, nonceBuf); err != nil {
+						return err
+					}
+
+					var aad bytes.Buffer
+					_ = binary.Write(&aad, binary.LittleEndian, seq)
+					_ = binary.Write(&aad, binary.LittleEndian, uint32(n))
+
+					ciphertext := aead.Seal(nil, nonceBuf, buf[:n], aad.Bytes())
+					if err := binary.Write(out, binary.LittleEndian, uint32(len(ciphertext))); err != nil {
+						return err
+					}
+					if _, err := out.Write(nonceBuf); err != nil {
+						return err
+					}
+					if _, err := out.Write(ciphertext); err != nil {
+						return err
+					}
+					seq++
+				}
+				if er == io.EOF {
+					break
+				}
+				if er != nil {
+					return er
+				}
 			}
 		}
 		if er == io.EOF {
