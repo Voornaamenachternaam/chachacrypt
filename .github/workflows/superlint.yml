@@ -7,6 +7,10 @@ on:
   schedule:
     - cron: '0 2 * * *'
 
+concurrency:
+  group: superlinter-fix-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 permissions:
   actions: write
   checks: write
@@ -22,19 +26,15 @@ permissions:
   security-events: write
   statuses: write
 
-concurrency:
-  group: superlinter-fix-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
-
 jobs:
   lint:
     name: Lint (check-only)
     runs-on: ubuntu-latest
     continue-on-error: true
     permissions:
-      contents: write
+      contents: read
       checks: write
-      pull-requests: write
+      statuses: write
     steps:
       - name: Checkout (for lint check)
         uses: actions/checkout@v6.0.1
@@ -42,11 +42,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Super-Linter (check-only)
+      - name: Super-Linter (check-only, non-fork)
+        if: ${{ github.event.pull_request == null || github.event.pull_request.head.repo.full_name == github.repository }}
         uses: super-linter/super-linter@v8.3.1
         continue-on-error: true
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VALIDATE_GO: true
+          VALIDATE_GO_MODULES: true
+
+      - name: Super-Linter (check-only, forked PR - no token)
+        if: ${{ github.event.pull_request != null && github.event.pull_request.head.repo.full_name != github.repository }}
+        uses: super-linter/super-linter@v8.3.1
+        continue-on-error: true
+        env:
           VALIDATE_GO: true
           VALIDATE_GO_MODULES: true
 
@@ -78,13 +87,13 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: false
-          token: ${{ github.token }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Super-Linter (auto-fix for Go) — no workspace summary files
         uses: super-linter/super-linter@v8.3.1
         continue-on-error: true
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VALIDATE_GO: true
           VALIDATE_GO_MODULES: true
           FIX_GO: true
@@ -128,7 +137,7 @@ jobs:
           set -euo pipefail
           rm -rf super-linter-output || true
           rm -f super-linter-report.html super-linter-report.json || true
-          rm -rf .superlinter-artifact || true
+          rm -f .superlinter-artifact/run-info.txt || true
           git clean -fdx || true
         shell: bash
 
@@ -136,12 +145,11 @@ jobs:
         id: create_pr
         uses: peter-evans/create-pull-request@v8.0.0
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # branch name built inline — avoids separate branchname script step
           branch: super-linter/fixes-${{ github.head_ref || github.ref_name || github.run_id }}
           base: main
-          title: "[super-linter] apply Go fixes for ${{ github.event.pull_request.number }} -> main"
+          title: "[super-linter] apply Go fixes for ${{ github.event.pull_request.number || github.run_id }} -> main"
           body: |
             Automated Go fixes from Super-Linter (gofmt/goimports and any autofixes available), plus an explicit `go mod tidy`.
             If there are no changes, no PR will be created.
@@ -153,4 +161,3 @@ jobs:
         run: |
           echo "Fixes PR created/updated: https://github.com/${{ github.repository }}/pull/${{ steps.create_pr.outputs.pull-request-number }}"
         shell: bash
- 
