@@ -562,7 +562,7 @@ func generatePassword(n int) (string, error) {
 	}
 	var result strings.Builder
 	result.Grow(n)
-	for i := 0; i < n; i++ {
+	for range n {
 		idx, err := rand.Int(csprng, big.NewInt(int64(len(letters))))
 		if err != nil {
 			return "", fmt.Errorf("random generation failed: %w", err)
@@ -918,7 +918,14 @@ func deriveKey(password []byte, salt []byte, header FileHeader) (*SecureBuffer, 
 	return key, nil
 }
 
-func processFile(ctx context.Context, inFile *os.File, outFile *os.File, key *SecureBuffer, cfg config, header FileHeader) error {
+func processFile(
+	ctx context.Context,
+	inFile *os.File,
+	outFile *os.File,
+	key *SecureBuffer,
+	cfg config,
+	header FileHeader,
+) error {
 	aead, err := chacha20poly1305.NewX(key.Bytes())
 	if err != nil {
 		return fmt.Errorf("AEAD initialization failed: %w", err)
@@ -961,7 +968,14 @@ func processFile(ctx context.Context, inFile *os.File, outFile *os.File, key *Se
 	return nil
 }
 
-func encryptChunk(outFile *os.File, plainBuf []byte, aead cipher.AEAD, baseAAD []byte, seq uint64, header FileHeader) error {
+func encryptChunk(
+	outFile *os.File,
+	plainBuf []byte,
+	aead cipher.AEAD,
+	baseAAD []byte,
+	seq uint64,
+	header FileHeader,
+) error {
 	nonce := make([]byte, aead.NonceSize())
 	if _, err := csprng.Read(nonce); err != nil {
 		return fmt.Errorf("nonce generation failed: %w", err)
@@ -1022,7 +1036,13 @@ func readSalt(inFile *os.File, saltSize uint32) (*SecureBuffer, error) {
 	return salt, nil
 }
 
-func decryptProcess(ctx context.Context, inFile *os.File, outFile *os.File, key *SecureBuffer, header FileHeader) error {
+func decryptProcess(
+	ctx context.Context,
+	inFile *os.File,
+	outFile *os.File,
+	key *SecureBuffer,
+	header FileHeader,
+) error {
 	aead, err := chacha20poly1305.NewX(key.Bytes())
 	if err != nil {
 		return fmt.Errorf("AEAD initialization failed: %w", err)
@@ -1043,7 +1063,7 @@ func decryptProcess(ctx context.Context, inFile *os.File, outFile *os.File, key 
 		default:
 		}
 		plain, err := decryptChunk(inFile, aead, baseAAD, seq, header)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
