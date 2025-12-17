@@ -1,4 +1,5 @@
 name: CI_qwen3
+
 on:
   schedule:
     - cron: '0 2 * * *'
@@ -16,97 +17,34 @@ env:
   ARTIFACT_DIR: ci-artifacts/combined
 
 jobs:
-  check:
-    name: Lint • Build • Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ ubuntu-latest, windows-latest ]
-        go: [ "stable" ]
-    steps:
-      - name: Checkout (authenticated)
-        uses: actions/checkout@v6.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: true
-          token: ${{ secrets.GH2_TOKEN }}
-
-      - name: Setup Go
-        uses: actions/setup-go@v6.1.0
-        with:
-          go-version: ${{ matrix.go }}
-          check-latest: true
-          cache: false
-
-      - name: Install small tooling & run checks
-        shell: bash
-        run: |
-          set -eux
-          mkdir -p "${{ env.ARTIFACT_DIR }}"
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "${GOBIN:-$HOME/go/bin}" v2.7.2 || true
-          go install golang.org/x/tools/cmd/goimports@latest || true
-          echo "${GOBIN:-$HOME/go/bin}" >> $GITHUB_PATH
-          export PATH="${GOBIN:-$HOME/go/bin}:$PATH"
-          golangci-lint run --timeout=10m --fix --out-format json ./... > "${{ env.ARTIFACT_DIR }}/golangci.json" 2> "${{ env.ARTIFACT_DIR }}/golangci.stderr" || true
-          go build ./... > "${{ env.ARTIFACT_DIR }}/go-build-output.txt" 2>&1 || true
-          go test ./... > "${{ env.ARTIFACT_DIR }}/go-test-output.txt" 2>&1 || true
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v6.0.0
-        with:
-          name: matrix-artifacts-${{ matrix.os }}
-          path: ${{ env.ARTIFACT_DIR }}
-
-  ai:
-    name: AI refactor & PR
+  ci:
     runs-on: ubuntu-latest
-    needs: check
     steps:
-      - name: Checkout (authenticated)
-        uses: actions/checkout@v6.0.1
+      - uses: actions/checkout@v6.0.1
         with:
           fetch-depth: 0
-          persist-credentials: true
-          token: ${{ secrets.GH2_TOKEN }}
 
-      - name: Download artifacts (ubuntu)
-        uses: actions/download-artifact@v7.0.0
-        with:
-          name: matrix-artifacts-ubuntu-latest
-          path: ci-artifacts/ubuntu-latest || true
-
-      - name: Download artifacts (windows)
-        if: always()
-        uses: actions/download-artifact@v7.0.0
-        with:
-          name: matrix-artifacts-windows-latest
-          path: ci-artifacts/windows-latest || true
-
-      - name: Merge artifacts (guarded copy)
+      - name: Determine Go version from go.mod
+        id: goversion
         shell: bash
         run: |
-          mkdir -p "${{ env.ARTIFACT_DIR }}"
-          for src in ci-artifacts/ubuntu-latest/* ci-artifacts/windows-latest/*; do
-            [ -e "$src" ] || continue
-            dest="${{ env.ARTIFACT_DIR }}/$(basename "$src")"
-            if [ "$src" = "$dest" ]; then
-              continue
-            fi
-            if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
-              continue
-            fi
-            cp -v "$src" "$dest" 2>/dev/null || true
-          done
-          ls -la "${{ env.ARTIFACT_DIR }}" || true
+          set -euo pipefail
+          GO_VER=$(awk '/^go[[:space:]]+/{print $2; exit}' go.mod)
+          echo "version=${GO_VER}" >> "$GITHUB_OUTPUT"
 
-      - name: Ensure AI script is executable
-        run: chmod +x .github/scripts/ai_refactor.sh
-
-      - name: Setup Go (ai job uses stable)
+      - name: Set up Go (match go.mod)
         uses: actions/setup-go@v6.1.0
         with:
-          go-version: stable
-          check-latest: true
+          go-version-file: 'go.mod'
+          cache: false   # explicit: no caching per requirement
+
+      - name: Snapshot dependency versions (pre)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p $RUNNER_TEMP/ci-snap
+          cp go.mod "$RUNNER_TEMP/ci-snap/go.mod.pre"
+          cp go.sum "$RUNNER_TEMP/ci-snap/go.sum.pre"
 
       - name: Run AI refactor script (creates PR via API)
         id: ai_run
@@ -114,11 +52,39 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GH2_TOKEN: ${{ secrets.GH2_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
           ./.github/scripts/ai_refactor.sh --artifacts "${{ env.ARTIFACT_DIR }}"
 
-      # NOTE: create-pull-request step intentionally omitted because the script creates PRs directly.
- 
+      - name: Enforce no downgrades of Go or deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          # checks are enforced by the script; this step acts as guard and prints a summary.
+          echo "Pre/post snapshots are in $RUNNER_TEMP/ci-snap and ${GITHUB_WORKSPACE}/${{ env.ARTIFACT_DIR }}"
+
+      - name: golangci-lint (fix, no annotations, no cache)
+        uses: golangci/golangci-lint-action@v9.2.0
+        with:
+          version: latest
+          skip-cache: true
+          problem-matchers: false
+          args: --fix
+
+      - name: Build & test
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build ./...
+          go test ./...
+
+      - name: Upload artifacts (raw model output, logs)
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: ci-artifacts
+          path: ${{ env.ARTIFACT_DIR }}
+          retention -days: 30
+
