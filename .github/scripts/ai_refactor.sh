@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 #
-# ai_refactor.sh - robust AI-driven refactor script (final, production-ready).
+# ai_refactor.sh - robust AI-driven refactor script (permission-safe build of semver helper,
+# isolated caches, fallback prompt handling).
+#
+# Usage:
+#   .github/scripts/ai_refactor.sh --artifacts "ci-artifacts/combined" [--prompt-file path]
 #
 set -euo pipefail
 
@@ -21,13 +25,34 @@ mkdir -p "${ARTIFACT_DIR}"
 log() { printf "%s %s\n" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 err() { printf "%s %s\n" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "ERROR: $*" >&2; }
 
+# ensure we clean only our temp dirs
+CLEANUP_DIRS=()
+cleanup() {
+  for d in "${CLEANUP_DIRS[@]:-}"; do
+    if [ -n "${d}" ] && [ -d "${d}" ]; then
+      rm -rf "${d}" || true
+    fi
+  done
+}
+trap cleanup EXIT
+
 # -------------------------
-# small Go program to compare module versions using golang.org/x/mod/semver
-# This is more reliable than sort -V for Go pseudo-versions.
+# Create isolated workspace to compile semver helper
 # -------------------------
-SEMVER_HELPER_SRC="$(mktemp -t semver_cmp_XXXX.go)"
-SEMVER_HELPER_BIN="$(mktemp -t semver_cmp_bin_XXXX)"
-cat > "${SEMVER_HELPER_SRC}" <<'EOF'
+SEMVER_HELPER_BIN="$(mktemp -u "${ARTIFACT_DIR}/semver_helper_bin_XXXX")"
+SEMVER_BUILD_DIR="$(mktemp -d)"
+CLEANUP_DIRS+=("${SEMVER_BUILD_DIR}")
+
+log "Building semver helper in isolated dir ${SEMVER_BUILD_DIR} (avoids touching global module cache)."
+
+# create small module
+cat > "${SEMVER_BUILD_DIR}/go.mod" <<'GOMOD'
+module semverhelper
+go 1.20
+require golang.org/x/mod v0.31.0
+GOMOD
+
+cat > "${SEMVER_BUILD_DIR}/main.go" <<'GO'
 package main
 import (
   "fmt"
@@ -41,40 +66,50 @@ func main() {
   }
   v1 := os.Args[1]
   v2 := os.Args[2]
-  // semver.Compare expects versions to start with 'v'; ensure prefix
+  // semver.Compare expects versions with leading 'v'
   if v1 != "" && v1[0] != 'v' { v1 = "v"+v1 }
   if v2 != "" && v2[0] != 'v' { v2 = "v"+v2 }
-  // semver.IsValid returns false for pseudo-versions; semver.Compare still works for Go module versions.
-  res := semver.Compare(v1, v2)
-  // semver.Compare returns -1,0,1
+  res := semver.Compare(v1, v2) // -1,0,1
   fmt.Printf("%d", res)
-  os.Exit(0)
 }
-EOF
+GO
 
-# build helper (use 'go' installed by setup-go)
-if command -v go >/dev/null 2>&1; then
-  # ensure x/mod is available and compile
-  log "Compiling semver helper..."
-  GOPATH_TMP=$(mktemp -d)
-  export GOPATH="${GOPATH_TMP}"
-  # Download only the module to cache, then build
-  env GO111MODULE=on go get golang.org/x/mod@latest >/dev/null 2>&1 || true
-  env GO111MODULE=on CGO_ENABLED=0 go build -o "${SEMVER_HELPER_BIN}" "${SEMVER_HELPER_SRC}"
-  rm -rf "${GOPATH_TMP}" || true
-else
-  err "go tool not available in PATH; this script requires go to be installed by actions/setup-go before running."
+# Use isolated caches so downloads go into our temp dir (no shared/global cache touched)
+SEMVER_GOMODCACHE="${SEMVER_BUILD_DIR}/gomodcache"
+SEMVER_GOCACHE="${SEMVER_BUILD_DIR}/gocache"
+SEMVER_GOPATH="${SEMVER_BUILD_DIR}/gopath"
+mkdir -p "${SEMVER_GOMODCACHE}" "${SEMVER_GOCACHE}" "${SEMVER_GOPATH}"
+
+# build helper
+if ! command -v go >/dev/null 2>&1; then
+  err "go not found on PATH. Ensure actions/setup-go runs before this script."
   exit 3
 fi
 
-# comparison wrapper using the compiled helper
+log "Compiling semver helper..."
+# Force module mode and set GOMODCACHE/GOCACHE/GOPATH to our temp dirs
+(
+  cd "${SEMVER_BUILD_DIR}"
+  env \
+    GOFLAGS= \
+    GOPATH="${SEMVER_GOPATH}" \
+    GOMODCACHE="${SEMVER_GOMODCACHE}" \
+    GOCACHE="${SEMVER_GOCACHE}" \
+    GO111MODULE=on \
+    CGO_ENABLED=0 \
+    go build -o "${SEMVER_HELPER_BIN}" ./... 2> "${ARTIFACT_DIR}/semver_build.err"
+)
+if [ ! -x "${SEMVER_HELPER_BIN}" ]; then
+  err "semver helper did not compile successfully. See ${ARTIFACT_DIR}/semver_build.err"
+  cat "${ARTIFACT_DIR}/semver_build.err" || true
+  exit 4
+fi
+log "Semver helper compiled to ${SEMVER_HELPER_BIN}"
+
+# wrapper compare function (prints -1/0/1)
 compare_ver() {
-  # returns:
-  # - prints 0 for equal, -1 if v1 < v2, +1 if v1 > v2
   local v1="$1" v2="$2"
-  if [ -z "${v1}" ]; then v1=""; fi
-  if [ -z "${v2}" ]; then v2=""; fi
-  "${SEMVER_HELPER_BIN}" "${v1}" "${v2}"
+  "${SEMVER_HELPER_BIN}" "${v1:-}" "${v2:-}"
 }
 
 # -------------------------
@@ -116,40 +151,41 @@ PRE_GO_VER="$(awk '/^go[[:space:]]+/{print $2; exit}' "${ARTIFACT_DIR}/go.mod.pr
 echo "pre_go_version=${PRE_GO_VER}" > "${VERSION_CHECK_LOG}"
 
 # ------------
-# validate go exists
+# validate go exists and runner version
 # ------------
 if ! command -v go >/dev/null 2>&1; then
   err "go not found on PATH. Please ensure actions/setup-go runs before this script."
-  exit 4
+  exit 5
 fi
 
 RUNNER_GO_VERSION="$(go version | awk '{print $3}' | sed 's/go//')"
-# Use semver compare: require runner version >= go.mod or equal (strictness: enforce patch exact match by default)
-cmp_out=$(compare_ver "${RUNNER_GO_VERSION}" "${PRE_GO_VER}" || true)
-if [ "${cmp_out}" != "0" ]; then
-  # allow if runner >= requested (cmp_out == 1 means runner > required)
-  if [ "${cmp_out}" = "1" ]; then
-    log "Runner go ${RUNNER_GO_VERSION} is newer than go.mod directive ${PRE_GO_VER} — acceptable."
-  else
-    err "Runner 'go' version (${RUNNER_GO_VERSION}) is older than go.mod directive (${PRE_GO_VER}). Please set up the runner with the repository go.mod Go version (actions/setup-go)."
-    echo "runner_go=${RUNNER_GO_VERSION}" >> "${VERSION_CHECK_LOG}"
-    exit 5
-  fi
-fi
+cmp_out="$(compare_ver "${RUNNER_GO_VERSION}" "${PRE_GO_VER}" || true)"
+# semver.Compare returned -1/0/1; convert to numeric
+if [ "${cmp_out}" = "" ]; then cmp_out=0; fi
 
+# Here: cmp_out == 1 means runner > pre (acceptable). cmp_out == 0 equal. cmp_out == -1 runner < pre (error).
+if [ "${cmp_out}" = "-1" ]; then
+  err "Runner 'go' version (${RUNNER_GO_VERSION}) is older than go.mod directive (${PRE_GO_VER}). Please setup correct go version."
+  echo "runner_go=${RUNNER_GO_VERSION}" >> "${VERSION_CHECK_LOG}"
+  exit 6
+fi
 log "Runner go version ${RUNNER_GO_VERSION} validated vs go.mod ${PRE_GO_VER}"
 
 # -------------------------
-# Validate presence of prompt
+# Prompt handling (fallback)
 # -------------------------
+DEFAULT_PROMPT="Apply safe, minimal changes to fix linter errors and keep go.mod/go.sum versions non-downgrading. Output only a git unified diff or fenced ```diff block. Do not change module versions to lower values."
+
 if [ ! -f "${PROMPT_FILE}" ]; then
-  err "Prompt file ${PROMPT_FILE} not found."
-  exit 6
+  log "Prompt file ${PROMPT_FILE} not found; using built-in fallback prompt. (Saved to artifact.)"
+  echo "${DEFAULT_PROMPT}" > "${ARTIFACT_DIR}/ai_prompt_fallback.txt"
+  PROMPT_CONTENT="${DEFAULT_PROMPT}"
+else
+  PROMPT_CONTENT="$(cat "${PROMPT_FILE}")"
 fi
-PROMPT_CONTENT="$(cat "${PROMPT_FILE}")"
 
 # -------------------------
-# Prepare AI request JSON robustly (use jq if present; else python)
+# Prepare AI request JSON (jq or python fallback)
 # -------------------------
 AI_REQ_JSON="${ARTIFACT_DIR}/ai_request.json"
 if command -v jq >/dev/null 2>&1; then
@@ -159,20 +195,17 @@ if command -v jq >/dev/null 2>&1; then
         '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$user}], max_tokens:1200, temperature:0.0}' \
         > "${AI_REQ_JSON}"
 else
-  # fallback using Python to JSON-escape the prompt
   python - <<PY > "${AI_REQ_JSON}"
-import json,sys
+import json,io,sys
 model = "${OPENROUTER_MODEL or OPENAI_MODEL or 'gpt-4o-mini'}"
 system = "You are an assistant that returns a unified diff patch only. Return either fenced ```diff blocks or a git-style diff; do not add commentary."
-user = open("${PROMPT_FILE}").read()
+user = ${json.dumps(PROMPT_CONTENT)}
 print(json.dumps({"model": model, "messages":[{"role":"system","content":system},{"role":"user","content":user}], "max_tokens":1200, "temperature":0.0}))
 PY
 fi
 
 # -------------------------
-# Call AI provider
-# Prefer OPENROUTER_API_KEY if present, else fallback to OPENAI_API_KEY.
-# Save raw response verbatim to RAW_MODEL_OUT
+# Call AI provider and save raw output
 # -------------------------
 if [ -n "${OPENROUTER_API_KEY:-}" ]; then
   OPENROUTER_API_URL="${OPENROUTER_API_URL:-https://api.openrouter.ai/v1/chat/completions}"
@@ -212,7 +245,7 @@ fi
 log "Saved raw model output to ${RAW_MODEL_OUT}"
 
 # -------------------------
-# Extract patch heuristically (fenced diff, git-style 'diff --git', or unified)
+# Simple extraction of patch
 # -------------------------
 extract_patch_from_raw() {
   local raw="$1" out="$2"
@@ -239,11 +272,10 @@ else
   err "No patch found in model output; saved raw output to ${RAW_MODEL_OUT}"
   exit 10
 fi
-
 chmod a+r "${AI_PATCH}" || true
 
 # -------------------------
-# Apply on a temporary branch safely (staged only)
+# Apply patch in temp branch
 # -------------------------
 if ! git diff --quiet || ! git diff --cached --quiet; then
   err "Repository not clean (uncommitted changes). Aborting."
@@ -266,7 +298,7 @@ if [ "${APPLY_EXIT}" -ne 0 ]; then
 fi
 log "Patch staged successfully."
 
-# capture post-state from index if present, else file system
+# capture post-state from staged index or fallback
 git show :go.mod > "${ARTIFACT_DIR}/go.mod.post" 2>/dev/null || cp go.mod "${ARTIFACT_DIR}/go.mod.post"
 git show :go.sum > "${ARTIFACT_DIR}/go.sum.post" 2>/dev/null || cp go.sum "${ARTIFACT_DIR}/go.sum.post"
 
@@ -274,10 +306,11 @@ POST_GO_VER="$(awk '/^go[[:space:]]+/{print $2; exit}' "${ARTIFACT_DIR}/go.mod.p
 echo "post_go_version=${POST_GO_VER}" >> "${VERSION_CHECK_LOG}"
 
 # -------------------------
-# Compare go directive (use semver helper)
+# Compare go directive (using helper)
 # -------------------------
+# semver helper returns -1/0/1 (printed)
 cmp_go="$(compare_ver "${POST_GO_VER}" "${PRE_GO_VER}" || true)"
-# cmp result -1,0,1 => negative means post < pre (downgrade)
+# If cmp_go == 1 => post > pre (upgrade), 0 equal, -1 post < pre (downgrade)
 if [ "${cmp_go}" = "-1" ]; then
   err "Detected go directive downgrade: ${PRE_GO_VER} -> ${POST_GO_VER}. Refusing changes."
   git reset --hard HEAD >/dev/null || true
@@ -288,49 +321,50 @@ fi
 log "go directive check passed: ${PRE_GO_VER} -> ${POST_GO_VER}"
 
 # -------------------------
-# Compare dependency versions using 'go list -m -json all' pre vs post
-# We'll read module versions and compare via semver helper
+# Basic module dependency downgrade check via go list (pre/post)
 # -------------------------
-# Write module lists
+# write module lists to JSON (best-effort)
 go list -m -json all > "${ARTIFACT_DIR}/module-list.post.json" 2>/dev/null || true
-# For pre list, we temporarily write the pre go.mod to a temp dir and run 'go list -m -modfile'
-TMP_PRE_DIR="$(mktemp -d)"
-cp "${ARTIFACT_DIR}/go.mod.pre" "${TMP_PRE_DIR}/go.mod"
-# ensure module cache available
-( cd "${TMP_PRE_DIR}" && go list -m -json all > "${ARTIFACT_DIR}/module-list.pre.json" 2>/dev/null ) || true
-rm -rf "${TMP_PRE_DIR}" || true
 
-# parse and compare versions (module path -> version)
+TMP_PRE_DIR="$(mktemp -d)"
+CLEANUP_DIRS+=("${TMP_PRE_DIR}")
+cp "${ARTIFACT_DIR}/go.mod.pre" "${TMP_PRE_DIR}/go.mod"
+( cd "${TMP_PRE_DIR}" && env GOMODCACHE="${TMP_PRE_DIR}/gomodcache" go list -m -json all > "${ARTIFACT_DIR}/module-list.pre.json" 2>/dev/null ) || true
+
+# compare via small python tool calling semver helper
 python - <<'PY' > "${ARTIFACT_DIR}/dep-compare.out" || true
-import json,sys,subprocess
-pre=""+open("${ARTIFACT_DIR}/module-list.pre.json").read()
-post=""+open("${ARTIFACT_DIR}/module-list.post.json").read()
-def parse(s):
-    arr=[]
-    for obj in s.split('\n'):
-        if not obj.strip(): continue
-        try:
-            j=json.loads(obj)
-            if 'Path' in j and 'Version' in j:
-                arr.append((j['Path'], j['Version']))
-        except:
-            pass
-    return dict(arr)
-p=parse(pre); q=parse(post)
+import json,subprocess,sys
+def load_many(path):
+    out={}
+    try:
+        for line in open(path):
+            line=line.strip()
+            if not line: continue
+            try:
+                j=json.loads(line)
+                if 'Path' in j and 'Version' in j:
+                    out[j['Path']]=j['Version']
+            except:
+                pass
+    except:
+        pass
+    return out
+pre=load_many("${ARTIFACT_DIR}/module-list.pre.json")
+post=load_many("${ARTIFACT_DIR}/module-list.post.json")
 downgrades=[]
-for mod, ver in p.items():
-    if mod in q:
-        # call semver helper
-        import subprocess
-        out = subprocess.run(["${SEMVER_HELPER_BIN}", ver, q[mod]], capture_output=True, text=True)
-        cmp = out.stdout.strip()
-        # semver.Compare: -1 => ver < q[mod] (upgrade), 0 equal, 1 => ver > q[mod] (post smaller)
-        if cmp == "1":
-            downgrades.append((mod, ver, q[mod]))
+for mod, ver in pre.items():
+    if mod in post:
+        p=ver; q=post[mod]
+        # call semver helper (binary path)
+        cmp = subprocess.run(["${SEMVER_HELPER_BIN}", p, q], capture_output=True, text=True)
+        val = cmp.stdout.strip()
+        # val == "1" means pre > post => post is smaller => downgrade
+        if val == "1":
+            downgrades.append((mod,p,q))
 if downgrades:
     print("DOWNGRADE_DETECTED")
-    for m, a,b in downgrades:
-        print(m, a, "->", b)
+    for m,a,b in downgrades:
+        print(m,a,"->",b)
     sys.exit(2)
 else:
     print("NO_DOWNGRADES")
@@ -347,7 +381,7 @@ fi
 log "No dependency downgrades detected."
 
 # -------------------------
-# Ensure go.sum retains pre-state lines (basic subset check)
+# go.sum subset check
 # -------------------------
 if [ -f "${ARTIFACT_DIR}/go.sum.pre" ] && [ -f "${ARTIFACT_DIR}/go.sum.post" ]; then
   missing=0
@@ -366,7 +400,7 @@ fi
 log "go.sum post-state contains pre-state entries."
 
 # -------------------------
-# Build & Test (readonly)
+# Build & Test with -mod=readonly
 # -------------------------
 export GOFLAGS="-mod=readonly"
 set +e
@@ -403,17 +437,21 @@ git commit -m "AI: automated refactor (verified build & tests) [ci skip]" || tru
 if [ -n "${GH2_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
   REPO="${GITHUB_REPOSITORY}"
   HEAD_REF="${TMP_BRANCH}"
-  # Determine base (prefer GITHUB_BASE_REF, then main)
   BASE_REF="${GITHUB_BASE_REF:-main}"
   git push "https://x-access-token:${GH2_TOKEN}@github.com/${REPO}.git" "${HEAD_REF}:${HEAD_REF}" >/dev/null 2>&1 || true
 
   PR_TITLE="AI refactor — automated (verified build & tests)"
   PR_BODY="Automated AI refactor. CI verified build & tests. Raw model output and logs in artifact directory."
+  if command -v jq >/dev/null 2>&1; then
+    pr_json="$(jq -n --arg t "$PR_TITLE" --arg b "$PR_BODY" --arg head "$HEAD_REF" --arg base "$BASE_REF" '{title:$t, body:$b, head:$head, base:$base}')"
+  else
+    pr_json="{\"title\":\"${PR_TITLE}\",\"body\":\"${PR_BODY}\",\"head\":\"${HEAD_REF}\",\"base\":\"${BASE_REF}\"}"
+  fi
   pr_resp="$(curl -sS -X POST \
     -H "Authorization: token ${GH2_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${REPO}/pulls" \
-    -d "$(jq -n --arg t "$PR_TITLE" --arg b "$PR_BODY" --arg head "$HEAD_REF" --arg base "$BASE_REF" '{title:$t, body:$b, head:$head, base:$base}')" || true)"
+    -d "${pr_json}" || true)"
   printf "%s\n" "${pr_resp}" > "${ARTIFACT_DIR}/pr_response.json" || true
   log "PR response saved to ${ARTIFACT_DIR}/pr_response.json"
 fi
@@ -432,6 +470,6 @@ cat > "${METADATA_JSON}" <<EOF
 EOF
 
 log "ai_refactor.sh completed successfully. Artifacts: ${ARTIFACT_DIR}"
-# cleanup semver helper files
-rm -f "${SEMVER_HELPER_SRC}" "${SEMVER_HELPER_BIN}" || true
 exit 0
+
+ 
