@@ -41,10 +41,9 @@ jobs:
       - name: Run golangci-lint (via reviewdog action)
         uses: reviewdog/action-golangci-lint@v2.8.0
         with:
-          golangci_lint_flags: '--fix --output.sarif.path=reports/golangci.sarif --output.text.path=stdout'
+          golangci_lint_flags: '--enable-all --fix --output.sarif.path=reports/golangci.sarif --output.text.path=stdout'
           reporter: github-pr-check
           cache: false
-          level: error
 
       - name: Upload SARIF as GitHub Actions artifact
         if: always()
