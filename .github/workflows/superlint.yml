@@ -154,4 +154,3 @@ jobs:
           echo "Fixes PR created/updated: https://github.com/${{ github.repository }}/pull/${{ steps.create_pr.outputs.pull-request-number }}"
         shell: bash
  
-      - uses: autofix-ci/action@v1.3.2
