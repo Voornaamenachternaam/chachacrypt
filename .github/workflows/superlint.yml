@@ -12,29 +12,17 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  actions: write
+  contents: read
   checks: write
-  contents: write
-  deployments: write
-  id-token: write
-  issues: write
-  discussions: write
-  packages: write
-  pages: write
-  pull-requests: write
-  repository-projects: write
-  security-events: write
   statuses: write
+  pull-requests: write
 
 jobs:
   lint:
     name: Lint (check-only)
     runs-on: ubuntu-latest
-    continue-on-error: true
-    permissions:
-      contents: read
-      checks: write
-      statuses: write
+    outputs:
+      linter_failed: ${{ steps.set_lint_result.outputs.linter_failed }}
     steps:
       - name: Checkout (for lint check)
         uses: actions/checkout@v6.0.1
@@ -42,7 +30,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Super-Linter (check-only, non-fork)
+      - name: Super-Linter (check-only - repository)
+        id: superlint_local
         if: ${{ github.event.pull_request == null || github.event.pull_request.head.repo.full_name == github.repository }}
         uses: super-linter/super-linter@v8.3.1
         continue-on-error: true
@@ -50,68 +39,19 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VALIDATE_GO: true
           VALIDATE_GO_MODULES: true
+          VALIDATE_GIT_COMMITTER: true
+          VALIDATE_GIT_MERGE_CONFLICT_MARKERS: true
 
-      - name: Super-Linter (check-only, forked PR - no token)
+      - name: Super-Linter (check-only - forked PR)
+        id: superlint_fork
         if: ${{ github.event.pull_request != null && github.event.pull_request.head.repo.full_name != github.repository }}
         uses: super-linter/super-linter@v8.3.1
         continue-on-error: true
         env:
           VALIDATE_GO: true
           VALIDATE_GO_MODULES: true
-
-  fix-go:
-    name: Fix Go (autofix) and open fixes PR -> target main
-    runs-on: ubuntu-latest
-    continue-on-error: true
-
-    if: >
-      github.actor != 'github-actions[bot]' &&
-      github.actor != 'dependabot[bot]'
-
-    permissions:
-      contents: write
-      pull-requests: write
-      checks: write
-      statuses: write
-
-    steps:
-      - name: Checkout head or specified ref (full history, no persisted creds)
-        uses: actions/checkout@v6.0.1
-        with:
-          ref: ${{ github.event.pull_request.head.ref || github.head_ref || github.ref_name || github.ref }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Use Go version from repository's go.mod (no cache)
-        uses: actions/setup-go@v6.1.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Super-Linter (auto-fix for Go) — no workspace summary files
-        uses: super-linter/super-linter@v8.3.1
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VALIDATE_GO: true
-          VALIDATE_GO_MODULES: true
-          FIX_GO: true
-          FIX_GO_MODULES: true
-          SAVE_SUPER_LINTER_OUTPUT: 'false'
-          SAVE_SUPER_LINTER_SUMMARY: 'false'
-          ENABLE_GITHUB_ACTIONS_STEP_SUMMARY: 'false'
-
-      - name: Run go mod tidy (modules) — minimal script
-        run: |
-          set -euo pipefail
-          mapfile -t mods < <(git ls-files -- '*/go.mod' 'go.mod' || true)
-          if [ ${#mods[@]} -gt 0 ]; then
-            for gm in "${mods[@]}"; do
-              (cd "$(dirname "$gm")" && go mod tidy)
-            done
-          fi
-        shell: bash
+          VALIDATE_GIT_COMMITTER: true
+          VALIDATE_GIT_MERGE_CONFLICT_MARKERS: true
 
       - name: Create a small run-info file for artifact upload (always)
         if: always()
@@ -132,21 +72,119 @@ jobs:
           name: superlinter-run-info-${{ github.run_id }}
           path: .superlinter-artifact
 
+      - name: Set lint result
+        id: set_lint_result
+        run: |
+          if [ "$REPO_RUN" = "true" ]; then
+            if [ "${SUPERLINT_LOCAL_OUTCOME}" = "failure" ]; then
+              echo "linter_failed=true" >> $GITHUB_OUTPUT
+            else
+              echo "linter_failed=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            if [ "${SUPERLINT_FORK_OUTCOME}" = "failure" ]; then
+              echo "linter_failed=true" >> $GITHUB_OUTPUT
+            else
+              echo "linter_failed=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+        env:
+          REPO_RUN: ${{ github.event.pull_request == null || github.event.pull_request.head.repo.full_name == github.repository }}
+          SUPERLINT_LOCAL_OUTCOME: ${{ steps.superlint_local.outcome || '' }}
+          SUPERLINT_FORK_OUTCOME: ${{ steps.superlint_fork.outcome || '' }}
+
+  fix-go:
+    name: Fix Go (autofix) and open fixes PR -> target main
+    needs: lint
+    runs-on: ubuntu-latest
+    if: >
+      needs.lint.outputs.linter_failed == 'true' &&
+      (github.event.pull_request == null || github.event.pull_request.head.repo.full_name == github.repository) &&
+      github.actor != 'github-actions[bot]' &&
+      github.actor != 'dependabot[bot]'
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: write
+      statuses: write
+    steps:
+      - name: Checkout head or specified ref (full history, persist credentials)
+        uses: actions/checkout@v6.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.ref || github.head_ref || github.ref_name || github.ref }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Use Go version from repository's go.mod (no cache)
+        uses: actions/setup-go@v6.1.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Super-Linter (auto-fix for Go)
+        id: superlinter_fix
+        uses: super-linter/super-linter@v8.3.1
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VALIDATE_GO: true
+          VALIDATE_GO_MODULES: true
+          FIX_GO: true
+          FIX_GO_MODULES: true
+          SAVE_SUPER_LINTER_OUTPUT: 'false'
+          SAVE_SUPER_LINTER_SUMMARY: 'false'
+          ENABLE_GITHUB_ACTIONS_STEP_SUMMARY: 'false'
+          VALIDATE_GIT_COMMITTER: true
+          VALIDATE_GIT_MERGE_CONFLICT_MARKERS: true
+
+      - name: Run go mod tidy (modules) — minimal script
+        run: |
+          set -euo pipefail
+          mapfile -t mods < <(git ls-files -- '*/go.mod' 'go.mod' || true)
+          if [ ${#mods[@]} -gt 0 ]; then
+            for gm in "${mods[@]}"; do
+              (cd "$(dirname "$gm")" && go mod tidy)
+            done
+            git add -A
+            if ! git diff --cached --quiet; then
+              git commit -m "chore: go mod tidy [skip ci]" || true
+            fi
+          fi
+        shell: bash
+
+      - name: Create a small run-info file for artifact upload (always)
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p .superlinter-artifact
+          printf 'run_id=%s\n' "${{ github.run_id }}" > .superlinter-artifact/run-info.txt
+          printf 'repo=%s\n' "${{ github.repository }}" >> .superlinter-artifact/run-info.txt
+          printf 'actor=%s\n' "${{ github.actor }}" >> .superlinter-artifact/run-info.txt
+          printf 'event=%s\n' "${{ github.event_name }}" >> .superlinter-artifact/run-info.txt
+          printf 'ref=%s\n' "${{ github.ref }}" >> .superlinter-artifact/run-info.txt
+        shell: bash
+
+      - name: Upload run-info artifact (always)
+        if: always()
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: superlinter-fix-run-info-${{ github.run_id }}
+          path: .superlinter-artifact
+
       - name: Clean any temporary files before create-pull-request (defensive)
         run: |
           set -euo pipefail
           rm -rf super-linter-output || true
           rm -f super-linter-report.html super-linter-report.json || true
           rm -f .superlinter-artifact/run-info.txt || true
-          git clean -fdx || true
         shell: bash
 
       - name: Create or update Pull Request with fixes (will only create PR if branch is ahead of main)
         id: create_pr
         uses: peter-evans/create-pull-request@v8.0.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           branch: super-linter/fixes-${{ github.head_ref || github.ref_name || github.run_id }}
           base: main
           title: "[super-linter] apply Go fixes for ${{ github.event.pull_request.number || github.run_id }} -> main"
