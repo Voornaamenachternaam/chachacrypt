@@ -4,139 +4,55 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, edited, ready_for_review]
   workflow_dispatch:
+  push:
+    branches:
+      - main
   schedule:
     - cron: '0 2 * * *'
+
+permissions:
+  contents: write
+  checks: write
+  statuses: write
+  pull-requests: write
+  actions: read
 
 concurrency:
   group: superlinter-fix-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-  checks: write
-  statuses: write
-  pull-requests: write
-
 jobs:
-  lint:
-    name: Lint (check-only)
+  lint-and-fix:
+    name: Lint and Auto-fix (create PR if fixes)
     runs-on: ubuntu-latest
-    outputs:
-      linter_failed: ${{ steps.set_lint_result.outputs.linter_failed }}
+    environment: production
     steps:
-      - name: Checkout (for lint check)
+      - name: Checkout (full history, allow pushes)
         uses: actions/checkout@v6.0.1
         with:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Super-Linter (check-only - repository)
-        id: superlint_local
-        if: ${{ github.event.pull_request == null || github.event.pull_request.head.repo.full_name == github.repository }}
-        uses: super-linter/super-linter@v8.3.1
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VALIDATE_GO: true
-          VALIDATE_GO_MODULES: true
-          VALIDATE_GIT_COMMITTER: true
-          VALIDATE_GIT_MERGE_CONFLICT_MARKERS: true
-
-      - name: Super-Linter (check-only - forked PR)
-        id: superlint_fork
-        if: ${{ github.event.pull_request != null && github.event.pull_request.head.repo.full_name != github.repository }}
-        uses: super-linter/super-linter@v8.3.1
-        continue-on-error: true
-        env:
-          VALIDATE_GO: true
-          VALIDATE_GO_MODULES: true
-          VALIDATE_GIT_COMMITTER: true
-          VALIDATE_GIT_MERGE_CONFLICT_MARKERS: true
-
-      - name: Create a small run-info file for artifact upload (always)
-        if: always()
-        run: |
-          set -euo pipefail
-          mkdir -p .superlinter-artifact
-          printf 'run_id=%s\n' "${{ github.run_id }}" > .superlinter-artifact/run-info.txt
-          printf 'repo=%s\n' "${{ github.repository }}" >> .superlinter-artifact/run-info.txt
-          printf 'actor=%s\n' "${{ github.actor }}" >> .superlinter-artifact/run-info.txt
-          printf 'event=%s\n' "${{ github.event_name }}" >> .superlinter-artifact/run-info.txt
-          printf 'ref=%s\n' "${{ github.ref }}" >> .superlinter-artifact/run-info.txt
-        shell: bash
-
-      - name: Upload run-info artifact (always)
-        if: always()
-        uses: actions/upload-artifact@v6.0.0
-        with:
-          name: superlinter-run-info-${{ github.run_id }}
-          path: .superlinter-artifact
-
-      - name: Set lint result
-        id: set_lint_result
-        run: |
-          if [ "$REPO_RUN" = "true" ]; then
-            if [ "${SUPERLINT_LOCAL_OUTCOME}" = "failure" ]; then
-              echo "linter_failed=true" >> $GITHUB_OUTPUT
-            else
-              echo "linter_failed=false" >> $GITHUB_OUTPUT
-            fi
-          else
-            if [ "${SUPERLINT_FORK_OUTCOME}" = "failure" ]; then
-              echo "linter_failed=true" >> $GITHUB_OUTPUT
-            else
-              echo "linter_failed=false" >> $GITHUB_OUTPUT
-            fi
-          fi
-        env:
-          REPO_RUN: ${{ github.event.pull_request == null || github.event.pull_request.head.repo.full_name == github.repository }}
-          SUPERLINT_LOCAL_OUTCOME: ${{ steps.superlint_local.outcome || '' }}
-          SUPERLINT_FORK_OUTCOME: ${{ steps.superlint_fork.outcome || '' }}
-
-  fix-go:
-    name: Fix Go (autofix) and open fixes PR -> target main
-    needs: lint
-    runs-on: ubuntu-latest
-    if: >
-      needs.lint.outputs.linter_failed == 'true' &&
-      (github.event.pull_request == null || github.event.pull_request.head.repo.full_name == github.repository) &&
-      github.actor != 'github-actions[bot]' &&
-      github.actor != 'dependabot[bot]'
-    permissions:
-      contents: write
-      pull-requests: write
-      checks: write
-      statuses: write
-    steps:
-      - name: Checkout head or specified ref (full history, persist credentials)
-        uses: actions/checkout@v6.0.1
-        with:
-          ref: ${{ github.event.pull_request.head.ref || github.head_ref || github.ref_name || github.ref }}
-          fetch-depth: 0
-          persist-credentials: true
-
-      - name: Use Go version from repository's go.mod (no cache)
+      - name: Setup Go (for go mod tidy)
         uses: actions/setup-go@v6.1.0
         with:
           go-version-file: 'go.mod'
           cache: false
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Super-Linter (auto-fix for Go)
-        id: superlinter_fix
+      - name: Run Super-Linter (auto-fix enabled)
         uses: super-linter/super-linter@v8.3.1
-        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VALIDATE_GO: true
           VALIDATE_GO_MODULES: true
+          VALIDATE_GIT_COMMITTER: true
+          VALIDATE_GIT_MERGE_CONFLICT_MARKERS: true
           FIX_GO: true
           FIX_GO_MODULES: true
           SAVE_SUPER_LINTER_OUTPUT: 'false'
           SAVE_SUPER_LINTER_SUMMARY: 'false'
           ENABLE_GITHUB_ACTIONS_STEP_SUMMARY: 'false'
-          VALIDATE_GIT_COMMITTER: true
-          VALIDATE_GIT_MERGE_CONFLICT_MARKERS: true
+        continue-on-error: true
 
       - name: Run go mod tidy (modules) — minimal script
         run: |
@@ -146,56 +62,52 @@ jobs:
             for gm in "${mods[@]}"; do
               (cd "$(dirname "$gm")" && go mod tidy)
             done
-            git add -A
-            if ! git diff --cached --quiet; then
-              git commit -m "chore: go mod tidy [skip ci]" || true
-            fi
           fi
         shell: bash
 
-      - name: Create a small run-info file for artifact upload (always)
-        if: always()
+      - name: Ensure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Detect repository changes
+        id: changes
         run: |
           set -euo pipefail
-          mkdir -p .superlinter-artifact
-          printf 'run_id=%s\n' "${{ github.run_id }}" > .superlinter-artifact/run-info.txt
-          printf 'repo=%s\n' "${{ github.repository }}" >> .superlinter-artifact/run-info.txt
-          printf 'actor=%s\n' "${{ github.actor }}" >> .superlinter-artifact/run-info.txt
-          printf 'event=%s\n' "${{ github.event_name }}" >> .superlinter-artifact/run-info.txt
-          printf 'ref=%s\n' "${{ github.ref }}" >> .superlinter-artifact/run-info.txt
-        shell: bash
+          # ensure we see untracked as well
+          git add -A || true
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "files=$(git status --porcelain | awk '{print $2}' | tr '\n' ' ')" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "files=" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Upload run-info artifact (always)
-        if: always()
-        uses: actions/upload-artifact@v6.0.0
-        with:
-          name: superlinter-fix-run-info-${{ github.run_id }}
-          path: .superlinter-artifact
-
-      - name: Clean any temporary files before create-pull-request (defensive)
-        run: |
-          set -euo pipefail
-          rm -rf super-linter-output || true
-          rm -f super-linter-report.html super-linter-report.json || true
-          rm -f .superlinter-artifact/run-info.txt || true
-        shell: bash
-
-      - name: Create or update Pull Request with fixes (will only create PR if branch is ahead of main)
-        id: create_pr
-        uses: peter-evans/create-pull-request@v8.0.0
+      - name: Create or update Pull Request with fixes
+        if: steps.changes.outputs.changed == 'true' && (github.actor != 'github-actions[bot]' && github.actor != 'dependabot[bot]')
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          branch: super-linter/fixes-${{ github.head_ref || github.ref_name || github.run_id }}
+          branch: super-linter/fixes-${{ github.run_id }}
           base: main
-          title: "[super-linter] apply Go fixes for ${{ github.event.pull_request.number || github.run_id }} -> main"
+          title: "[super-linter] apply auto-fixes -> main"
           body: |
-            Automated Go fixes from Super-Linter (gofmt/goimports and any autofixes available), plus an explicit `go mod tidy`.
+            Automated fixes from Super-Linter (auto-fix enabled) and `go mod tidy`.
             If there are no changes, no PR will be created.
-          commit-message: "chore(lint): apply super-linter/go fixes [skip ci]"
+          commit-message: "chore(lint): apply super-linter fixes [skip ci]"
           author: "super-linter[bot] <super-linter@super-linter.dev>"
+          update-existing: true
 
-      - name: Print created/updated PR url (if created)
-        if: ${{ steps.create_pr.outputs.pull-request-number != '' }}
+      - name: Print created/updated PR url
+        if: steps.changes.outputs.changed == 'true'
         run: |
-          echo "Fixes PR created/updated: https://github.com/${{ github.repository }}/pull/${{ steps.create_pr.outputs.pull-request-number }}"
+          set -euo pipefail
+          # try to find PR number from refs created by create-pull-request action
+          pr_url=$(gh pr view --json url --jq .url 2>/dev/null || true)
+          if [ -n "$pr_url" ]; then
+            echo "PR: $pr_url"
+          else
+            echo "A PR was created/updated (check repository Pull Requests)."
+          fi
         shell: bash
