@@ -1,465 +1,437 @@
 #!/usr/bin/env bash
-# .github/scripts/ai_refactor.sh
-# Robust AI-assisted refactor driver with direct PR creation via GitHub REST API.
-# Required repo secrets: OPENROUTER_API_KEY, OPENROUTER_MODEL, GH2_TOKEN
+#
+# ai_refactor.sh - robust AI-driven refactor script (final, production-ready).
+#
 set -euo pipefail
 
-if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
+ARTIFACT_DIR="${ARTIFACT_DIR:-ci-artifacts/combined}"
+TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+TMP_BRANCH="ai-refactor-temp-${TIMESTAMP}"
+RAW_MODEL_OUT="${ARTIFACT_DIR}/model-raw.json"
+AI_PATCH="${ARTIFACT_DIR}/ai.patch"
+APPLY_LOG="${ARTIFACT_DIR}/apply.log"
+BUILD_LOG="${ARTIFACT_DIR}/go-build.log"
+TEST_LOG="${ARTIFACT_DIR}/go-test.log"
+VERSION_CHECK_LOG="${ARTIFACT_DIR}/version-check.log"
+METADATA_JSON="${ARTIFACT_DIR}/metadata.json"
+PROMPT_FILE="${PROMPT_FILE:-.github/ai_prompt.md}"
 
-ARTIFACT_DIR="ci-artifacts/combined"
-while [[ $# -gt 0 ]]; do
+mkdir -p "${ARTIFACT_DIR}"
+
+log() { printf "%s %s\n" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*"; }
+err() { printf "%s %s\n" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "ERROR: $*" >&2; }
+
+# -------------------------
+# small Go program to compare module versions using golang.org/x/mod/semver
+# This is more reliable than sort -V for Go pseudo-versions.
+# -------------------------
+SEMVER_HELPER_SRC="$(mktemp -t semver_cmp_XXXX.go)"
+SEMVER_HELPER_BIN="$(mktemp -t semver_cmp_bin_XXXX)"
+cat > "${SEMVER_HELPER_SRC}" <<'EOF'
+package main
+import (
+  "fmt"
+  "os"
+  "golang.org/x/mod/semver"
+)
+func main() {
+  if len(os.Args) != 3 {
+    fmt.Fprintln(os.Stderr, "usage: semver_cmp v1 v2")
+    os.Exit(2)
+  }
+  v1 := os.Args[1]
+  v2 := os.Args[2]
+  // semver.Compare expects versions to start with 'v'; ensure prefix
+  if v1 != "" && v1[0] != 'v' { v1 = "v"+v1 }
+  if v2 != "" && v2[0] != 'v' { v2 = "v"+v2 }
+  // semver.IsValid returns false for pseudo-versions; semver.Compare still works for Go module versions.
+  res := semver.Compare(v1, v2)
+  // semver.Compare returns -1,0,1
+  fmt.Printf("%d", res)
+  os.Exit(0)
+}
+EOF
+
+# build helper (use 'go' installed by setup-go)
+if command -v go >/dev/null 2>&1; then
+  # ensure x/mod is available and compile
+  log "Compiling semver helper..."
+  GOPATH_TMP=$(mktemp -d)
+  export GOPATH="${GOPATH_TMP}"
+  # Download only the module to cache, then build
+  env GO111MODULE=on go get golang.org/x/mod@latest >/dev/null 2>&1 || true
+  env GO111MODULE=on CGO_ENABLED=0 go build -o "${SEMVER_HELPER_BIN}" "${SEMVER_HELPER_SRC}"
+  rm -rf "${GOPATH_TMP}" || true
+else
+  err "go tool not available in PATH; this script requires go to be installed by actions/setup-go before running."
+  exit 3
+fi
+
+# comparison wrapper using the compiled helper
+compare_ver() {
+  # returns:
+  # - prints 0 for equal, -1 if v1 < v2, +1 if v1 > v2
+  local v1="$1" v2="$2"
+  if [ -z "${v1}" ]; then v1=""; fi
+  if [ -z "${v2}" ]; then v2=""; fi
+  "${SEMVER_HELPER_BIN}" "${v1}" "${v2}"
+}
+
+# -------------------------
+# parse args
+# -------------------------
+while [ $# -gt 0 ]; do
   case "$1" in
-    --artifacts|-a) ARTIFACT_DIR="$2"; shift 2 ;;
-    *) shift ;;
+    --artifacts|-a)
+      ARTIFACT_DIR="$2"
+      RAW_MODEL_OUT="${ARTIFACT_DIR}/model-raw.json"
+      AI_PATCH="${ARTIFACT_DIR}/ai.patch"
+      APPLY_LOG="${ARTIFACT_DIR}/apply.log"
+      BUILD_LOG="${ARTIFACT_DIR}/go-build.log"
+      TEST_LOG="${ARTIFACT_DIR}/go-test.log"
+      VERSION_CHECK_LOG="${ARTIFACT_DIR}/version-check.log"
+      METADATA_JSON="${ARTIFACT_DIR}/metadata.json"
+      shift 2
+      ;;
+    --prompt-file)
+      PROMPT_FILE="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
   esac
 done
-mkdir -p "$ARTIFACT_DIR"
 
-DIAG="$ARTIFACT_DIR/ai-diagnostics.txt"
-AI_RAW="$ARTIFACT_DIR/ai-raw-response.json"
-AI_RESP="$ARTIFACT_DIR/ai-response.txt"
-VALIDATE_LOG="$ARTIFACT_DIR/ai-validate.log"
-PATCH_BEFORE="$ARTIFACT_DIR/ai-diff-before.patch"
-PATCH_AFTER="$ARTIFACT_DIR/ai-diff-after.patch"
+mkdir -p "${ARTIFACT_DIR}"
 
-: "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set}"
-: "${OPENROUTER_MODEL:?OPENROUTER_MODEL must be set}"
-: "${GH2_TOKEN:?GH2_TOKEN must be set}"
+# -------------------------
+# Pre-snapshot
+# -------------------------
+cp go.mod "${ARTIFACT_DIR}/go.mod.pre"
+cp go.sum "${ARTIFACT_DIR}/go.sum.pre"
+log "Saved pre-state go.mod and go.sum"
 
-# ensure git operations are allowed
-git config --global --add safe.directory "${GITHUB_WORKSPACE:-$(pwd)}" >/dev/null 2>&1 || true
+PRE_GO_VER="$(awk '/^go[[:space:]]+/{print $2; exit}' "${ARTIFACT_DIR}/go.mod.pre" || true)"
+echo "pre_go_version=${PRE_GO_VER}" > "${VERSION_CHECK_LOG}"
 
-# ensure go exists
+# ------------
+# validate go exists
+# ------------
 if ! command -v go >/dev/null 2>&1; then
-  echo "ERROR: go tool not found in PATH" | tee "$DIAG"
-  if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "pr_branch=" >> "${GITHUB_OUTPUT}"; else echo "pr_branch="; fi
-  exit 1
+  err "go not found on PATH. Please ensure actions/setup-go runs before this script."
+  exit 4
 fi
 
-GOBIN="$(go env GOPATH 2>/dev/null || echo "$HOME/go")/bin"
-mkdir -p "$GOBIN"
-export PATH="$GOBIN:$PATH"
-
-TARGET_FILES=( "chachacrypt.go" "go.mod" "go.sum" )
-
-# header diagnostics
-{
-  echo "ai_refactor run: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  echo "repo: ${GITHUB_REPOSITORY:-unknown}"
-  echo "model: ${OPENROUTER_MODEL}"
-} > "$DIAG"
-
-# ---------------- helpers ----------------
-sanitize_ref() {
-  local s="$1"
-  printf '%s' "$s" | sed -E 's/[^A-Za-z0-9._\/-]+/-/g' | sed -E 's/^-+|-+$//g'
-}
-make_branch_name() {
-  local prefix="$1"; local token="${2:-}"
-  local ts; ts="$(date -u +%Y%m%dT%H%M%SZ)"
-  if [ -n "$token" ]; then
-    token="$(sanitize_ref "$token")"
-    echo "${prefix}-${token}-${ts}"
+RUNNER_GO_VERSION="$(go version | awk '{print $3}' | sed 's/go//')"
+# Use semver compare: require runner version >= go.mod or equal (strictness: enforce patch exact match by default)
+cmp_out=$(compare_ver "${RUNNER_GO_VERSION}" "${PRE_GO_VER}" || true)
+if [ "${cmp_out}" != "0" ]; then
+  # allow if runner >= requested (cmp_out == 1 means runner > required)
+  if [ "${cmp_out}" = "1" ]; then
+    log "Runner go ${RUNNER_GO_VERSION} is newer than go.mod directive ${PRE_GO_VER} — acceptable."
   else
-    echo "${prefix}-${ts}"
-  fi
-}
-set_push_remote_token() {
-  if [ -n "${GH2_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
-    git remote set-url origin "https://x-access-token:${GH2_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" >/dev/null 2>&1 || true
-  fi
-}
-emit_pr_branch() {
-  local br="$1"
-  if [ -n "${GITHUB_OUTPUT:-}" ]; then
-    echo "pr_branch=${br}" >> "${GITHUB_OUTPUT}"
-  else
-    echo "pr_branch=${br}"
-  fi
-}
-# check whether HEAD differs from origin/main (after fetching origin/main)
-head_differs_from_origin_main() {
-  git fetch origin main:refs/remotes/origin/main >/dev/null 2>&1 || true
-  if ! git show-ref --verify --quiet refs/remotes/origin/main; then
-    return 0
-  fi
-  local counts
-  counts="$(git rev-list --left-right --count refs/remotes/origin/main...HEAD 2>/dev/null || echo "0 0")"
-  local left right
-  left="$(printf '%s' "$counts" | awk '{print $1}')"
-  right="$(printf '%s' "$counts" | awk '{print $2}')"
-  if [ "$left" = "0" ] && [ "$right" = "0" ]; then
-    return 1
-  fi
-  return 0
-}
-targets_changed_vs_base() {
-  local base_ref="$1"
-  if git rev-parse --verify "$base_ref" >/dev/null 2>&1; then
-    git diff --name-only "$base_ref" -- "${TARGET_FILES[@]}" | grep -q . && return 0
-    git ls-files --others --exclude-standard -- "${TARGET_FILES[@]}" | grep -q . && return 0
-    return 1
-  else
-    for f in "${TARGET_FILES[@]}"; do [ -f "$f" ] && return 0 || true; done
-    return 1
-  fi
-}
-
-# GitHub API helpers (create PR or find existing)
-gh_api() {
-  # $1 method, $2 path, $3 optional data
-  local method="$1"; local path="$2"; local data="${3:-}"
-  local url="https://api.github.com${path}"
-  if [ -n "$data" ]; then
-    curl -fsSL -X "$method" -H "Authorization: token ${GH2_TOKEN}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" -d "$data" "$url"
-  else
-    curl -fsSL -X "$method" -H "Authorization: token ${GH2_TOKEN}" -H "Accept: application/vnd.github+json" "$url"
-  fi
-}
-
-create_or_find_pr() {
-  # args: head_branch, title, body
-  local head="$1"; local title="$2"; local body="$3"
-  local owner repo
-  owner="$(cut -d/ -f1 <<< "${GITHUB_REPOSITORY}")"
-  repo="$(cut -d/ -f2 <<< "${GITHUB_REPOSITORY}")"
-
-  # check existing PR for head (owner:head) and base=main
-  local query_path="/repos/${owner}/${repo}/pulls?head=${owner}:${head}&base=main&state=open"
-  local existing
-  existing="$(gh_api GET "$query_path" || true)"
-  if [ -n "$existing" ] && [ "$(printf '%s' "$existing" | jq -r 'length // 0')" != "0" ]; then
-    local html
-    html="$(printf '%s' "$existing" | jq -r '.[0].html_url')"
-    echo "$html"
-    return 0
-  fi
-
-  # create PR
-  local payload
-  payload="$(jq -n --arg t "$title" --arg h "$head" --arg b "$body" '{title:$t, head:$h, base:"main", body:$b, maintainer_can_modify:true}')"
-  local resp
-  resp="$(gh_api POST "/repos/${owner}/${repo}/pulls" "$payload" 2>/dev/null || true)"
-  if [ -n "$resp" ]; then
-    printf '%s' "$resp" | jq -r '.html_url // ""'
-  else
-    echo ""
-  fi
-}
-
-# ---------------- main flow ----------------
-
-# keep a pre-change diff for diagnostics
-git diff -- "${TARGET_FILES[@]}" > "$PATCH_BEFORE" 2>/dev/null || true
-
-# fetch origin/main as base if present
-git fetch --prune origin main >/dev/null 2>&1 || true
-BASE_REF="HEAD"
-if git show-ref --verify --quiet refs/remotes/origin/main; then
-  BASE_REF="refs/remotes/origin/main"
-fi
-
-# ---------------- Step 0: bump Go directive (if newer)
-LATEST_GO_FULL="$(curl -fsS https://go.dev/VERSION?m=text || true)"  # e.g. go1.25.3
-LATEST_GO=""
-if [ -n "$LATEST_GO_FULL" ]; then LATEST_GO="${LATEST_GO_FULL#go}"; fi
-
-ver_ge() {
-  IFS='.' read -r -a A <<< "$1"
-  IFS='.' read -r -a B <<< "$2"
-  for i in 0 1 2; do
-    ai=${A[i]:-0}; bi=${B[i]:-0}
-    if ((10#$ai > 10#$bi)); then return 0; fi
-    if ((10#$ai < 10#$bi)); then return 1; fi
-  done
-  return 0
-}
-
-if [ -f go.mod ] && [ -n "$LATEST_GO" ]; then
-  CUR_GO="$(awk '/^go /{print $2; exit}' go.mod || true)"
-  if [ -n "$CUR_GO" ] && ! ver_ge "$CUR_GO" "$LATEST_GO"; then
-    echo "Attempting go.mod bump ${CUR_GO} -> ${LATEST_GO}" >> "$DIAG"
-    cp go.mod "${ARTIFACT_DIR}/go.mod.prebump" || true
-    awk -v ng="$LATEST_GO" 'BEGIN{done=0} { if (!done && $1=="go") { print "go " ng; done=1; next } print }' go.mod > go.mod.tmp && mv go.mod.tmp go.mod || true
-    go mod tidy >> "${ARTIFACT_DIR}/go-mod-tidy.log" 2>&1 || true
-
-    # only create PR if changed vs base
-    if targets_changed_vs_base "$BASE_REF"; then
-      BR="$(make_branch_name "ai/go-bump" "$LATEST_GO")"
-      BR="$(sanitize_ref "$BR")"
-      if ! git check-ref-format --branch "$BR" >/dev/null 2>&1; then
-        BR="ai/go-bump-$(date -u +%Y%m%dT%H%M%SZ)"
-      fi
-      # create branch from base for deterministic ancestry
-      git checkout -b "$BR" "$BASE_REF"
-      git config user.email "41898282+github-actions[bot]@users.noreply.github.com" || true
-      git config user.name "github-actions[bot]" || true
-      git add go.mod go.sum || true
-      git commit -m "[create-pull-request] bump go directive to ${LATEST_GO}" || true
-
-      # ensure branch really differs from origin/main
-      if head_differs_from_origin_main; then
-        set_push_remote_token
-        git push --set-upstream origin "$BR" || true
-        # create PR via API
-        PR_URL="$(create_or_find_pr "$BR" "chore: bump go to ${LATEST_GO}" "Automated bump of Go version to ${LATEST_GO} (AI-assisted).")" || true
-        if [ -n "$PR_URL" ]; then
-          echo "PR created: $PR_URL" >> "$DIAG"
-          emit_pr_branch "$BR"
-          exit 0
-        else
-          echo "Failed to create PR or found none; branch pushed." >> "$DIAG"
-          emit_pr_branch "$BR"
-          exit 0
-        fi
-      else
-        echo "After commit, branch does not differ from origin/main; restoring." >> "$DIAG"
-        git checkout --detach "$BASE_REF" >/dev/null 2>&1 || true
-        git branch -D "$BR" >/dev/null 2>&1 || true
-        [ -f "${ARTIFACT_DIR}/go.mod.prebump" ] && mv "${ARTIFACT_DIR}/go.mod.prebump" go.mod || true
-      fi
-    else
-      echo "go.mod bump produced no change vs base; restored." >> "$DIAG"
-      [ -f "${ARTIFACT_DIR}/go.mod.prebump" ] && mv "${ARTIFACT_DIR}/go.mod.prebump" go.mod || true
-    fi
-  else
-    echo "No go.mod bump needed (cur: ${CUR_GO:-none}, latest: ${LATEST_GO:-unknown})" >> "$DIAG"
+    err "Runner 'go' version (${RUNNER_GO_VERSION}) is older than go.mod directive (${PRE_GO_VER}). Please set up the runner with the repository go.mod Go version (actions/setup-go)."
+    echo "runner_go=${RUNNER_GO_VERSION}" >> "${VERSION_CHECK_LOG}"
+    exit 5
   fi
 fi
 
-# ---------------- Step 1: safe auto-fixes
-gofmt -s -w . || true
-if ! command -v goimports >/dev/null 2>&1; then go install golang.org/x/tools/cmd/goimports@latest || true; fi
-command -v goimports >/dev/null 2>&1 && goimports -w . || true
+log "Runner go version ${RUNNER_GO_VERSION} validated vs go.mod ${PRE_GO_VER}"
 
-if ! command -v golangci-lint >/dev/null 2>&1; then
-  curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
-    | sh -s -- -b "$GOBIN" v2.5.0 >/dev/null 2>&1 || true
+# -------------------------
+# Validate presence of prompt
+# -------------------------
+if [ ! -f "${PROMPT_FILE}" ]; then
+  err "Prompt file ${PROMPT_FILE} not found."
+  exit 6
 fi
-command -v golangci-lint >/dev/null 2>&1 && golangci-lint run --fix --timeout=10m ./... >> "${ARTIFACT_DIR}/golangci-fix.log" 2>&1 || true
-go mod tidy >> "${ARTIFACT_DIR}/go-mod-tidy.log" 2>&1 || true
+PROMPT_CONTENT="$(cat "${PROMPT_FILE}")"
 
-# if targets changed vs base, make branch/commit and create PR if branch differs
-if targets_changed_vs_base "$BASE_REF"; then
-  BR="$(make_branch_name "ai/auto-fix")"
-  BR="$(sanitize_ref "$BR")"
-  git checkout -b "$BR" "$BASE_REF"
-  git config user.email "41898282+github-actions[bot]@users.noreply.github.com" || true
-  git config user.name "github-actions[bot]" || true
-  for f in "${TARGET_FILES[@]}"; do [ -f "$f" ] && git add -- "$f" || true; done
-  if git diff --cached --name-only | grep -q .; then
-    git commit -m "[create-pull-request] automated safe fixes (gofmt/golangci-lint --fix)" || true
-    if head_differs_from_origin_main; then
-      set_push_remote_token
-      git push --set-upstream origin "$BR" || true
-      PR_URL="$(create_or_find_pr "$BR" "chore: automated safe fixes" "Automated safe fixes (gofmt, goimports, golangci-lint --fix).")" || true
-      if [ -n "$PR_URL" ]; then echo "PR: $PR_URL" >> "$DIAG"; fi
-      emit_pr_branch "$BR"
-      exit 0
-    else
-      echo "Auto-fix commit did not differ from origin/main; cleaning up." >> "$DIAG"
-      git checkout --detach "$BASE_REF" >/dev/null 2>&1 || true
-      git branch -D "$BR" >/dev/null 2>&1 || true
-      # continue
-    fi
-  else
-    echo "No staged changes after safe fixes." >> "$DIAG"
-    git checkout --detach "$BASE_REF" >/dev/null 2>&1 || true
-  fi
-fi
-
-# ---------------- Step 2: collect diagnostics
-go build ./... > "${ARTIFACT_DIR}/go-build-output.txt" 2>&1 || true
-go test ./... > "${ARTIFACT_DIR}/go-test-output.txt" 2>&1 || true
-command -v golangci-lint >/dev/null 2>&1 && golangci-lint run --timeout=10m --out-format json ./... > "${ARTIFACT_DIR}/golangci.runtime.json" 2> "${ARTIFACT_DIR}/golangci.runtime.stderr" || true
-
-NEED_AI=false
-if [ -s "${ARTIFACT_DIR}/go-build-output.txt" ] || [ -s "${ARTIFACT_DIR}/go-test-output.txt" ]; then NEED_AI=true; fi
-if [ -f "${ARTIFACT_DIR}/golangci.runtime.json" ] && command -v jq >/dev/null 2>&1; then
-  if jq -r '.Issues[]?.Pos?.Filename // empty' "${ARTIFACT_DIR}/golangci.runtime.json" | grep -E "$(printf '%s|%s|%s' "${TARGET_FILES[0]}" "${TARGET_FILES[1]}" "${TARGET_FILES[2]}")" >/dev/null 2>&1; then NEED_AI=true; fi
-fi
-if [ "$NEED_AI" = false ]; then
-  echo "No build/test/lint issues requiring AI." >> "$DIAG"
-  emit_pr_branch ""
-  exit 0
-fi
-
-# ---------------- Step 3: prepare prompt
-PROMPT_FILE="$(mktemp)"
-cat > "$PROMPT_FILE" <<'PROMPT_EOF'
-You are an expert Go maintainer. Produce a single unified git diff (patch) enclosed in triple backticks that fixes the build/test/lint issues below.
-Only modify files if necessary: chachacrypt.go, go.mod, go.sum. Keep changes minimal and safe. Do not invent features.
-PROMPT_EOF
-{
-  echo ""; echo "=== BUILD OUTPUT ==="; sed -n '1,500p' "${ARTIFACT_DIR}/go-build-output.txt" 2>/dev/null || true
-  echo ""; echo "=== TEST OUTPUT ==="; sed -n '1,500p' "${ARTIFACT_DIR}/go-test-output.txt" 2>/dev/null || true
-  echo ""; echo "=== LINT STDERR ==="; sed -n '1,500p' "${ARTIFACT_DIR}/golangci.runtime.stderr" 2>/dev/null || true
-  echo ""; echo "=== FILE SNIPPETS ==="
-  for f in "${TARGET_FILES[@]}"; do [ -f "$f" ] && { echo "----- $f -----"; sed -n '1,300p' "$f"; echo; } || true; done
-} >> "$PROMPT_FILE"
-
-# ---------------- Step 4: call OpenRouter (python helper)
-PY_CALL="$(mktemp)"
-cat > "$PY_CALL" <<'PYPY'
-#!/usr/bin/env python3
-import os,sys,time,socket,json
-try:
-  import requests
-except Exception:
-  sys.stderr.write("requests missing\n"); sys.exit(2)
-API_URL="https://openrouter.ai/api/v1/chat/completions"
-API_KEY=os.environ.get("OPENROUTER_API_KEY")
-MODEL=os.environ.get("OPENROUTER_MODEL")
-if not API_KEY or not MODEL:
-  sys.stderr.write("missing OPENROUTER_API_KEY or OPENROUTER_MODEL\n"); sys.exit(2)
-prompt_path=sys.argv[1]
-with open(prompt_path,'r',encoding='utf-8') as fh:
-  user_text=fh.read()
-payload={"model":MODEL,"messages":[{"role":"system","content":"You are a precise Go patch generator."},{"role":"user","content":user_text}],"temperature":0.0,"max_tokens":32768}
-host="openrouter.ai"
-for i in range(6):
-  try:
-    socket.gethostbyname(host)
-    break
-  except Exception:
-    time.sleep((i+1)*1.5)
-headers={"Authorization":f"Bearer {API_KEY}","Content-Type":"application/json"}
-for attempt in range(6):
-  try:
-    r=requests.post(API_URL, headers=headers, json=payload, timeout=120)
-    r.raise_for_status()
-    json.dump(r.json(), sys.stdout, ensure_ascii=False)
-    sys.exit(0)
-  except Exception as e:
-    sys.stderr.write(f"request error {attempt+1}: {e}\n")
-    time.sleep((attempt+1)*2)
-sys.stderr.write("failed after retries\n"); sys.exit(3)
-PYPY
-chmod +x "$PY_CALL"
-# ensure requests installed
-if ! python3 -c "import requests" >/dev/null 2>&1; then
-  if command -v pip3 >/dev/null 2>&1; then python3 -m pip install --upgrade requests >/dev/null 2>&1 || true; fi
-fi
-
-RESPONSE_JSON="$(mktemp)"
-set +e
-python3 "$PY_CALL" "$PROMPT_FILE" > "$RESPONSE_JSON" 2>> "$DIAG"
-PY_EXIT=$?
-set -e
-cp "$RESPONSE_JSON" "$AI_RAW" || true
-if [ "$PY_EXIT" -ne 0 ]; then
-  echo "OpenRouter call failed (exit $PY_EXIT). See $DIAG and $AI_RAW" >> "$DIAG"
-  emit_pr_branch ""
-  exit 0
-fi
-
-# extract content
-EXTRACT_PY="$(mktemp)"
-cat > "$EXTRACT_PY" <<'EXTRACTPY'
+# -------------------------
+# Prepare AI request JSON robustly (use jq if present; else python)
+# -------------------------
+AI_REQ_JSON="${ARTIFACT_DIR}/ai_request.json"
+if command -v jq >/dev/null 2>&1; then
+  jq -n --arg model "${OPENROUTER_MODEL:-${OPENAI_MODEL:-gpt-4o-mini}}" \
+        --arg system "You are an assistant that returns a unified diff patch only. Return either fenced ```diff blocks or a git-style diff; do not add commentary." \
+        --arg user "${PROMPT_CONTENT}" \
+        '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$user}], max_tokens:1200, temperature:0.0}' \
+        > "${AI_REQ_JSON}"
+else
+  # fallback using Python to JSON-escape the prompt
+  python - <<PY > "${AI_REQ_JSON}"
 import json,sys
-try:
-  obj=json.load(open(sys.argv[1],'r',encoding='utf-8'))
-  choices=obj.get("choices") or []
-  if choices:
-    c=choices[0]
-    content=c.get("message",{}).get("content") or c.get("text") or ""
-  else:
-    content=""
-  sys.stdout.write(content or "")
-except Exception as e:
-  sys.stderr.write("extract error:"+str(e)); sys.exit(1)
-EXTRACTPY
-python3 "$EXTRACT_PY" "$RESPONSE_JSON" > "$AI_RESP" 2>> "$DIAG" || true
-AI_CONTENT="$(sed -n '1,20000p' "$AI_RESP" || true)"
-if [ -z "${AI_CONTENT:-}" ]; then
-  echo "AI returned empty content; see $AI_RAW and $DIAG" >> "$DIAG"
-  emit_pr_branch ""
-  exit 0
+model = "${OPENROUTER_MODEL or OPENAI_MODEL or 'gpt-4o-mini'}"
+system = "You are an assistant that returns a unified diff patch only. Return either fenced ```diff blocks or a git-style diff; do not add commentary."
+user = open("${PROMPT_FILE}").read()
+print(json.dumps({"model": model, "messages":[{"role":"system","content":system},{"role":"user","content":user}], "max_tokens":1200, "temperature":0.0}))
+PY
 fi
 
-# ---------------- Step 5: extract fenced patch and apply
-PATCH_TMP="$(mktemp)"
-EXTRACT_PATCH_PY="$(mktemp)"
-cat > "$EXTRACT_PATCH_PY" <<'PATCHPY'
-import re,sys
-s=open(sys.argv[1],'r',encoding='utf-8').read()
-m=re.search(r'```(?:diff[^\n]*)?\n(.*?)\n```',s,re.S)
-if not m:
-  m=re.search(r'```\s*\n(.*?)\n```',s,re.S)
-if m:
-  print(m.group(1))
-else:
-  print("",end="")
-PATCHPY
-python3 "$EXTRACT_PATCH_PY" "$AI_RESP" > "$PATCH_TMP" 2>> "$DIAG" || true
-
-if [ ! -s "$PATCH_TMP" ]; then
-  echo "No patch extracted from AI response" >> "$DIAG"
-  emit_pr_branch ""
-  exit 0
-fi
-
-if ! git apply --check "$PATCH_TMP" > /tmp/ai_patch_check.out 2>&1; then
-  echo "AI patch failed git apply --check" >> "$DIAG"
-  cat /tmp/ai_patch_check.out >> "$DIAG" || true
-  emit_pr_branch ""
-  exit 0
-fi
-
-git apply "$PATCH_TMP" || { echo "git apply failed" >> "$DIAG"; emit_pr_branch ""; exit 0; }
-
-# Validate build/test after applying patch
-set +e
-go mod tidy >> "$VALIDATE_LOG" 2>&1 || true
-go build ./... >> "$VALIDATE_LOG" 2>&1
-BUILD_EXIT=$?
-go test ./... >> "$VALIDATE_LOG" 2>&1
-TEST_EXIT=$?
-set -e
-
-if [ "$BUILD_EXIT" -ne 0 ] || [ "$TEST_EXIT" -ne 0 ]; then
-  echo "Validation failed after AI patch; reverting." >> "$DIAG"
-  git checkout -- . || true
-  cp "$VALIDATE_LOG" "${ARTIFACT_DIR}/ai-validate.log" || true
-  emit_pr_branch ""
-  exit 0
-fi
-
-# Commit and create PR only if changed vs base
-if targets_changed_vs_base "$BASE_REF"; then
-  BR="$(make_branch_name "ai/ai-fix")"
-  BR="$(sanitize_ref "$BR")"
-  git checkout -b "$BR" "$BASE_REF"
-  git config user.email "41898282+github-actions[bot]@users.noreply.github.com" || true
-  git config user.name "github-actions[bot]" || true
-  for f in "${TARGET_FILES[@]}"; do [ -f "$f" ] && git add -- "$f" || true; done
-  if git diff --cached --name-only | grep -q .; then
-    git commit -m "[create-pull-request] automated AI-assisted fixes" || true
-    if head_differs_from_origin_main; then
-      set_push_remote_token
-      git push --set-upstream origin "$BR" || true
-      PR_URL="$(create_or_find_pr "$BR" "chore: automated AI-assisted fixes" "Automated AI-assisted fixes (build/lint/test diagnostic fixes).")" || true
-      if [ -n "$PR_URL" ]; then
-        echo "PR created: $PR_URL" >> "$DIAG"
-      else
-        echo "PR may already exist or failed to create; check diagnostics." >> "$DIAG"
-      fi
-      emit_pr_branch "$BR"
-      exit 0
-    else
-      echo "AI commit did not differ from origin/main; cleaning up." >> "$DIAG"
-      git checkout --detach "$BASE_REF" >/dev/null 2>&1 || true
-      git branch -D "$BR" >/dev/null 2>&1 || true
-      emit_pr_branch ""
-      exit 0
-    fi
-  else
-    echo "No staged changes after AI patch; nothing to commit." >> "$DIAG"
-    emit_pr_branch ""
-    exit 0
+# -------------------------
+# Call AI provider
+# Prefer OPENROUTER_API_KEY if present, else fallback to OPENAI_API_KEY.
+# Save raw response verbatim to RAW_MODEL_OUT
+# -------------------------
+if [ -n "${OPENROUTER_API_KEY:-}" ]; then
+  OPENROUTER_API_URL="${OPENROUTER_API_URL:-https://api.openrouter.ai/v1/chat/completions}"
+  log "Calling OpenRouter API..."
+  http_status=$(curl -sS -X POST \
+    -H "Authorization: Bearer ${OPENROUTER_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d @"${AI_REQ_JSON}" \
+    -w "%{http_code}" \
+    -o "${RAW_MODEL_OUT}.tmp" \
+    "${OPENROUTER_API_URL}" || true)
+  if [ -s "${RAW_MODEL_OUT}.tmp" ]; then mv "${RAW_MODEL_OUT}.tmp" "${RAW_MODEL_OUT}"; fi
+  if [ "${http_status}" != "200" ] && [ "${http_status}" != "201" ]; then
+    err "OpenRouter API returned HTTP ${http_status}. Raw response saved to ${RAW_MODEL_OUT}"
+    exit 7
+  fi
+elif [ -n "${OPENAI_API_KEY:-}" ]; then
+  OPENAI_API_URL="${OPENAI_API_BASE:-https://api.openai.com}/v1/chat/completions"
+  log "Calling OpenAI-compatible API..."
+  http_status=$(curl -sS -X POST \
+    -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d @"${AI_REQ_JSON}" \
+    -w "%{http_code}" \
+    -o "${RAW_MODEL_OUT}.tmp" \
+    "${OPENAI_API_URL}" || true)
+  if [ -s "${RAW_MODEL_OUT}.tmp" ]; then mv "${RAW_MODEL_OUT}.tmp" "${RAW_MODEL_OUT}"; fi
+  if [ "${http_status}" != "200" ] && [ "${http_status}" != "201" ]; then
+    err "OpenAI API returned HTTP ${http_status}. Raw response saved to ${RAW_MODEL_OUT}"
+    exit 8
   fi
 else
-  echo "No target files changed after AI patch." >> "$DIAG"
-  emit_pr_branch ""
-  exit 0
+  err "No AI API key configured (OPENROUTER_API_KEY or OPENAI_API_KEY required)."
+  exit 9
 fi
+
+log "Saved raw model output to ${RAW_MODEL_OUT}"
+
+# -------------------------
+# Extract patch heuristically (fenced diff, git-style 'diff --git', or unified)
+# -------------------------
+extract_patch_from_raw() {
+  local raw="$1" out="$2"
+  awk '
+    BEGIN {found=0}
+    /^\s*```(diff|patch)/ { found=1; next }
+    /^\s*```/ && found==1 { exit }
+    found==1 { print }
+  ' "$raw" > "$out.fenced" || true
+  if [ -s "$out.fenced" ]; then mv "$out.fenced" "$out"; return 0; fi
+
+  awk 'BEGIN{p=0} /diff --git/ {p=1} { if(p==1) print }' "$raw" > "$out.diff" || true
+  if [ -s "$out.diff" ]; then mv "$out.diff" "$out"; return 0; fi
+
+  awk 'BEGIN{p=0} /^\@\@/ {p=1} { if(p==1) print }' "$raw" > "$out.unified" || true
+  if [ -s "$out.unified" ]; then mv "$out.unified" "$out"; return 0; fi
+
+  return 1
+}
+
+if extract_patch_from_raw "${RAW_MODEL_OUT}" "${AI_PATCH}"; then
+  log "Extracted patch to ${AI_PATCH}"
+else
+  err "No patch found in model output; saved raw output to ${RAW_MODEL_OUT}"
+  exit 10
+fi
+
+chmod a+r "${AI_PATCH}" || true
+
+# -------------------------
+# Apply on a temporary branch safely (staged only)
+# -------------------------
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  err "Repository not clean (uncommitted changes). Aborting."
+  exit 11
+fi
+
+git checkout -b "${TMP_BRANCH}" >/dev/null
+log "Created temporary branch ${TMP_BRANCH}"
+
+set +e
+git apply --index --whitespace=fix "${AI_PATCH}" > "${APPLY_LOG}" 2>&1
+APPLY_EXIT="$?"
+set -e
+
+if [ "${APPLY_EXIT}" -ne 0 ]; then
+  err "git apply failed; see ${APPLY_LOG}"
+  git checkout - >/dev/null || true
+  git branch -D "${TMP_BRANCH}" >/dev/null || true
+  exit 12
+fi
+log "Patch staged successfully."
+
+# capture post-state from index if present, else file system
+git show :go.mod > "${ARTIFACT_DIR}/go.mod.post" 2>/dev/null || cp go.mod "${ARTIFACT_DIR}/go.mod.post"
+git show :go.sum > "${ARTIFACT_DIR}/go.sum.post" 2>/dev/null || cp go.sum "${ARTIFACT_DIR}/go.sum.post"
+
+POST_GO_VER="$(awk '/^go[[:space:]]+/{print $2; exit}' "${ARTIFACT_DIR}/go.mod.post" || true)"
+echo "post_go_version=${POST_GO_VER}" >> "${VERSION_CHECK_LOG}"
+
+# -------------------------
+# Compare go directive (use semver helper)
+# -------------------------
+cmp_go="$(compare_ver "${POST_GO_VER}" "${PRE_GO_VER}" || true)"
+# cmp result -1,0,1 => negative means post < pre (downgrade)
+if [ "${cmp_go}" = "-1" ]; then
+  err "Detected go directive downgrade: ${PRE_GO_VER} -> ${POST_GO_VER}. Refusing changes."
+  git reset --hard HEAD >/dev/null || true
+  git checkout - >/dev/null || true
+  git branch -D "${TMP_BRANCH}" >/dev/null || true
+  exit 13
+fi
+log "go directive check passed: ${PRE_GO_VER} -> ${POST_GO_VER}"
+
+# -------------------------
+# Compare dependency versions using 'go list -m -json all' pre vs post
+# We'll read module versions and compare via semver helper
+# -------------------------
+# Write module lists
+go list -m -json all > "${ARTIFACT_DIR}/module-list.post.json" 2>/dev/null || true
+# For pre list, we temporarily write the pre go.mod to a temp dir and run 'go list -m -modfile'
+TMP_PRE_DIR="$(mktemp -d)"
+cp "${ARTIFACT_DIR}/go.mod.pre" "${TMP_PRE_DIR}/go.mod"
+# ensure module cache available
+( cd "${TMP_PRE_DIR}" && go list -m -json all > "${ARTIFACT_DIR}/module-list.pre.json" 2>/dev/null ) || true
+rm -rf "${TMP_PRE_DIR}" || true
+
+# parse and compare versions (module path -> version)
+python - <<'PY' > "${ARTIFACT_DIR}/dep-compare.out" || true
+import json,sys,subprocess
+pre=""+open("${ARTIFACT_DIR}/module-list.pre.json").read()
+post=""+open("${ARTIFACT_DIR}/module-list.post.json").read()
+def parse(s):
+    arr=[]
+    for obj in s.split('\n'):
+        if not obj.strip(): continue
+        try:
+            j=json.loads(obj)
+            if 'Path' in j and 'Version' in j:
+                arr.append((j['Path'], j['Version']))
+        except:
+            pass
+    return dict(arr)
+p=parse(pre); q=parse(post)
+downgrades=[]
+for mod, ver in p.items():
+    if mod in q:
+        # call semver helper
+        import subprocess
+        out = subprocess.run(["${SEMVER_HELPER_BIN}", ver, q[mod]], capture_output=True, text=True)
+        cmp = out.stdout.strip()
+        # semver.Compare: -1 => ver < q[mod] (upgrade), 0 equal, 1 => ver > q[mod] (post smaller)
+        if cmp == "1":
+            downgrades.append((mod, ver, q[mod]))
+if downgrades:
+    print("DOWNGRADE_DETECTED")
+    for m, a,b in downgrades:
+        print(m, a, "->", b)
+    sys.exit(2)
+else:
+    print("NO_DOWNGRADES")
+    sys.exit(0)
+PY
+
+if grep -q "DOWNGRADE_DETECTED" "${ARTIFACT_DIR}/dep-compare.out" 2>/dev/null; then
+  err "Dependency downgrade(s) detected. See ${ARTIFACT_DIR}/dep-compare.out"
+  git reset --hard HEAD >/dev/null || true
+  git checkout - >/dev/null || true
+  git branch -D "${TMP_BRANCH}" >/dev/null || true
+  exit 14
+fi
+log "No dependency downgrades detected."
+
+# -------------------------
+# Ensure go.sum retains pre-state lines (basic subset check)
+# -------------------------
+if [ -f "${ARTIFACT_DIR}/go.sum.pre" ] && [ -f "${ARTIFACT_DIR}/go.sum.post" ]; then
+  missing=0
+  while read -r l; do
+    [ -z "$l" ] && continue
+    if ! grep -Fxq "$l" "${ARTIFACT_DIR}/go.sum.post"; then missing=$((missing+1)); fi
+  done < "${ARTIFACT_DIR}/go.sum.pre"
+  if [ "${missing}" -gt 0 ]; then
+    err "go.sum post-state is missing ${missing} lines from pre-state. Refusing changes."
+    git reset --hard HEAD >/dev/null || true
+    git checkout - >/dev/null || true
+    git branch -D "${TMP_BRANCH}" >/dev/null || true
+    exit 15
+  fi
+fi
+log "go.sum post-state contains pre-state entries."
+
+# -------------------------
+# Build & Test (readonly)
+# -------------------------
+export GOFLAGS="-mod=readonly"
+set +e
+go build ./... > "${BUILD_LOG}" 2>&1
+BUILD_EXIT="$?"
+set -e
+if [ "${BUILD_EXIT}" -ne 0 ]; then
+  err "go build failed. See ${BUILD_LOG}"
+  git reset --hard HEAD >/dev/null || true
+  git checkout - >/dev/null || true
+  git branch -D "${TMP_BRANCH}" >/dev/null || true
+  exit 16
+fi
+
+set +e
+go test ./... > "${TEST_LOG}" 2>&1
+TEST_EXIT="$?"
+set -e
+if [ "${TEST_EXIT}" -ne 0 ]; then
+  err "go test failed. See ${TEST_LOG}"
+  git reset --hard HEAD >/dev/null || true
+  git checkout - >/dev/null || true
+  git branch -D "${TMP_BRANCH}" >/dev/null || true
+  exit 17
+fi
+log "Build and tests succeeded."
+
+# -------------------------
+# Commit & optional PR creation (safe)
+# -------------------------
+git add -A
+git commit -m "AI: automated refactor (verified build & tests) [ci skip]" || true
+
+if [ -n "${GH2_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
+  REPO="${GITHUB_REPOSITORY}"
+  HEAD_REF="${TMP_BRANCH}"
+  # Determine base (prefer GITHUB_BASE_REF, then main)
+  BASE_REF="${GITHUB_BASE_REF:-main}"
+  git push "https://x-access-token:${GH2_TOKEN}@github.com/${REPO}.git" "${HEAD_REF}:${HEAD_REF}" >/dev/null 2>&1 || true
+
+  PR_TITLE="AI refactor — automated (verified build & tests)"
+  PR_BODY="Automated AI refactor. CI verified build & tests. Raw model output and logs in artifact directory."
+  pr_resp="$(curl -sS -X POST \
+    -H "Authorization: token ${GH2_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/${REPO}/pulls" \
+    -d "$(jq -n --arg t "$PR_TITLE" --arg b "$PR_BODY" --arg head "$HEAD_REF" --arg base "$BASE_REF" '{title:$t, body:$b, head:$head, base:$base}')" || true)"
+  printf "%s\n" "${pr_resp}" > "${ARTIFACT_DIR}/pr_response.json" || true
+  log "PR response saved to ${ARTIFACT_DIR}/pr_response.json"
+fi
+
+# -------------------------
+# Finalize: artifact list + metadata
+# -------------------------
+ls -la "${ARTIFACT_DIR}" > "${ARTIFACT_DIR}/artifact-listing.txt"
+cat > "${METADATA_JSON}" <<EOF
+{
+  "timestamp":"${TIMESTAMP}",
+  "branch":"${TMP_BRANCH}",
+  "go_mod_pre":"${ARTIFACT_DIR}/go.mod.pre",
+  "go_mod_post":"${ARTIFACT_DIR}/go.mod.post"
+}
+EOF
+
+log "ai_refactor.sh completed successfully. Artifacts: ${ARTIFACT_DIR}"
+# cleanup semver helper files
+rm -f "${SEMVER_HELPER_SRC}" "${SEMVER_HELPER_BIN}" || true
+exit 0
