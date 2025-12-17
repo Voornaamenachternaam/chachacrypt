@@ -119,6 +119,19 @@ if ! command -v go >/dev/null 2>&1; then
   exit 3
 fi
 
+log "Downloading semver helper dependencies..."
+(
+  cd "${SEMVER_BUILD_DIR}"
+  env \
+    GOFLAGS= \
+    GOPATH="${SEMVER_GOPATH}" \
+    GOMODCACHE="${SEMVER_GOMODCACHE}" \
+    GOCACHE="${SEMVER_GOCACHE}" \
+    GO111MODULE=on \
+    CGO_ENABLED=0 \
+    go mod download > "${SEMVER_BUILD_ERR}" 2>&1 || true
+)
+
 log "Compiling semver helper..."
 (
   cd "${SEMVER_BUILD_DIR}"
@@ -129,7 +142,7 @@ log "Compiling semver helper..."
     GOCACHE="${SEMVER_GOCACHE}" \
     GO111MODULE=on \
     CGO_ENABLED=0 \
-    go build -o "${SEMVER_HELPER_BIN}" ./... > "${SEMVER_BUILD_ERR}" 2>&1 || true
+    go build -o "${SEMVER_HELPER_BIN}" ./... >> "${SEMVER_BUILD_ERR}" 2>&1 || true
 )
 
 if [ ! -x "${SEMVER_HELPER_BIN}" ]; then
