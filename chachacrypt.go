@@ -562,8 +562,9 @@ func generatePassword(n int) (string, error) {
 	}
 	var result strings.Builder
 	result.Grow(n)
+	max := big.NewInt(int64(len(letters)))
 	for range n {
-		idx, err := rand.Int(csprng, big.NewInt(int64(len(letters))))
+		idx, err := rand.Int(csprng, max)
 		if err != nil {
 			return "", fmt.Errorf("random generation failed: %w", err)
 		}
