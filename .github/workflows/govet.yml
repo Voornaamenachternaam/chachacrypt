@@ -1,0 +1,43 @@
+name: govet
+
+permissions:
+  actions: write
+  checks: write
+  contents: write
+  deployments: write
+  id-token: write
+  issues: write
+  discussions: write
+  packages: write
+  pages: write
+  pull-requests: write
+  repository-projects: write
+  security-events: write
+  statuses: write
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * *'
+  pull_request:
+    branches: [ main ]
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6.0.1
+
+    - name: Set up Go
+      uses: actions/setup-go@v6.1.0
+      with:
+        go-version: go.mod
+
+    - name: Go Format
+      run: gofmt -s -w . && git diff --exit-code
+
+    - name: Go Vet
+      run: go vet ./...
