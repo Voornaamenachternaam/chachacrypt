@@ -49,6 +49,10 @@ TARGET_FILES=( "chachacrypt.go" "go.mod" "go.sum" )
   echo "model: ${OPENROUTER_MODEL}"
 } > "$DIAG"
 
+# owner/repo for GitHub API calls
+owner="$(cut -d/ -f1 <<< "${GITHUB_REPOSITORY:-}")"
+repo="$(cut -d/ -f2 <<< "${GITHUB_REPOSITORY:-}")"
+
 # ---------------- helpers ----------------
 sanitize_ref() {
   local s="$1"
@@ -290,8 +294,85 @@ command -v golangci-lint >/dev/null 2>&1 && golangci-lint run --timeout=10m --ou
 NEED_AI=false
 if [ -s "${ARTIFACT_DIR}/go-build-output.txt" ] || [ -s "${ARTIFACT_DIR}/go-test-output.txt" ]; then NEED_AI=true; fi
 if [ -f "${ARTIFACT_DIR}/golangci.runtime.json" ] && command -v jq >/dev/null 2>&1; then
-  if jq -r '.Issues[]?.Pos?.Filename // empty' "${ARTIFACT_DIR}/golangci.runtime.json" | grep -E "$(printf '%s|%s|%s' "${TARGET_FILES[0]}" "${TARGET_FILES[1]}" "${TARGET_FILES[2]}")" >/dev/null 2>&1; [...]
+  if jq -r '.Issues[]?.Pos?.Filename // empty' "${ARTIFACT_DIR}/golangci.runtime.json" | grep -E "$(printf '%s|%s|%s' "${TARGET_FILES[0]}" "${TARGET_FILES[1]}" "${TARGET_FILES[2]}")" >/dev/null 2>&1; then NEED_AI=true; fi
 fi
+
+# ---------------- New Step: fetch code-scanning alerts for chachacrypt.go (if possible)
+CS_ARTIFACT="${ARTIFACT_DIR}/code-scanning-for-chachacrypt.txt"
+FOUND_CS_ALERTS=false
+if command -v jq >/dev/null 2>&1; then
+  # fetch all open code-scanning alerts (paginated)
+  CS_TMP_JSON="$(mktemp)"
+  : > "$CS_TMP_JSON"
+  page=1
+  while :; do
+    resp="$(gh_api GET "/repos/${owner}/${repo}/code-scanning/alerts?state=open&per_page=100&page=${page}" || true)"
+    # if the API call failed or returned empty, break
+    if [ -z "${resp:-}" ]; then break; fi
+    len="$(printf '%s' "$resp" | jq 'length' 2>/dev/null || echo "0")"
+    if [ "$len" = "0" ]; then break; fi
+    printf '%s\n' "$resp" | jq -c '.[]' >> "$CS_TMP_JSON" || true
+    page=$((page+1))
+    # safety: don't paginate forever
+    if [ "$page" -gt 10 ]; then break; fi
+  done
+
+  if [ -s "$CS_TMP_JSON" ]; then
+    # filter alerts whose most_recent_instance location path ends with chachacrypt.go
+    CS_FILTERED="$(mktemp)"
+    printf '%s\n' "" > "$CS_ARTIFACT"
+    # select with safe null coalescing and regex match
+    jq -c 'select((.most_recent_instance?.location?.path // "") | test("(^|\\./|.*/)?chachacrypt\\.go$"))' "$CS_TMP_JSON" > "$CS_FILTERED" 2>/dev/null || true
+    if [ -s "$CS_FILTERED" ]; then
+      FOUND_CS_ALERTS=true
+      echo "=== CODE SCANNING ALERTS (chachacrypt.go) ===" > "$CS_ARTIFACT"
+      echo "" >> "$CS_ARTIFACT"
+      while IFS= read -r alert; do
+        rule_id="$(printf '%s' "$alert" | jq -r '.rule.id // .rule // empty')"
+        rule_desc="$(printf '%s' "$alert" | jq -r '.rule.description // empty')"
+        severity="$(printf '%s' "$alert" | jq -r '.rule.severity // .severity // empty')"
+        tool="$(printf '%s' "$alert" | jq -r '.tool.name // empty')"
+        msg="$(printf '%s' "$alert" | jq -r '.most_recent_instance.message.text // .most_recent_instance.message // empty' )"
+        start_line="$(printf '%s' "$alert" | jq -r '.most_recent_instance.location.start_line // 0')"
+        end_line="$(printf '%s' "$alert" | jq -r '.most_recent_instance.location.end_line // (.most_recent_instance.location.start_line // 0)')"
+        echo "Tool: ${tool:-unknown}" >> "$CS_ARTIFACT"
+        echo "Rule: ${rule_id:-unknown}  Severity: ${severity:-unknown}" >> "$CS_ARTIFACT"
+        if [ -n "$rule_desc" ]; then
+          echo "Rule description: $rule_desc" >> "$CS_ARTIFACT"
+        fi
+        echo "Message: ${msg:-<no message>}" >> "$CS_ARTIFACT"
+        echo "Location lines: ${start_line}-${end_line}" >> "$CS_ARTIFACT"
+        echo "" >> "$CS_ARTIFACT"
+        # include snippet with 3 lines context each side if file is available locally
+        if [ -f "./chachacrypt.go" ]; then
+          st=$((start_line>3?start_line-3:1))
+          ed=$((end_line+3))
+          echo "----- snippet (lines ${st}-${ed}) -----" >> "$CS_ARTIFACT"
+          sed -n "${st},${ed}p" "./chachacrypt.go" >> "$CS_ARTIFACT" || true
+          echo "" >> "$CS_ARTIFACT"
+          echo "--------------------------------------" >> "$CS_ARTIFACT"
+          echo "" >> "$CS_ARTIFACT"
+        fi
+      done < "$CS_FILTERED"
+    else
+      echo "No open code-scanning alerts found for chachacrypt.go" >> "$DIAG"
+    fi
+    rm -f "$CS_FILTERED" || true
+  else
+    echo "No code-scanning alerts fetched or empty response." >> "$DIAG"
+  fi
+  rm -f "$CS_TMP_JSON" || true
+else
+  echo "jq not available; skipping code-scanning alerts fetch." >> "$DIAG"
+fi
+
+# If code scanning alerts were found, ensure we run the AI path
+if [ "$FOUND_CS_ALERTS" = true ]; then
+  NEED_AI=true
+  echo "Found code-scanning alerts for chachacrypt.go; will include them in AI prompt." >> "$DIAG"
+  echo "Saved: $CS_ARTIFACT" >> "$DIAG"
+fi
+
 if [ "$NEED_AI" = false ]; then
   echo "No build/test/lint issues requiring AI." >> "$DIAG"
   emit_pr_branch ""
@@ -303,7 +384,15 @@ PROMPT_FILE="$(mktemp)"
 cat > "$PROMPT_FILE" <<'PROMPT_EOF'
 You are an expert Go maintainer. Produce a single unified git diff (patch) enclosed in triple backticks that fixes the build/test/lint issues below.
 Only modify files if necessary: chachacrypt.go, go.mod, go.sum. Keep changes minimal and safe. Do not invent features.
+
+If code-scanning alerts for chachacrypt.go are present below, first decide whether each reported finding is still valid and relevant given the current code and tests. For each alert you judge valid, produce a minimal, safe fix. For alerts you judge not valid/stale, explain briefly why. Ensure all fixes are compatible with the repository's current Go version (go.mod) and dependency versions; do not change the Go directive to a lower version than what's in go.mod; only bump if strictly necessary and strictly greater.
+
+When producing the patch:
+- Output exactly one git-style unified diff between ``` and ``` with minimal changes.
+- Only modify chachacrypt.go, and go.mod/go.sum if absolutely required and ensure they remain consistent.
+- Do not perform large refactors. Keep changes limited to what's necessary to fix the reported problems and to keep tests passing.
 PROMPT_EOF
+
 {
   echo ""; echo "=== BUILD OUTPUT ==="; sed -n '1,500p' "${ARTIFACT_DIR}/go-build-output.txt" 2>/dev/null || true
   echo ""; echo "=== TEST OUTPUT ==="; sed -n '1,500p' "${ARTIFACT_DIR}/go-test-output.txt" 2>/dev/null || true
@@ -311,6 +400,13 @@ PROMPT_EOF
   echo ""; echo "=== FILE SNIPPETS ==="
   for f in "${TARGET_FILES[@]}"; do [ -f "$f" ] && { echo "----- $f -----"; sed -n '1,300p' "$f"; echo; } || true; done
 } >> "$PROMPT_FILE"
+
+# append code-scanning alerts artifact if present
+if [ -f "$CS_ARTIFACT" ] && [ -s "$CS_ARTIFACT" ]; then
+  echo "" >> "$PROMPT_FILE"
+  echo "=== CODE SCANNING ALERTS ===" >> "$PROMPT_FILE"
+  sed -n '1,10000p' "$CS_ARTIFACT" >> "$PROMPT_FILE" 2>/dev/null || true
+fi
 
 # ---------------- Step 4: call OpenRouter (python helper)
 PY_CALL="$(mktemp)"
@@ -384,7 +480,7 @@ except Exception as e:
   sys.stderr.write("extract error:"+str(e)); sys.exit(1)
 EXTRACTPY
 python3 "$EXTRACT_PY" "$RESPONSE_JSON" > "$AI_RESP" 2>> "$DIAG" || true
-AI_CONTENT="$(sed -n '1,20000p' "$AI_RESP" || true)"
+AI_CONTENT="$(sed -n '1,20000p' "$AI_RESP" || true)
 if [ -z "${AI_CONTENT:-}" ]; then
   echo "AI returned empty content; see $AI_RAW and $DIAG" >> "$DIAG"
   emit_pr_branch ""
