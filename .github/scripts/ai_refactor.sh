@@ -174,10 +174,24 @@ ver_ge() {
   done
   return 0
 }
+# strict "greater than" comparison: returns 0 only when first arg > second arg
+ver_gt() {
+  IFS='.' read -r -a A <<< "$1"
+  IFS='.' read -r -a B <<< "$2"
+  for i in 0 1 2; do
+    ai=${A[i]:-0}; bi=${B[i]:-0}
+    if ((10#$ai > 10#$bi)); then return 0; fi
+    if ((10#$ai < 10#$bi)); then return 1; fi
+  done
+  # equal -> not greater
+  return 1
+}
 
 if [ -f go.mod ] && [ -n "$LATEST_GO" ]; then
   CUR_GO="$(awk '/^go /{print $2; exit}' go.mod || true)"
-  if [ -n "$CUR_GO" ] && ! ver_ge "$CUR_GO" "$LATEST_GO"; then
+  if [ -z "$CUR_GO" ]; then
+    echo "go.mod has no 'go' directive; skipping go directive bump." >> "$DIAG"
+  elif ver_gt "$LATEST_GO" "$CUR_GO"; then
     echo "Attempting go.mod bump ${CUR_GO} -> ${LATEST_GO}" >> "$DIAG"
     cp go.mod "${ARTIFACT_DIR}/go.mod.prebump" || true
     awk -v ng="$LATEST_GO" 'BEGIN{done=0} { if (!done && $1=="go") { print "go " ng; done=1; next } print }' go.mod > go.mod.tmp && mv go.mod.tmp go.mod || true
@@ -223,7 +237,7 @@ if [ -f go.mod ] && [ -n "$LATEST_GO" ]; then
       [ -f "${ARTIFACT_DIR}/go.mod.prebump" ] && mv "${ARTIFACT_DIR}/go.mod.prebump" go.mod || true
     fi
   else
-    echo "No go.mod bump needed (cur: ${CUR_GO:-none}, latest: ${LATEST_GO:-unknown})" >> "$DIAG"
+    echo "Skipping go.mod bump because latest (${LATEST_GO}) is not greater than current (${CUR_GO}). No downgrade performed." >> "$DIAG"
   fi
 fi
 
@@ -276,7 +290,7 @@ command -v golangci-lint >/dev/null 2>&1 && golangci-lint run --timeout=10m --ou
 NEED_AI=false
 if [ -s "${ARTIFACT_DIR}/go-build-output.txt" ] || [ -s "${ARTIFACT_DIR}/go-test-output.txt" ]; then NEED_AI=true; fi
 if [ -f "${ARTIFACT_DIR}/golangci.runtime.json" ] && command -v jq >/dev/null 2>&1; then
-  if jq -r '.Issues[]?.Pos?.Filename // empty' "${ARTIFACT_DIR}/golangci.runtime.json" | grep -E "$(printf '%s|%s|%s' "${TARGET_FILES[0]}" "${TARGET_FILES[1]}" "${TARGET_FILES[2]}")" >/dev/null 2>&1; then NEED_AI=true; fi
+  if jq -r '.Issues[]?.Pos?.Filename // empty' "${ARTIFACT_DIR}/golangci.runtime.json" | grep -E "$(printf '%s|%s|%s' "${TARGET_FILES[0]}" "${TARGET_FILES[1]}" "${TARGET_FILES[2]}")" >/dev/null 2>&1; [...]
 fi
 if [ "$NEED_AI" = false ]; then
   echo "No build/test/lint issues requiring AI." >> "$DIAG"
@@ -462,4 +476,4 @@ else
   echo "No target files changed after AI patch." >> "$DIAG"
   emit_pr_branch ""
   exit 0
-fi 
+fi  
