@@ -6,8 +6,7 @@ set -euo pipefail
 
 if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 
-ARTIFACT_DIR="${1:-ci-artifacts/combined}"
-# allow --artifacts|-a style
+ARTIFACT_DIR="ci-artifacts/combined"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --artifacts|-a) ARTIFACT_DIR="$2"; shift 2 ;;
@@ -27,7 +26,7 @@ PATCH_AFTER="$ARTIFACT_DIR/ai-diff-after.patch"
 : "${OPENROUTER_MODEL:?OPENROUTER_MODEL must be set}"
 : "${GH2_TOKEN:?GH2_TOKEN must be set}"
 
-# ensure git safe directory
+# ensure git operations are allowed
 git config --global --add safe.directory "${GITHUB_WORKSPACE:-$(pwd)}" >/dev/null 2>&1 || true
 
 # ensure go exists
@@ -50,7 +49,7 @@ TARGET_FILES=( "chachacrypt.go" "go.mod" "go.sum" )
   echo "model: ${OPENROUTER_MODEL}"
 } > "$DIAG"
 
-# owner/repo
+# owner/repo for GitHub API calls
 REPO_FULL="${GITHUB_REPOSITORY:-}"
 owner="$(cut -d/ -f1 <<< "${REPO_FULL}")"
 repo="$(cut -d/ -f2 <<< "${REPO_FULL}")"
@@ -111,12 +110,10 @@ targets_changed_vs_base() {
   fi
 }
 
-# GitHub API helper
+# GitHub API helpers
 gh_api() {
-  # $1 method, $2 path (starting with /), $3 optional data
-  local method="$1"
-  local path="$2"
-  local data="${3:-}"
+  # $1 method, $2 path, $3 optional data
+  local method="$1"; local path="$2"; local data="${3:-}"
   local url="https://api.github.com${path}"
   if [ -n "$data" ]; then
     curl -fsSL -X "$method" -H "Authorization: token ${GH2_TOKEN}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" -d "$data" "$url"
@@ -125,12 +122,31 @@ gh_api() {
   fi
 }
 
+# Robust API caller: prints body then a newline then HTTP status (status is last line)
+gh_api_raw() {
+  local method="$1"; local path="$2"; local data="${3:-}"
+  local tmp
+  tmp="$(mktemp)"
+  if [ -n "$data" ]; then
+    curl -sS -w "\n%{http_code}" -X "$method" -H "Authorization: token ${GH2_TOKEN}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" -d "$data" "https://api.github.com${path}" > "$tmp" || true
+  else
+    curl -sS -w "\n%{http_code}" -X "$method" -H "Authorization: token ${GH2_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com${path}" > "$tmp" || true
+  fi
+  # print body (all but last line)
+  sed '$d' "$tmp" || true
+  # print status code as last line
+  tail -n1 "$tmp" || true
+  rm -f "$tmp"
+}
+
 create_or_find_pr() {
+  # args: head_branch, title, body
   local head="$1"; local title="$2"; local body="$3"
   local ownerX repoX
   ownerX="$(cut -d/ -f1 <<< "${GITHUB_REPOSITORY}")"
   repoX="$(cut -d/ -f2 <<< "${GITHUB_REPOSITORY}")"
 
+  # check existing PR for head (owner:head) and base=main
   local query_path="/repos/${ownerX}/${repoX}/pulls?head=${ownerX}:${head}&base=main&state=open"
   local existing
   existing="$(gh_api GET "$query_path" || true)"
@@ -139,11 +155,11 @@ create_or_find_pr() {
     return 0
   fi
 
+  # create PR
   local payload
   if command -v jq >/dev/null 2>&1; then
     payload="$(jq -n --arg t "$title" --arg h "$head" --arg b "$body" '{title:$t, head:$h, base:"main", body:$b, maintainer_can_modify:true}')"
   else
-    # fallback: minimal JSON escaping for double quotes
     body_esc="${body//\"/\\\"}"
     title_esc="${title//\"/\\\"}"
     payload="{\"title\":\"${title_esc}\",\"head\":\"${head}\",\"base\":\"main\",\"body\":\"${body_esc}\",\"maintainer_can_modify\":true}"
@@ -153,7 +169,6 @@ create_or_find_pr() {
   if [ -n "$resp" ] && command -v jq >/dev/null 2>&1; then
     printf '%s' "$resp" | jq -r '.html_url // ""'
   elif [ -n "$resp" ]; then
-    # minimal parse
     printf '%s' "$resp" | grep -o '"html_url"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/'
   else
     echo ""
@@ -184,7 +199,6 @@ ver_gt() {
   IFS='.' read -r -a B <<< "$b"
   for i in 0 1 2; do
     local ai="${A[i]:-0}" bi="${B[i]:-0}"
-    # use 10# to avoid octal
     if ((10#$ai > 10#$bi)); then return 0; fi
     if ((10#$ai < 10#$bi)); then return 1; fi
   done
@@ -293,25 +307,61 @@ fi
 # ---------------- New Step: fetch code-scanning alerts for chachacrypt.go (if possible)
 CS_ARTIFACT="${ARTIFACT_DIR}/code-scanning-for-chachacrypt.txt"
 FOUND_CS_ALERTS=false
-if command -v jq >/dev/null 2>&1 && [ -n "$owner" ] && [ -n "$repo" ]; then
+if [ -n "$owner" ] && [ -n "$repo" ]; then
   CS_TMP="$(mktemp)"
   page=1
   while :; do
-    resp="$(gh_api GET "/repos/${owner}/${repo}/code-scanning/alerts?state=open&per_page=100&page=${page}" || true)"
-    if [ -z "${resp:-}" ]; then break; fi
-    # count entries in response: it may be an array or a single object; try jq length
-    if ! printf '%s' "$resp" | jq -e . >/dev/null 2>&1; then
-      echo "Failed to parse code-scanning response on page ${page}; stopping pagination." >> "$DIAG"
+    raw="$(gh_api_raw GET "/repos/${owner}/${repo}/code-scanning/alerts?state=open&per_page=100&page=${page}" || true)"
+    code="$(printf '%s' "$raw" | tail -n1 || true)"
+    body="$(printf '%s' "$raw" | sed '$d' || true)"
+    if [ "$code" = "200" ]; then
+      if command -v jq >/dev/null 2>&1 && printf '%s' "$body" | jq -e . >/dev/null 2>&1; then
+        # body could be array or object
+        if printf '%s' "$body" | jq 'type' | grep -q '"array"'; then
+          printf '%s\n' "$body" | jq -c '.[]' >> "$CS_TMP" || true
+        else
+          printf '%s\n' "$body" | jq -c '. ' >> "$CS_TMP" || true
+        fi
+        # if less than a full page, stop
+        count="$(printf '%s' "$body" | jq 'length' 2>/dev/null || echo "0")"
+        if [ "$count" -lt 100 ]; then break; fi
+      else
+        # fallback: attempt to parse via python (robust fallback)
+        if python3 - <<'PY' 2>/dev/null
+import sys,json
+try:
+    s=sys.stdin.read()
+    o=json.loads(s)
+    if isinstance(o,list):
+        for it in o:
+            print(json.dumps(it))
+    else:
+        print(json.dumps(o))
+except Exception:
+    pass
+PY
+        then
+          printf '%s\n' "$body" | python3 -c 'import sys,json; o=json.load(sys.stdin); 
+import sys
+if isinstance(o,list):
+    [print(json.dumps(i)) for i in o]
+else:
+    print(json.dumps(o))' >> "$CS_TMP" 2>/dev/null || true
+          break
+        else
+          echo "Warning: code-scanning response not parseable; body saved to diagnostics." >> "$DIAG"
+          printf '%s\n' "$body" >> "$DIAG"
+          break
+        fi
+      fi
+    elif [ "$code" = "401" ] || [ "$code" = "403" ]; then
+      echo "Code scanning API returned HTTP ${code}. Token lacks permission or endpoint blocked." >> "$DIAG"
+      echo "Response body:" >> "$DIAG"
+      printf '%s\n' "$body" >> "$DIAG"
       break
-    fi
-    # if it's an array, append all; if object, append single
-    if printf '%s' "$resp" | jq 'type' | grep -q '"array"'; then
-      printf '%s\n' "$resp" | jq -c '.[]' >> "$CS_TMP" || true
-      count="$(printf '%s' "$resp" | jq 'length')"
-      if [ "$count" -lt 100 ]; then break; fi
     else
-      # single object
-      printf '%s\n' "$resp" | jq -c '. ' >> "$CS_TMP" || true
+      echo "Code scanning API returned HTTP ${code} — body saved to diagnostics." >> "$DIAG"
+      printf '%s\n' "$body" >> "$DIAG"
       break
     fi
     page=$((page+1))
@@ -322,53 +372,63 @@ if command -v jq >/dev/null 2>&1 && [ -n "$owner" ] && [ -n "$repo" ]; then
   done
 
   if [ -s "$CS_TMP" ]; then
-    # filter for chachacrypt.go (path may be relative or prefixed)
-    CS_FILTERED="$(mktemp)"
-    jq -c 'select((.most_recent_instance?.location?.path // "") | test("(^|\\./|.*/)?chachacrypt\\.go$"))' "$CS_TMP" > "$CS_FILTERED" 2>/dev/null || true
-    if [ -s "$CS_FILTERED" ]; then
-      FOUND_CS_ALERTS=true
-      {
-        echo "=== CODE SCANNING ALERTS (chachacrypt.go) ==="
-        echo ""
-      } > "$CS_ARTIFACT"
-      while IFS= read -r alert_json; do
-        rule_id="$(printf '%s' "$alert_json" | jq -r '.rule.id // .rule // empty')"
-        rule_desc="$(printf '%s' "$alert_json" | jq -r '.rule.description // empty')"
-        severity="$(printf '%s' "$alert_json" | jq -r '.rule.severity // .severity // empty')"
-        tool="$(printf '%s' "$alert_json" | jq -r '.tool.name // empty')"
-        msg="$(printf '%s' "$alert_json" | jq -r '.most_recent_instance.message.text // .most_recent_instance.message // empty')"
-        start_line="$(printf '%s' "$alert_json" | jq -r '.most_recent_instance.location.start_line // 0')"
-        end_line="$(printf '%s' "$alert_json" | jq -r '.most_recent_instance.location.end_line // (.most_recent_instance.location.start_line // 0)')"
+    # filter for chachacrypt.go using suffix match
+    if command -v jq >/dev/null 2>&1; then
+      jq -c 'select((.most_recent_instance?.location?.path // "") | test("chachacrypt\\.go$"))' "$CS_TMP" > "${CS_TMP}.filtered" 2>/dev/null || true
+      if [ -s "${CS_TMP}.filtered" ]; then
+        FOUND_CS_ALERTS=true
         {
-          echo "Tool: ${tool:-unknown}"
-          echo "Rule: ${rule_id:-unknown}  Severity: ${severity:-unknown}"
-          if [ -n "$rule_desc" ]; then echo "Rule description: $rule_desc"; fi
-          echo "Message: ${msg:-<no message>}"
-          echo "Location lines: ${start_line}-${end_line}"
+          echo "=== CODE SCANNING ALERTS (chachacrypt.go) ==="
           echo ""
-        } >> "$CS_ARTIFACT"
-        if [ -f "./chachacrypt.go" ]; then
-          st=$((start_line>3?start_line-3:1))
-          ed=$((end_line+3))
+        } > "$CS_ARTIFACT"
+        while IFS= read -r alert_json; do
+          rule_id="$(printf '%s' "$alert_json" | jq -r '.rule.id // .rule // empty')"
+          rule_desc="$(printf '%s' "$alert_json" | jq -r '.rule.description // empty')"
+          severity="$(printf '%s' "$alert_json" | jq -r '.rule.severity // .severity // empty')"
+          tool="$(printf '%s' "$alert_json" | jq -r '.tool.name // empty')"
+          msg="$(printf '%s' "$alert_json" | jq -r '.most_recent_instance.message.text // .most_recent_instance.message // empty')"
+          start_line="$(printf '%s' "$alert_json" | jq -r '.most_recent_instance.location.start_line // 0')"
+          end_line="$(printf '%s' "$alert_json" | jq -r '.most_recent_instance.location.end_line // (.most_recent_instance.location.start_line // 0)')"
           {
-            echo "----- snippet (lines ${st}-${ed}) -----"
-            sed -n "${st},${ed}p" "./chachacrypt.go" || true
-            echo ""
-            echo "--------------------------------------"
+            echo "Tool: ${tool:-unknown}"
+            echo "Rule: ${rule_id:-unknown}  Severity: ${severity:-unknown}"
+            if [ -n "$rule_desc" ]; then echo "Rule description: $rule_desc"; fi
+            echo "Message: ${msg:-<no message>}"
+            echo "Location lines: ${start_line}-${end_line}"
             echo ""
           } >> "$CS_ARTIFACT"
-        fi
-      done < "$CS_FILTERED"
+          if [ -f "./chachacrypt.go" ]; then
+            st=$((start_line>3?start_line-3:1))
+            ed=$((end_line+3))
+            {
+              echo "----- snippet (lines ${st}-${ed}) -----"
+              sed -n "${st},${ed}p" "./chachacrypt.go" || true
+              echo ""
+              echo "--------------------------------------"
+              echo ""
+            } >> "$CS_ARTIFACT"
+          fi
+        done < "${CS_TMP}.filtered"
+      else
+        echo "No open code-scanning alerts found for chachacrypt.go" >> "$DIAG"
+      fi
+      rm -f "${CS_TMP}.filtered" || true
     else
-      echo "No open code-scanning alerts found for chachacrypt.go" >> "$DIAG"
+      # jq not available: do a simple grep on path fields to detect entries mentioning chachacrypt.go
+      if grep -F '"path"' -n "$CS_TMP" | grep -F "chachacrypt.go" >/dev/null 2>&1; then
+        FOUND_CS_ALERTS=true
+        echo "Code scanning JSON contains references to chachacrypt.go but jq is not installed; saving raw entries." > "$CS_ARTIFACT"
+        grep -n "chachacrypt.go" "$CS_TMP" >> "$CS_ARTIFACT" || true
+      else
+        echo "No code-scanning alerts mention chachacrypt.go (jq not available to parse JSON precisely)." >> "$DIAG"
+      fi
     fi
-    rm -f "$CS_FILTERED" || true
   else
     echo "No code-scanning alerts fetched or empty response." >> "$DIAG"
   fi
   rm -f "$CS_TMP" || true
 else
-  echo "jq not available or no repo info; skipping code-scanning alerts fetch." >> "$DIAG"
+  echo "No repo owner/repo available; skipping code-scanning alerts fetch." >> "$DIAG"
 fi
 
 if [ "$FOUND_CS_ALERTS" = true ]; then
@@ -378,7 +438,13 @@ if [ "$FOUND_CS_ALERTS" = true ]; then
 fi
 
 if [ "$NEED_AI" = false ]; then
-  echo "No build/test/lint issues requiring AI." >> "$DIAG"
+  echo "No build/test/lint issues requiring AI and no code-scanning alerts found." >> "$DIAG"
+  # print diagnostics to console for easier debugging in logs
+  if [ -f "$DIAG" ]; then
+    echo "----- ai diagnostics -----"
+    sed -n '1,200p' "$DIAG" || true
+    echo "----- end diagnostics -----"
+  fi
   emit_pr_branch ""
   exit 0
 fi
@@ -402,27 +468,19 @@ PROMPT_EOF
   echo ""; echo "=== TEST OUTPUT ==="; sed -n '1,500p' "${ARTIFACT_DIR}/go-test-output.txt" 2>/dev/null || true
   echo ""; echo "=== LINT STDERR ==="; sed -n '1,500p' "${ARTIFACT_DIR}/golangci.runtime.stderr" 2>/dev/null || true
   echo ""; echo "=== FILE SNIPPETS ==="
-  for f in "${TARGET_FILES[@]}"; do
-    if [ -f "$f" ]; then
-      echo "----- $f -----"
-      sed -n '1,300p' "$f"
-      echo ""
-    fi
-  done
+  for f in "${TARGET_FILES[@]}"; do [ -f "$f" ] && { echo "----- $f -----"; sed -n '1,300p' "$f"; echo; } || true; done
 } >> "$PROMPT_FILE"
 
+# append code-scanning alerts artifact if present
 if [ -f "$CS_ARTIFACT" ] && [ -s "$CS_ARTIFACT" ]; then
-  {
-    echo ""
-    echo "=== CODE SCANNING ALERTS ==="
-    sed -n '1,10000p' "$CS_ARTIFACT" 2>/dev/null || true
-    echo ""
-  } >> "$PROMPT_FILE"
+  echo "" >> "$PROMPT_FILE"
+  echo "=== CODE SCANNING ALERTS ===" >> "$PROMPT_FILE"
+  sed -n '1,10000p' "$CS_ARTIFACT" >> "$PROMPT_FILE" 2>/dev/null || true
 fi
 
 # ---------------- Step 4: call OpenRouter (python helper)
 PY_CALL="$(mktemp)"
-cat > "$PY_CALL" <<'PY_EOF'
+cat > "$PY_CALL" <<'PYPY'
 #!/usr/bin/env python3
 import os,sys,time,socket,json
 try:
@@ -456,7 +514,7 @@ for attempt in range(6):
     sys.stderr.write(f"request error {attempt+1}: {e}\n")
     time.sleep((attempt+1)*2)
 sys.stderr.write("failed after retries\n"); sys.exit(3)
-PY_EOF
+PYPY
 chmod +x "$PY_CALL"
 # ensure requests installed
 if ! python3 -c "import requests" >/dev/null 2>&1; then
@@ -475,23 +533,22 @@ if [ "$PY_EXIT" -ne 0 ]; then
   exit 0
 fi
 
-# extract content from response JSON
+# extract content
 EXTRACT_PY="$(mktemp)"
-cat > "$EXTRACT_PY" <<'EXTRACT_EOF'
+cat > "$EXTRACT_PY" <<'EXTRACTPY'
 import json,sys
 try:
   obj=json.load(open(sys.argv[1],'r',encoding='utf-8'))
   choices=obj.get("choices") or []
   if choices:
     c=choices[0]
-    # support chat-completion style and older text style
     content=c.get("message",{}).get("content") or c.get("text") or ""
   else:
     content=""
   sys.stdout.write(content or "")
 except Exception as e:
   sys.stderr.write("extract error:"+str(e)); sys.exit(1)
-EXTRACT_EOF
+EXTRACTPY
 python3 "$EXTRACT_PY" "$RESPONSE_JSON" > "$AI_RESP" 2>> "$DIAG" || true
 AI_CONTENT="$(sed -n '1,20000p' "$AI_RESP" || true)"
 if [ -z "${AI_CONTENT:-}" ]; then
@@ -503,19 +560,17 @@ fi
 # ---------------- Step 5: extract fenced patch and apply
 PATCH_TMP="$(mktemp)"
 EXTRACT_PATCH_PY="$(mktemp)"
-cat > "$EXTRACT_PATCH_PY" <<'EXTRACTPATCH_EOF'
+cat > "$EXTRACT_PATCH_PY" <<'PATCHPY'
 import re,sys
 s=open(sys.argv[1],'r',encoding='utf-8').read()
-# Prefer diff fences but accept plain fenced content as fallback
 m=re.search(r'```(?:diff[^\n]*)?\n(.*?)\n```',s,re.S)
 if not m:
   m=re.search(r'```\s*\n(.*?)\n```',s,re.S)
 if m:
   print(m.group(1))
 else:
-  # no patch found
   sys.exit(0)
-EXTRACTPATCH_EOF
+PATCHPY
 python3 "$EXTRACT_PATCH_PY" "$AI_RESP" > "$PATCH_TMP" 2>> "$DIAG" || true
 
 if [ ! -s "$PATCH_TMP" ]; then
