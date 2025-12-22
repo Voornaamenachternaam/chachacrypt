@@ -24,7 +24,7 @@ PATCH_AFTER="$ARTIFACT_DIR/ai-diff-after.patch"
 
 : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set}"
 : "${OPENROUTER_MODEL:?OPENROUTER_MODEL must be set}"
-: "${GH2_TOKEN:?GH2_TOKEN must be set}"
+: "${GH2_TOKEN:?GH2_TOKEN must be set}"  # still required for pushes/PRs
 
 # ensure git operations are allowed
 git config --global --add safe.directory "${GITHUB_WORKSPACE:-$(pwd)}" >/dev/null 2>&1 || true
@@ -110,9 +110,8 @@ targets_changed_vs_base() {
   fi
 }
 
-# GitHub API helpers
+# GitHub API helper (simple)
 gh_api() {
-  # $1 method, $2 path, $3 optional data
   local method="$1"; local path="$2"; local data="${3:-}"
   local url="https://api.github.com${path}"
   if [ -n "$data" ]; then
@@ -122,19 +121,19 @@ gh_api() {
   fi
 }
 
-# Robust API caller: prints body then a newline then HTTP status (status is last line)
-gh_api_raw() {
+# Robust API caller: prints body then a newline then HTTP status as the last line
+gh_api_raw_with_token() {
+  # usage: gh_api_raw_with_token TOKEN METHOD PATH [DATA]
+  local token="$1"; shift
   local method="$1"; local path="$2"; local data="${3:-}"
   local tmp
   tmp="$(mktemp)"
   if [ -n "$data" ]; then
-    curl -sS -w "\n%{http_code}" -X "$method" -H "Authorization: token ${GH2_TOKEN}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" -d "$data" "https://api.github.com${path}" > "$tmp" || true
+    curl -sS -w "\n%{http_code}" -X "$method" -H "Authorization: token ${token}" -H "Accept: application/vnd.github.v3+json" -H "Content-Type: application/json" -d "$data" "https://api.github.com${path}" > "$tmp" || true
   else
-    curl -sS -w "\n%{http_code}" -X "$method" -H "Authorization: token ${GH2_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com${path}" > "$tmp" || true
+    curl -sS -w "\n%{http_code}" -X "$method" -H "Authorization: token ${token}" -H "Accept: application/vnd.github.v3+json" "https://api.github.com${path}" > "$tmp" || true
   fi
-  # print body (all but last line)
   sed '$d' "$tmp" || true
-  # print status code as last line
   tail -n1 "$tmp" || true
   rm -f "$tmp"
 }
@@ -188,7 +187,7 @@ if git show-ref --verify --quiet refs/remotes/origin/main; then
 fi
 
 # ---------------- Step 0: bump Go directive (if newer)
-LATEST_GO_FULL="$(curl -fsS https://go.dev/VERSION?m=text || true)"  # e.g. go1.25.3
+LATEST_GO_FULL="$(curl -fsS https://go.dev/VERSION?m=text || true)"  # e.g. go1.25.5
 LATEST_GO=""
 if [ -n "$LATEST_GO_FULL" ]; then LATEST_GO="${LATEST_GO_FULL#go}"; fi
 
@@ -304,29 +303,35 @@ if [ -f "${ARTIFACT_DIR}/golangci.runtime.json" ] && command -v jq >/dev/null 2>
   if jq -r '.Issues[]?.Pos?.Filename // empty' "${ARTIFACT_DIR}/golangci.runtime.json" | grep -E "$(printf '%s|%s|%s' "${TARGET_FILES[0]}" "${TARGET_FILES[1]}" "${TARGET_FILES[2]}")" >/dev/null 2>&1; then NEED_AI=true; fi
 fi
 
-# ---------------- New Step: fetch code-scanning alerts for chachacrypt.go (if possible)
+# ---------------- New Step: fetch code-scanning alerts for chachacrypt.go
 CS_ARTIFACT="${ARTIFACT_DIR}/code-scanning-for-chachacrypt.txt"
 FOUND_CS_ALERTS=false
-if [ -n "$owner" ] && [ -n "$repo" ]; then
+
+# choose token to read code-scanning: prefer GITHUB_TOKEN (workflow token) as it will have security-events: read
+CS_TOKEN="${GITHUB_TOKEN:-}"
+if [ -z "$CS_TOKEN" ]; then
+  CS_TOKEN="${GH2_TOKEN:-}"
+fi
+
+if [ -n "$owner" ] && [ -n "$repo" ] && [ -n "$CS_TOKEN" ]; then
   CS_TMP="$(mktemp)"
   page=1
   while :; do
-    raw="$(gh_api_raw GET "/repos/${owner}/${repo}/code-scanning/alerts?state=open&per_page=100&page=${page}" || true)"
+    raw="$(gh_api_raw_with_token "$CS_TOKEN" GET "/repos/${owner}/${repo}/code-scanning/alerts?state=open&per_page=100&page=${page}" || true)"
     code="$(printf '%s' "$raw" | tail -n1 || true)"
     body="$(printf '%s' "$raw" | sed '$d' || true)"
     if [ "$code" = "200" ]; then
       if command -v jq >/dev/null 2>&1 && printf '%s' "$body" | jq -e . >/dev/null 2>&1; then
-        # body could be array or object
         if printf '%s' "$body" | jq 'type' | grep -q '"array"'; then
           printf '%s\n' "$body" | jq -c '.[]' >> "$CS_TMP" || true
+          count="$(printf '%s' "$body" | jq 'length' 2>/dev/null || echo "0")"
+          [ "$count" -lt 100 ] && break
         else
           printf '%s\n' "$body" | jq -c '. ' >> "$CS_TMP" || true
+          break
         fi
-        # if less than a full page, stop
-        count="$(printf '%s' "$body" | jq 'length' 2>/dev/null || echo "0")"
-        if [ "$count" -lt 100 ]; then break; fi
       else
-        # fallback: attempt to parse via python (robust fallback)
+        # fallback via python, but keep it safe
         if python3 - <<'PY' 2>/dev/null
 import sys,json
 try:
@@ -341,12 +346,12 @@ except Exception:
     pass
 PY
         then
-          printf '%s\n' "$body" | python3 -c 'import sys,json; o=json.load(sys.stdin); 
+          printf '%s\n' "$body" | python3 -c 'import sys,json; obj=json.load(sys.stdin); 
 import sys
-if isinstance(o,list):
-    [print(json.dumps(i)) for i in o]
+if isinstance(obj,list):
+    [print(json.dumps(i)) for i in obj]
 else:
-    print(json.dumps(o))' >> "$CS_TMP" 2>/dev/null || true
+    print(json.dumps(obj))' >> "$CS_TMP" 2>/dev/null || true
           break
         else
           echo "Warning: code-scanning response not parseable; body saved to diagnostics." >> "$DIAG"
@@ -358,6 +363,9 @@ else:
       echo "Code scanning API returned HTTP ${code}. Token lacks permission or endpoint blocked." >> "$DIAG"
       echo "Response body:" >> "$DIAG"
       printf '%s\n' "$body" >> "$DIAG"
+      # also print to console to make it visible
+      echo "ERROR: code scanning API returned HTTP ${code}. The token used to read alerts lacks security-events permission." >&2
+      printf '%s\n' "$body" >&2
       break
     else
       echo "Code scanning API returned HTTP ${code} — body saved to diagnostics." >> "$DIAG"
@@ -372,7 +380,6 @@ else:
   done
 
   if [ -s "$CS_TMP" ]; then
-    # filter for chachacrypt.go using suffix match
     if command -v jq >/dev/null 2>&1; then
       jq -c 'select((.most_recent_instance?.location?.path // "") | test("chachacrypt\\.go$"))' "$CS_TMP" > "${CS_TMP}.filtered" 2>/dev/null || true
       if [ -s "${CS_TMP}.filtered" ]; then
@@ -414,7 +421,6 @@ else:
       fi
       rm -f "${CS_TMP}.filtered" || true
     else
-      # jq not available: do a simple grep on path fields to detect entries mentioning chachacrypt.go
       if grep -F '"path"' -n "$CS_TMP" | grep -F "chachacrypt.go" >/dev/null 2>&1; then
         FOUND_CS_ALERTS=true
         echo "Code scanning JSON contains references to chachacrypt.go but jq is not installed; saving raw entries." > "$CS_ARTIFACT"
@@ -428,7 +434,7 @@ else:
   fi
   rm -f "$CS_TMP" || true
 else
-  echo "No repo owner/repo available; skipping code-scanning alerts fetch." >> "$DIAG"
+  echo "Skipping code-scanning alerts fetch: missing owner/repo or no token available to read alerts." >> "$DIAG"
 fi
 
 if [ "$FOUND_CS_ALERTS" = true ]; then
@@ -439,11 +445,11 @@ fi
 
 if [ "$NEED_AI" = false ]; then
   echo "No build/test/lint issues requiring AI and no code-scanning alerts found." >> "$DIAG"
-  # print diagnostics to console for easier debugging in logs
+  # print diagnostics to console for easier debugging in logs (first 200 lines)
   if [ -f "$DIAG" ]; then
-    echo "----- ai diagnostics -----"
+    echo "----- ai diagnostics (start) -----"
     sed -n '1,200p' "$DIAG" || true
-    echo "----- end diagnostics -----"
+    echo "----- ai diagnostics (end) -----"
   fi
   emit_pr_branch ""
   exit 0
@@ -642,4 +648,4 @@ else
   echo "No target files changed after AI patch." >> "$DIAG"
   emit_pr_branch ""
   exit 0
-fi
+fi 
