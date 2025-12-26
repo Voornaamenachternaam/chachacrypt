@@ -29,7 +29,7 @@ jobs:
           custom_prompt: |
             You are a highly rigorous security-focused expert. Analyze this PR with emphasis on:
             1. Security vulnerabilities
-            2. Compatibility with the version of the toolchain and the versions of the dependencies
+            2. Compatibility with Golang v1.25.5 and the versions of the dependencies
             3. Data validation
             4. Input sanitization
             5. Best-practices
