@@ -22,7 +22,7 @@ jobs:
           open_router_key: ${{ secrets.OPEN_ROUTER_KEY }} # Must be set in repository secrets
 
           # Optional inputs with defaults
-          model_id: 'xiaomi/mimo-v2-flash:free' # Default model
+          model_id: 'mistralai/devstral-2512:free' # Default model
           max_tokens: '2048' # Default max tokens
 
           # Optional custom prompt
