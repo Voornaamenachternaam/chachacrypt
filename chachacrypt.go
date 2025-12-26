@@ -31,7 +31,7 @@ import (
 	"golang.org/x/term"
 )
 
-// parameters
+// parameters.
 const (
 	MagicNumber         = "CHACRYPT"
 	FileVersion         = byte(2)
