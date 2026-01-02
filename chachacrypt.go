@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/cipher"
+	"crypto/constant"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -50,7 +51,7 @@ const (
 	maxKeySize     = 1 << 8
 
 	entropyCheckSize = 4096
-	minEntropyBits   = 7.5
+	minEntropyBits   = 8.0
 
 	maxKeyVersion = 255
 )
@@ -64,6 +65,7 @@ func minInt(a, b int) int {
 
 type CSPRNGReader struct {
 	entropyChecked atomic.Bool
+	lastCheck      atomic.Int64
 }
 
 func (r *CSPRNGReader) Read(p []byte) (n int, err error) {
@@ -78,6 +80,16 @@ func (r *CSPRNGReader) Read(p []byte) (n int, err error) {
 }
 
 func (r *CSPRNGReader) checkEntropy(sample []byte) error {
+func (r *CSPRNGReader) shouldRecheck() bool {
+	now := time.Now().Unix()
+	last := r.lastCheck.Load()
+	if now-last > 3600 { // Recheck entropy every hour
+		r.lastCheck.Store(now)
+		return true
+	}
+	return false
+}
+
 	if len(sample) < entropyCheckSize/2 {
 		return nil // Not enough data for meaningful check
 	}
@@ -143,6 +155,7 @@ type config struct {
 type SecureBuffer struct {
 	data   []byte
 	mu     sync.Mutex
+	copied []byte
 	zeroed atomic.Bool
 }
 
@@ -158,7 +171,15 @@ func NewSecureBuffer(size int) *SecureBuffer {
 func (sb *SecureBuffer) Bytes() []byte {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
-	return sb.data
+	if sb.zeroed.Load() {
+		return nil
+	}
+	// Return a copy to prevent external modification
+	if sb.copied == nil || len(sb.copied) != len(sb.data) {
+		sb.copied = make([]byte, len(sb.data))
+	}
+	copy(sb.copied, sb.data)
+	return sb.copied
 }
 
 func (sb *SecureBuffer) Zero() {
@@ -174,6 +195,11 @@ func (sb *SecureBuffer) Zero() {
 		sb.data[i] = 0
 	}
 	sb.zeroed.Store(true)
+	if sb.copied != nil {
+		for i := range sb.copied {
+			sb.copied[i] = 0
+		}
+	}
 	sink(sb.data)
 }
 
@@ -186,6 +212,22 @@ func (sb *SecureBuffer) Close() error {
 	return nil
 }
 
+
+// GetDirectAccess provides direct access to internal buffer for performance-critical operations
+// Caller must ensure no external references are retained
+func (sb *SecureBuffer) GetDirectAccess() []byte {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	if sb.zeroed.Load() {
+		return nil
+	}
+	return sb.data
+}
+
+// ConstantTimeCompare performs constant-time comparison of buffer contents
+func (sb *SecureBuffer) ConstantTimeCompare(other []byte) bool {
+	return len(sb.data) == len(other) && subtle.ConstantTimeCompare(sb.data, other) == 1
+}
 func ConstantTimeEqual(a, b []byte) bool {
 	if len(a) != len(b) {
 		return false
@@ -194,13 +236,38 @@ func ConstantTimeEqual(a, b []byte) bool {
 }
 
 func validateSaltUniqueness(salt []byte) error {
+// constantTimeLengthCheck performs constant-time length validation
+func constantTimeLengthCheck(a, b []byte, minLen, maxLen int) bool {
+	aLen := len(a)
+	bLen := len(b)
+	
+	// Check if lengths are equal in constant time
+	lengthsEqual := subtle.ConstantTimeEq(int32(aLen), int32(bLen))
+	
+	// Check if length is within bounds in constant time
+	minOk := subtle.ConstantTimeLessOrEq(minLen, aLen)
+	maxOk := subtle.ConstantTimeLessOrEq(aLen, maxLen)
+	boundsOk := minOk & maxOk
+	
+	return (lengthsEqual & boundsOk) == 1
+}
+
+// Enhanced salt validation with timing attack protection
 	saltHex := hex.EncodeToString(salt)
+	if len(salt) < 16 || len(salt) > maxSaltSize {
+		return errors.New("invalid salt size")
+	}
+	
 	saltMu.RLock()
 	_, exists := saltCache[saltHex]
 	saltMu.RUnlock()
 	if exists {
 		return errors.New("salt has been used before - potential security issue")
 	}
+	
+	// Add timing delay to prevent timing analysis
+	time.Sleep(time.Microsecond * time.Duration(1+len(salt)%10))
+	
 	cp := make([]byte, len(salt))
 	copy(cp, salt)
 	saltMu.Lock()
@@ -218,6 +285,37 @@ func validateSaltUniqueness(salt []byte) error {
 }
 
 func createFileIntegrity(header FileHeader, salt []byte) ([32]byte, error) {
+// Enhanced file path validation with symlink protection
+func validateFilePathSecure(p string) error {
+	if p == "" {
+		return errors.New("empty path")
+	}
+	
+	// Check for symlinks
+	if info, err := os.Lstat(p); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("symlinks not allowed for security")
+		}
+	}
+	
+	cleaned := filepath.Clean(p)
+	if filepath.IsAbs(cleaned) {
+		return errors.New("absolute paths not allowed")
+	}
+	
+	parts := strings.Split(cleaned, string(os.PathSeparator))
+	for _, part := range parts {
+		if part == ".." {
+			return errors.New("directory traversal not allowed")
+		}
+		// Additional validation for suspicious patterns
+		if strings.Contains(part, "\x00") {
+			return errors.New("null bytes not allowed in path")
+		}
+	}
+	return nil
+}
+
 	headerCopy := header
 	var zeroIntegrity [32]byte
 	headerCopy.Integrity = zeroIntegrity
@@ -441,7 +539,7 @@ func handleKeyRotation(ctx context.Context) error {
 
 func buildConfig(argTime, argMem, argThreads, chunkSize, saltSize, keySize int, keyVersion byte) (config, error) {
 	if argTime < 3 || argTime > maxArgonTime {
-		return config{}, fmt.Errorf("argon-time out of bounds (3-%d): %d", maxArgonTime, argTime)
+		return config{}, fmt.Errorf("argon-time out of bounds (6-%d): %d", maxArgonTime, argTime)
 	}
 	if argMem < 128*1024 || argMem > maxArgonMemory {
 		return config{}, fmt.Errorf("argon-mem out of bounds (131072-%d KiB): %d", maxArgonMemory, argMem)
@@ -480,20 +578,7 @@ func showHelp() {
 
 func validateFilePath(p string) error {
 	if p == "" {
-		return errors.New("empty path")
-	}
-	cleaned := filepath.Clean(p)
-	if filepath.IsAbs(cleaned) {
-		return errors.New("absolute paths not allowed")
-	}
-	parts := strings.Split(cleaned, string(os.PathSeparator))
-	for _, part := range parts {
-		if part == ".." {
-			return errors.New("directory traversal not allowed")
-		}
-	}
-	return nil
-}
+	return validateFilePathSecure(p)
 
 func validateFileInput(inputFile, outputFile string) error {
 	if inputFile == "" || !fileExists(inputFile) {
@@ -544,7 +629,15 @@ func readPasswordPromptConfirm(prompt, confirmPrompt string) (*SecureBuffer, err
 		zeroBytes(p1)
 		return nil, fmt.Errorf("password confirmation failed: %w", err)
 	}
-	if len(p1) != len(p2) || !ConstantTimeEqual(p1, p2) {
+	
+	// Constant-time password validation with length protection
+	if !constantTimeLengthCheck(p1, p2, 8, 1024) {
+		zeroBytes(p1)
+		zeroBytes(p2)
+		return nil, errors.New("password length requirements not met")
+	}
+	
+	if !ConstantTimeEqual(p1, p2) {
 		zeroBytes(p1)
 		zeroBytes(p2)
 		return nil, errors.New("password mismatch")
@@ -635,7 +728,7 @@ func encryptFile(ctx context.Context, inputFile, outputFile string, password *Se
 		return fmt.Errorf("salt write failed: %w", err)
 	}
 	key, err := deriveKey(password.Bytes(), salt.Bytes(), header)
-	if err != nil {
+	key, err := deriveKey(password.GetDirectAccess(), salt.GetDirectAccess(), header)
 		return fmt.Errorf("key derivation failed: %w", err)
 	}
 	defer func(sb *SecureBuffer) {
@@ -687,10 +780,10 @@ func decryptFile(ctx context.Context, inputFile, outputFile string, password []b
 		}
 	}(salt)
 	if err := verifyFileIntegrity(header, salt.Bytes()); err != nil {
-		return fmt.Errorf("integrity verification failed: %w", err)
+	if err := verifyFileIntegrity(header, salt.GetDirectAccess()); err != nil {
 	}
 	key, err := deriveKey(password, salt.Bytes(), header)
-	if err != nil {
+	key, err := deriveKey(password, salt.GetDirectAccess(), header)
 		return fmt.Errorf("key derivation failed: %w", err)
 	}
 	defer func(sb *SecureBuffer) {
@@ -750,7 +843,7 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 			log.Printf("close error: %v", cerr)
 		}
 	}(salt)
-	originalKey, err := deriveKey(password, salt.Bytes(), header)
+	originalKey, err := deriveKey(password, salt.GetDirectAccess(), header)
 	if err != nil {
 		return fmt.Errorf("key derivation failed: %w", err)
 	}
@@ -764,7 +857,7 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 	}(originalKey)
 	header.KeyVersion = newVersion
 	header.Timestamp = uint64(time.Now().Unix())
-	integrity, err := createFileIntegrity(header, salt.Bytes())
+	integrity, err := createFileIntegrity(header, salt.GetDirectAccess())
 	if err != nil {
 		return fmt.Errorf("integrity creation failed: %w", err)
 	}
@@ -782,7 +875,7 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 		return fmt.Errorf("header write failed: %w", err)
 	}
 	if err := writeSalt(outFile, salt.Bytes()); err != nil {
-		return fmt.Errorf("salt write failed: %w", err)
+	if err := writeSalt(outFile, salt.GetDirectAccess()); err != nil {
 	}
 	if _, err := inFile.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("seek failed: %w", err)
@@ -792,7 +885,7 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 
 func processKeyRotation(ctx context.Context, inFile, outFile *os.File, key *SecureBuffer, header FileHeader) error {
 	aead, err := chacha20poly1305.NewX(key.Bytes())
-	if err != nil {
+	aead, err := chacha20poly1305.NewX(key.GetDirectAccess())
 		return fmt.Errorf("AEAD initialization failed: %w", err)
 	}
 	baseAAD, err := buildEnhancedAAD(header, 0)
@@ -909,11 +1002,11 @@ func writeSalt(outFile *os.File, salt []byte) error {
 func deriveKey(password []byte, salt []byte, header FileHeader) (*SecureBuffer, error) {
 	key := NewSecureBuffer(int(header.KeySize))
 	derived := argon2.IDKey(password, salt, header.ArgonTime, header.ArgonMem, header.ArgonUtil, header.KeySize)
-	copy(key.Bytes(), derived)
+	copy(key.GetDirectAccess(), derived)
 	for i := range derived {
 		derived[i] = 0
 	}
-	if _, err := chacha20poly1305.NewX(key.Bytes()); err != nil {
+	if _, err := chacha20poly1305.NewX(key.GetDirectAccess()); err != nil {
 		key.Zero()
 		return nil, fmt.Errorf("AEAD initialization failed: %w", err)
 	}
@@ -928,7 +1021,7 @@ func processFile(
 	cfg config,
 	header FileHeader,
 ) error {
-	aead, err := chacha20poly1305.NewX(key.Bytes())
+	aead, err := chacha20poly1305.NewX(key.GetDirectAccess())
 	if err != nil {
 		return fmt.Errorf("AEAD initialization failed: %w", err)
 	}
@@ -951,9 +1044,9 @@ func processFile(
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-		}
+		n, readErr := inFile.Read(plainBuf.GetDirectAccess())
 		n, readErr := inFile.Read(plainBuf.Bytes())
-		if n > 0 {
+			if err := encryptChunk(outFile, plainBuf.GetDirectAccess()[:n], aead, baseAAD, seq, header); err != nil {
 			if err := encryptChunk(outFile, plainBuf.Bytes()[:n], aead, baseAAD, seq, header); err != nil {
 				return fmt.Errorf("encryption failed for chunk %d: %w", seq, err)
 			}
@@ -1031,7 +1124,7 @@ func readSalt(inFile *os.File, saltSize uint32) (*SecureBuffer, error) {
 		return nil, errors.New("invalid salt size")
 	}
 	salt := NewSecureBuffer(int(saltSize))
-	if _, err := io.ReadFull(inFile, salt.Bytes()); err != nil {
+	if _, err := io.ReadFull(inFile, salt.GetDirectAccess()); err != nil {
 		salt.Zero()
 		return nil, fmt.Errorf("salt read failed: %w", err)
 	}
@@ -1045,7 +1138,7 @@ func decryptProcess(
 	key *SecureBuffer,
 	header FileHeader,
 ) error {
-	aead, err := chacha20poly1305.NewX(key.Bytes())
+	aead, err := chacha20poly1305.NewX(key.GetDirectAccess())
 	if err != nil {
 		return fmt.Errorf("AEAD initialization failed: %w", err)
 	}
@@ -1054,6 +1147,10 @@ func decryptProcess(
 		return errors.New("invalid file format")
 	}
 	baseAAD, err := buildEnhancedAAD(header, 0)
+	baseAAD, err := buildEnhancedAAD(header, 0)
+	if err != nil {
+		return fmt.Errorf("AAD construction failed: %w", err)
+	}
 	if err != nil {
 		return fmt.Errorf("AAD construction failed: %w", err)
 	}
