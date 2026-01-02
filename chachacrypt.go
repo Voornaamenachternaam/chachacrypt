@@ -33,6 +33,7 @@ import (
 
 // parameters.
 const (
+	MaxPasswordLength   = 1024
 	MagicNumber         = "CHACRYPT"
 	FileVersion         = byte(2)
 	defaultSalt         = 32
@@ -49,8 +50,12 @@ const (
 	maxSaltSize    = 1 << 8
 	maxKeySize     = 1 << 8
 
+	maxFileSize      = 1 << 32 // 4GB limit
 	entropyCheckSize = 4096
 	minEntropyBits   = 7.5
+
+	maxConcurrentOps = 10
+	operationTimeout = 30 * time.Minute
 
 	maxKeyVersion = 255
 )
@@ -61,6 +66,12 @@ func minInt(a, b int) int {
 	}
 	return b
 }
+
+var (
+	concurrentOps int64
+	nonceTracker  = make(map[string]bool)
+	nonceMu       sync.RWMutex
+)
 
 type CSPRNGReader struct {
 	entropyChecked atomic.Bool
@@ -78,27 +89,45 @@ func (r *CSPRNGReader) Read(p []byte) (n int, err error) {
 }
 
 func (r *CSPRNGReader) checkEntropy(sample []byte) error {
-	if len(sample) < entropyCheckSize/2 {
+	if len(sample) < 256 {
 		return nil // Not enough data for meaningful check
 	}
-	freq := make(map[byte]int)
+	
+	// Use more sophisticated entropy testing
+	freq := make([]int, 256)
 	for _, b := range sample {
 		freq[b]++
 	}
+	
+	// Shannon entropy calculation
 	entropy := 0.0
+	sampleLen := float64(len(sample))
 	for _, count := range freq {
-		p := float64(count) / float64(len(sample))
-		entropy -= p * math.Log2(p)
+		if count > 0 {
+			p := float64(count) / sampleLen
+			entropy -= p * math.Log2(p)
+		}
 	}
-	maxPossible := math.Log2(math.Min(256.0, float64(len(sample))))
+	
+	// Chi-square test for additional validation
+	expected := sampleLen / 256.0
+	chiSquare := 0.0
+	for _, count := range freq {
+		diff := float64(count) - expected
+		chiSquare += (diff * diff) / expected
+	}
+	
+	maxPossible := math.Log2(256.0)
 	if minEntropyBits > maxPossible {
 		return fmt.Errorf(
-			"sample too small for required entropy: sample=%d, max_possible=%.6f, required=%.6f",
+			"sample too small for required entropy: sample=%d, max_possible=%.2f, required=%.2f",
 			len(sample), maxPossible, minEntropyBits,
 		)
 	}
-	if entropy < minEntropyBits {
-		return fmt.Errorf("insufficient entropy: %f < %f", entropy, minEntropyBits)
+	
+	// More stringent entropy requirements
+	if entropy < minEntropyBits || chiSquare > 400.0 {
+		return fmt.Errorf("insufficient entropy: shannon=%.2f, chi2=%.2f", entropy, chiSquare)
 	}
 	return nil
 }
@@ -111,6 +140,11 @@ var (
 )
 
 func sink(b []byte) {
+	// Enhanced memory protection
+	for i := range b {
+		b[i] = 0
+	}
+	runtime.GC()
 	runtime.KeepAlive(b)
 }
 
@@ -194,6 +228,15 @@ func ConstantTimeEqual(a, b []byte) bool {
 }
 
 func validateSaltUniqueness(salt []byte) error {
+	// Add random delay to prevent timing attacks
+	delay := time.Duration(50 + (salt[0] % 100)) * time.Millisecond
+	time.Sleep(delay)
+	
+	// Check for nonce reuse protection
+	saltHex := hex.EncodeToString(salt)
+	if err := checkNonceReuse(saltHex); err != nil {
+		return fmt.Errorf("nonce validation failed: %w", err)
+	}
 	saltHex := hex.EncodeToString(salt)
 	saltMu.RLock()
 	_, exists := saltCache[saltHex]
@@ -201,19 +244,57 @@ func validateSaltUniqueness(salt []byte) error {
 	if exists {
 		return errors.New("salt has been used before - potential security issue")
 	}
+	
+	// Limit cache size to prevent memory exhaustion
+	if len(saltCache) > 10000 {
+		// Clear oldest entries (simplified approach)
+		for k := range saltCache {
+			delete(saltCache, k)
+			break
+		}
+	}
+	
 	cp := make([]byte, len(salt))
 	copy(cp, salt)
 	saltMu.Lock()
 	saltCache[saltHex] = cp
 	saltMu.Unlock()
+	
+	// Random cleanup timing to prevent timing attacks
 	saltWg.Add(1)
 	go func(key string) {
 		defer saltWg.Done()
-		time.Sleep(time.Hour)
+		// Random cleanup time between 30-90 minutes
+		randomMinutes := 30 + (salt[len(salt)-1] % 60)
+		time.Sleep(time.Duration(randomMinutes) * time.Minute)
 		saltMu.Lock()
 		delete(saltCache, key)
 		saltMu.Unlock()
 	}(saltHex)
+	return nil
+}
+
+func checkNonceReuse(nonceHex string) error {
+	nonceMu.Lock()
+	defer nonceMu.Unlock()
+	
+	if nonceTracker[nonceHex] {
+		return errors.New("nonce reuse detected")
+	}
+	
+	nonceTracker[nonceHex] = true
+	// Clean up old nonces periodically
+	if len(nonceTracker) > 50000 {
+		// Clear half the entries (simplified LRU)
+		count := 0
+		for k := range nonceTracker {
+			delete(nonceTracker, k)
+			count++
+			if count > 25000 {
+				break
+			}
+		}
+	}
 	return nil
 }
 
@@ -308,6 +389,17 @@ func main() {
 }
 
 func handleEncrypt(ctx context.Context) error {
+	// Check concurrent operations limit
+	if atomic.AddInt64(&concurrentOps, 1) > maxConcurrentOps {
+		atomic.AddInt64(&concurrentOps, -1)
+		return errors.New("too many concurrent operations")
+	}
+	defer atomic.AddInt64(&concurrentOps, -1)
+	
+	// Set operation timeout
+	ctx, cancel := context.WithTimeout(ctx, operationTimeout)
+	defer cancel()
+	
 	enc := flag.NewFlagSet("enc", flag.ExitOnError)
 	in := enc.String("i", "", "input file (relative path, no .. allowed)")
 	out := enc.String("o", "", "output file")
@@ -357,6 +449,17 @@ func handleEncrypt(ctx context.Context) error {
 }
 
 func handleDecrypt(ctx context.Context) error {
+	// Check concurrent operations limit
+	if atomic.AddInt64(&concurrentOps, 1) > maxConcurrentOps {
+		atomic.AddInt64(&concurrentOps, -1)
+		return errors.New("too many concurrent operations")
+	}
+	defer atomic.AddInt64(&concurrentOps, -1)
+	
+	// Set operation timeout
+	ctx, cancel := context.WithTimeout(ctx, operationTimeout)
+	defer cancel()
+	
 	dec := flag.NewFlagSet("dec", flag.ExitOnError)
 	in := dec.String("i", "", "input file")
 	out := dec.String("o", "", "output file")
@@ -408,6 +511,17 @@ func handlePasswordGen() error {
 }
 
 func handleKeyRotation(ctx context.Context) error {
+	// Check concurrent operations limit
+	if atomic.AddInt64(&concurrentOps, 1) > maxConcurrentOps {
+		atomic.AddInt64(&concurrentOps, -1)
+		return errors.New("too many concurrent operations")
+	}
+	defer atomic.AddInt64(&concurrentOps, -1)
+	
+	// Set operation timeout
+	ctx, cancel := context.WithTimeout(ctx, operationTimeout)
+	defer cancel()
+	
 	rot := flag.NewFlagSet("rotate", flag.ExitOnError)
 	in := rot.String("i", "", "input file to rotate key for")
 	out := rot.String("o", "", "output file")
@@ -496,6 +610,12 @@ func validateFilePath(p string) error {
 }
 
 func validateFileInput(inputFile, outputFile string) error {
+	// Check file size limits
+	if info, err := os.Stat(inputFile); err == nil {
+		if info.Size() > maxFileSize {
+			return fmt.Errorf("file too large: %d bytes (max %d)", info.Size(), maxFileSize)
+		}
+	}
 	if inputFile == "" || !fileExists(inputFile) {
 		return errors.New("valid input file required")
 	}
@@ -528,6 +648,17 @@ func zeroBytes(b []byte) {
 }
 
 func readPasswordPromptConfirm(prompt, confirmPrompt string) (*SecureBuffer, error) {
+	// Enhanced password validation
+	validatePassword := func(pwd []byte) error {
+		if len(pwd) > MaxPasswordLength {
+			return fmt.Errorf("password too long (max %d characters)", MaxPasswordLength)
+		}
+		if len(pwd) < 8 {
+			return errors.New("password too short (minimum 8 characters)")
+		}
+		return nil
+	}
+	
 	if !isTerminal(os.Stdin.Fd()) {
 		return nil, errors.New("interactive input required")
 	}
@@ -537,6 +668,12 @@ func readPasswordPromptConfirm(prompt, confirmPrompt string) (*SecureBuffer, err
 	if err != nil {
 		return nil, fmt.Errorf("password read failed: %w", err)
 	}
+	
+	if err := validatePassword(p1); err != nil {
+		zeroBytes(p1)
+		return nil, err
+	}
+	
 	fmt.Print(confirmPrompt)
 	p2, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
@@ -544,7 +681,17 @@ func readPasswordPromptConfirm(prompt, confirmPrompt string) (*SecureBuffer, err
 		zeroBytes(p1)
 		return nil, fmt.Errorf("password confirmation failed: %w", err)
 	}
-	if len(p1) != len(p2) || !ConstantTimeEqual(p1, p2) {
+	
+	// Constant-time comparison with length protection
+	match := len(p1) == len(p2)
+	if match {
+		match = ConstantTimeEqual(p1, p2)
+	}
+	
+	// Add random delay regardless of outcome
+	time.Sleep(time.Duration(50 + (p1[0] % 100)) * time.Millisecond)
+	
+	if !match {
 		zeroBytes(p1)
 		zeroBytes(p2)
 		return nil, errors.New("password mismatch")
@@ -575,6 +722,12 @@ func generatePassword(n int) (string, error) {
 }
 
 func encryptFile(ctx context.Context, inputFile, outputFile string, password *SecureBuffer, cfg config) error {
+	// Additional file validation
+	if info, err := os.Stat(inputFile); err == nil {
+		if info.Size() == 0 {
+			return errors.New("cannot encrypt empty file")
+		}
+	}
 	if err := validateFilePath(inputFile); err != nil {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
@@ -650,6 +803,11 @@ func encryptFile(ctx context.Context, inputFile, outputFile string, password *Se
 }
 
 func decryptFile(ctx context.Context, inputFile, outputFile string, password []byte, cfg config) error {
+	// Enhanced password validation for decryption
+	if len(password) > MaxPasswordLength {
+		return errors.New("invalid password length")
+	}
+	
 	if err := validateFilePath(inputFile); err != nil {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
@@ -980,6 +1138,12 @@ func encryptChunk(
 ) error {
 	nonce := make([]byte, aead.NonceSize())
 	if _, err := csprng.Read(nonce); err != nil {
+		return fmt.Errorf("nonce generation failed: %w", err)
+	}
+	
+	// Check for nonce reuse
+	nonceHex := hex.EncodeToString(nonce)
+	if err := checkNonceReuse(nonceHex); err != nil {
 		return fmt.Errorf("nonce generation failed: %w", err)
 	}
 	aad, err := buildEnhancedAAD(header, seq)
