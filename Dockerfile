@@ -1,19 +1,20 @@
-# Use the official Golang image for building
+# Builder: use the exact Go version declared in go.mod
 FROM golang:1.25.5 AS builder
-# Set working directory
-WORKDIR /app
-# Copy Go modules and dependencies
-COPY go.mod go.sum ./
-RUN go mod download
-# Copy source code
+WORKDIR /src
 COPY . .
-# Build the application
-RUN go build -o main .
-# Use a minimal base image for final deployment
-FROM alpine:latest
-# Set working directory in the container
-WORKDIR /root/
-# Copy the built binary from the builder stage
-COPY --from=builder /app/main .
-# Run the application
-CMD ["./main"]
+# Build a static linux binary
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags="-s -w" -o /usr/local/bin/chachacrypt .
+
+# Runtime: small Debian with bash so you can exec /bin/bash
+FROM debian:bookworm-slim
+# Keep image minimal but ensure bash and ssl certs available
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends bash ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/local/bin/chachacrypt /usr/local/bin/chachacrypt
+RUN chmod +x /usr/local/bin/chachacrypt
+
+# Keep container running so you can `docker exec -it <c> /bin/bash` or run the CLI via exec
+CMD ["sleep", "infinity"]
