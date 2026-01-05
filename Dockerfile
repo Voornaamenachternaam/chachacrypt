@@ -24,9 +24,3 @@ COPY --from=build /chachacrypt /chachacrypt
 
 # Set working directory (optional)
 WORKDIR /app
-
-# Expose port (optional, based on your app needs)
-EXPOSE 8143
-
-# Command to run the binary
-CMD ["/chachacrypt"]
