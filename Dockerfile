@@ -1,26 +1,19 @@
-# Build stage
-FROM golang:latest AS build
-
+# Use the official Golang image for building
+FROM golang:1.25.5 AS builder
+# Set working directory
 WORKDIR /app
-
-# Copy go mod and sum first to leverage caching
-COPY go.mod .
-COPY go.sum .
-
-# Download dependencies
+# Copy Go modules and dependencies
+COPY go.mod go.sum ./
 RUN go mod download
-
-# Copy the rest of the code
+# Copy source code
 COPY . .
-
-# Build the binary from chachacrypt.go
-RUN go build -o /chachacrypt ./chachacrypt.go
-
-# Run stage
-FROM ubuntu:latest AS run
-
-# Copy the binary from the build stage
-COPY --from=build /chachacrypt /chachacrypt
-
-# Set working directory (optional)
-WORKDIR /app
+# Build the application
+RUN go build -o main .
+# Use a minimal base image for final deployment
+FROM alpine:latest
+# Set working directory in the container
+WORKDIR /root/
+# Copy the built binary from the builder stage
+COPY --from=builder /app/main .
+# Run the application
+CMD ["./main"]
