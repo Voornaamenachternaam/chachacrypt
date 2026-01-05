@@ -26,7 +26,7 @@ COPY --from=build /chachacrypt /chachacrypt
 WORKDIR /app
 
 # Expose port (optional, based on your app needs)
-EXPOSE 8080
+EXPOSE 8143
 
 # Command to run the binary
 CMD ["/chachacrypt"]
