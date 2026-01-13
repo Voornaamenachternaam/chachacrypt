@@ -28,7 +28,7 @@ jobs:
           fetch-tags: true
 
       - name: Setup Go
-        uses: actions/setup-go@v6.1.0
+        uses: actions/setup-go@v6.2.0
         with:
           go-version-file: 'go.mod'
           cache: false
@@ -87,7 +87,7 @@ jobs:
           fi
 
       - name: Setup Go 1.25.4 (release job; no cache)
-        uses: actions/setup-go@v6.1.0
+        uses: actions/setup-go@v6.2.0
         with:
           go-version: 'stable'
           cache: false
