@@ -1,4 +1,4 @@
-// chachacrypt.go file encryption
+// chachacrypt.go file encryption.
 package main
 
 import (
