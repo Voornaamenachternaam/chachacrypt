@@ -8,13 +8,11 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
@@ -153,7 +151,7 @@ func TestBuildConfig(t *testing.T) {
 	// Invalid cases
 	failures := []struct {
 		time, mem, threads, chunk, salt, key int
-		name                             string
+		name                                 string
 	}{
 		{2, 128 * 1024, 1, 1024, 16, 32, "Time too low"},
 		{maxArgonTime + 1, 128 * 1024, 1, 1024, 16, 32, "Time too high"},
