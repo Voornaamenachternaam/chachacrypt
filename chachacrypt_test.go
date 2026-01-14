@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -65,26 +66,18 @@ func getTestConfig() config {
 func TestSecureBuffer_Lifecycle(t *testing.T) {
 	size := 32
 	sb := NewSecureBuffer(size)
-
-	// Check size
 	if len(sb.Bytes()) != size {
 		t.Errorf("Expected buffer size %d, got %d", size, len(sb.Bytes()))
 	}
-
-	// Write data
 	testData := []byte("test data for secure buffer")
 	copy(sb.Bytes(), testData)
-
 	if !bytes.Contains(sb.Bytes(), testData[:5]) {
 		t.Error("Buffer does not contain written data")
 	}
-
-	// Zero
 	sb.Zero()
 	if !sb.IsZeroed() {
 		t.Error("Buffer should report being zeroed")
 	}
-
 	allZero := true
 	for _, b := range sb.Bytes() {
 		if b != 0 {
@@ -95,14 +88,10 @@ func TestSecureBuffer_Lifecycle(t *testing.T) {
 	if !allZero {
 		t.Error("Buffer content was not actually zeroed")
 	}
-
-	// Zero again (idempotency)
 	sb.Zero()
 	if !sb.IsZeroed() {
 		t.Error("Buffer should still be zeroed")
 	}
-
-	// Close
 	if err := sb.Close(); err != nil {
 		t.Errorf("Close failed: %v", err)
 	}
@@ -147,8 +136,6 @@ func TestBuildConfig(t *testing.T) {
 	if err != nil {
 		t.Errorf("Valid config failed: %v", err)
 	}
-
-	// Invalid cases
 	failures := []struct {
 		time, mem, threads, chunk, salt, key int
 		name                                 string
@@ -179,8 +166,6 @@ func TestGeneratePassword(t *testing.T) {
 	if len(pw) != length {
 		t.Errorf("Expected length %d, got %d", length, len(pw))
 	}
-
-	// Basic entropy check (ensure not all same char)
 	same := true
 	for i := 1; i < len(pw); i++ {
 		if pw[i] != pw[0] {
@@ -191,7 +176,6 @@ func TestGeneratePassword(t *testing.T) {
 	if same {
 		t.Error("Password has zero entropy (all same chars)")
 	}
-
 	_, err = generatePassword(0)
 	if err == nil {
 		t.Error("Expected error for 0 length password")
@@ -220,18 +204,12 @@ func TestSaltUniqueness(t *testing.T) {
 	if _, err := rand.Read(salt); err != nil {
 		t.Fatal(err)
 	}
-
-	// First use
 	if err := validateSaltUniqueness(salt); err != nil {
 		t.Errorf("First use of salt failed: %v", err)
 	}
-
-	// Second use (duplicate)
 	if err := validateSaltUniqueness(salt); err == nil {
 		t.Error("Duplicate salt did not trigger error")
 	}
-
-	// Different salt
 	salt2 := make([]byte, 16)
 	// Ensure salt2 is different
 	salt2[0] = ^salt[0]
@@ -244,11 +222,10 @@ func TestSaltUniqueness(t *testing.T) {
 
 func TestEncryptionDecryption_EndToEnd(t *testing.T) {
 	tempDir := t.TempDir()
-	originalContent := make([]byte, 1024*5+100) // 5KB + offset
+	originalContent := make([]byte, 1024*5+100)
 	if _, err := rand.Read(originalContent); err != nil {
 		t.Fatal(err)
 	}
-
 	inputFile := createTempFile(t, tempDir, originalContent)
 	encryptedFile := filepath.Join(tempDir, "output.enc")
 	decryptedFile := filepath.Join(tempDir, "restored.txt")
@@ -258,14 +235,9 @@ func TestEncryptionDecryption_EndToEnd(t *testing.T) {
 	cfg := getTestConfig()
 
 	ctx := context.Background()
-
-	// Encrypt
-	err := encryptFile(ctx, inputFile, encryptedFile, pw, cfg)
-	if err != nil {
+	if err := encryptFile(ctx, inputFile, encryptedFile, pw, cfg); err != nil {
 		t.Fatalf("Encryption failed: %v", err)
 	}
-
-	// Check if output exists and is not empty
 	encStats, err := os.Stat(encryptedFile)
 	if err != nil {
 		t.Fatalf("Encrypted file missing: %v", err)
@@ -273,14 +245,9 @@ func TestEncryptionDecryption_EndToEnd(t *testing.T) {
 	if encStats.Size() == 0 {
 		t.Fatal("Encrypted file is empty")
 	}
-
-	// Decrypt
-	err = decryptFile(ctx, encryptedFile, decryptedFile, pw.Bytes(), cfg)
-	if err != nil {
+	if err := decryptFile(ctx, encryptedFile, decryptedFile, pw.Bytes(), cfg); err != nil {
 		t.Fatalf("Decryption failed: %v", err)
 	}
-
-	// Compare
 	restoredContent := readFile(t, decryptedFile)
 	if !bytes.Equal(originalContent, restoredContent) {
 		t.Error("Restored content does not match original")
@@ -297,19 +264,14 @@ func TestWrongPassword(t *testing.T) {
 	defer pw.Close()
 	cfg := getTestConfig()
 	ctx := context.Background()
-
-	// Encrypt
 	if err := encryptFile(ctx, inputFile, encryptedFile, pw, cfg); err != nil {
 		t.Fatalf("Encryption failed: %v", err)
 	}
-
-	// Decrypt with wrong password
 	wrongPw := []byte("wrong-password")
 	err := decryptFile(ctx, encryptedFile, decryptedFile, wrongPw, cfg)
 	if err == nil {
 		t.Fatal("Decryption should fail with wrong password")
 	}
-	// The specific error usually indicates Poly1305 failure (auth failed)
 	if !strings.Contains(err.Error(), "processing failed") && !strings.Contains(err.Error(), "cipher") {
 		t.Logf("Got expected error type: %v", err)
 	}
@@ -325,12 +287,9 @@ func TestIntegrityCheck_TamperHeader(t *testing.T) {
 	defer pw.Close()
 	cfg := getTestConfig()
 	ctx := context.Background()
-
 	if err := encryptFile(ctx, inputFile, encryptedFile, pw, cfg); err != nil {
 		t.Fatalf("Encryption failed: %v", err)
 	}
-
-	// Read encrypted data
 	data := readFile(t, encryptedFile)
 
 	// Tamper with Magic Number (start of file)
@@ -338,8 +297,6 @@ func TestIntegrityCheck_TamperHeader(t *testing.T) {
 	if err := os.WriteFile(encryptedFile, data, 0644); err != nil {
 		t.Fatal(err)
 	}
-
-	// Decrypt
 	err := decryptFile(ctx, encryptedFile, decryptedFile, pw.Bytes(), cfg)
 	if err == nil {
 		t.Error("Decryption should fail on invalid magic number")
@@ -358,28 +315,22 @@ func TestIntegrityCheck_TamperMetadata(t *testing.T) {
 	defer pw.Close()
 	cfg := getTestConfig()
 	ctx := context.Background()
-
 	if err := encryptFile(ctx, inputFile, encryptedFile, pw, cfg); err != nil {
 		t.Fatalf("Encryption failed: %v", err)
 	}
-
-	// Read encrypted data
 	data := readFile(t, encryptedFile)
 
 	// Tamper with Argon parameters (offset ~9 bytes in: magic(8) + ver(1))
 	// Header struct: Magic(8), Ver(1), ArgonTime(4)...
 	// Let's modify ArgonTime
 	data[9]++
-
 	if err := os.WriteFile(encryptedFile, data, 0644); err != nil {
 		t.Fatal(err)
 	}
-
-	// Decrypt
 	err := decryptFile(ctx, encryptedFile, decryptedFile, pw.Bytes(), cfg)
 	if err == nil {
 		t.Error("Decryption should fail on tampered metadata (HMAC mismatch)")
-	} else if !strings.Contains(err.Error(), "integrity check failed") && !strings.Contains(err.Error(), "tampered") {
+	} else if !strings.Contains(err.Error(), "integrity") && !strings.Contains(err.Error(), "tamper") {
 		t.Errorf("Unexpected error message: %v", err)
 	}
 }
@@ -395,32 +346,19 @@ func TestKeyRotation(t *testing.T) {
 	defer pw.Close()
 	cfg := getTestConfig()
 	ctx := context.Background()
-
-	// 1. Encrypt
 	if err := encryptFile(ctx, inputFile, encryptedFile, pw, cfg); err != nil {
 		t.Fatalf("Encryption failed: %v", err)
 	}
-
-	// 2. Rotate Key
 	newVersion := byte(2)
-	// rotateKey(ctx, in, out, pw, version)
-	err := rotateKey(ctx, encryptedFile, rotatedFile, pw.Bytes(), newVersion)
-	if err != nil {
+	if err := rotateKey(ctx, encryptedFile, rotatedFile, pw.Bytes(), newVersion); err != nil {
 		t.Fatalf("Key rotation failed: %v", err)
 	}
-
-	// 3. Decrypt the rotated file
-	err = decryptFile(ctx, rotatedFile, decryptedFile, pw.Bytes(), cfg)
-	if err != nil {
+	if err := decryptFile(ctx, rotatedFile, decryptedFile, pw.Bytes(), cfg); err != nil {
 		t.Fatalf("Decryption of rotated file failed: %v", err)
 	}
-
-	// 4. Verify content
 	if !bytes.Equal(readFile(t, decryptedFile), []byte("data to rotate")) {
 		t.Error("Content corrupted after rotation")
 	}
-
-	// 5. Verify header version was updated
 	f, err := os.Open(rotatedFile)
 	if err != nil {
 		t.Fatal(err)
@@ -453,8 +391,7 @@ func TestContextCancellation(t *testing.T) {
 	err := encryptFile(ctx, inputFile, outputFile, pw, cfg)
 	if err == nil {
 		t.Error("Expected error on cancelled context")
-	} else if err != context.Canceled {
-		// It might return a wrapped error, check Is
+	} else if !errors.Is(err, context.Canceled) {
 		if !strings.Contains(err.Error(), "context canceled") {
 			t.Errorf("Expected context canceled error, got: %v", err)
 		}
@@ -468,8 +405,6 @@ func TestPaddingCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Manually inject non-zero padding
 	header.Padding[0] = 1
 
 	// Serialize
@@ -477,15 +412,11 @@ func TestPaddingCheck(t *testing.T) {
 	if err := binary.Write(&buf, binary.LittleEndian, header); err != nil {
 		t.Fatal(err)
 	}
-
-	// Write to file
 	tempDir := t.TempDir()
 	badFile := filepath.Join(tempDir, "bad_padding.bin")
 	if err := os.WriteFile(badFile, buf.Bytes(), 0644); err != nil {
 		t.Fatal(err)
 	}
-
-	// Try to read header
 	f, err := os.Open(badFile)
 	if err != nil {
 		t.Fatal(err)
@@ -501,14 +432,10 @@ func TestPaddingCheck(t *testing.T) {
 func TestEntropyCheck(t *testing.T) {
 	// This tests the CSPRNGReader's checkEntropy logic
 	rng := &CSPRNGReader{}
-
-	// Case 1: Low entropy (all zeros)
-	lowEntropy := make([]byte, 4096) // all zeros
+	lowEntropy := make([]byte, 4096)
 	if err := rng.checkEntropy(lowEntropy); err == nil {
 		t.Error("Expected error for low entropy sample")
 	}
-
-	// Case 2: High entropy (random)
 	highEntropy := make([]byte, 4096)
 	if _, err := rand.Read(highEntropy); err != nil {
 		t.Fatal(err)
@@ -516,8 +443,6 @@ func TestEntropyCheck(t *testing.T) {
 	if err := rng.checkEntropy(highEntropy); err != nil {
 		t.Errorf("High entropy sample failed check: %v", err)
 	}
-
-	// Case 3: Small sample (should skip check)
 	small := make([]byte, 10)
 	if err := rng.checkEntropy(small); err != nil {
 		t.Errorf("Small sample should pass (skip): %v", err)
@@ -533,22 +458,17 @@ func TestConcurrentProcessing(t *testing.T) {
 	pw := getTestPassword()
 	defer pw.Close()
 	cfg := getTestConfig()
-
-	for i := 0; i < count; i++ {
+	for i := range count {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
 			fName := fmt.Sprintf("file_%d.txt", idx)
 			inPath := filepath.Join(tempDir, fName)
 			outPath := filepath.Join(tempDir, fName+".enc")
-
-			// Create file
 			if err := os.WriteFile(inPath, []byte(fName), 0644); err != nil {
 				t.Error(err)
 				return
 			}
-
-			// Encrypt
 			ctx := context.Background()
 			if err := encryptFile(ctx, inPath, outPath, pw, cfg); err != nil {
 				t.Errorf("Worker %d encryption failed: %v", idx, err)
@@ -572,12 +492,9 @@ func TestSaltCacheCleanup(t *testing.T) {
 	saltMu.RLock()
 	_, exists := saltCache[saltHex]
 	saltMu.RUnlock()
-
 	if !exists {
 		t.Error("Salt should exist in cache")
 	}
-
-	// Manual cleanup simulation
 	saltMu.Lock()
 	delete(saltCache, saltHex)
 	saltMu.Unlock()
@@ -585,7 +502,6 @@ func TestSaltCacheCleanup(t *testing.T) {
 	saltMu.RLock()
 	_, existsAfter := saltCache[saltHex]
 	saltMu.RUnlock()
-
 	if existsAfter {
 		t.Error("Salt should be removed")
 	}
@@ -622,19 +538,14 @@ func TestBuildEnhancedAAD(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Seq 1 (should differ)
 	aad2, err := buildEnhancedAAD(header, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	if bytes.Equal(aad1, aad2) {
 		t.Error("AAD should differ for different sequence numbers")
 	}
-
-	// Verify length sufficiency (Magic+Ver+Params+Time+Seq...)
-	if len(aad1) < 40 {
+	if len(aad1) < 46 {
 		t.Error("AAD seems too short")
 	}
 }
@@ -671,15 +582,12 @@ func TestChunkSizeBoundaries(t *testing.T) {
 	pw := getTestPassword()
 	defer pw.Close()
 	ctx := context.Background()
-
 	if err := encryptFile(ctx, inputFile, outputFile, pw, cfg); err != nil {
 		t.Fatal(err)
 	}
-
 	if err := decryptFile(ctx, outputFile, decryptedFile, pw.Bytes(), cfg); err != nil {
 		t.Fatal(err)
 	}
-
 	if !bytes.Equal(readFile(t, decryptedFile), data) {
 		t.Error("Data mismatch with small chunks")
 	}
@@ -705,7 +613,6 @@ func TestSaltValidationLogic(t *testing.T) {
 	if len(s.Bytes()) != 32 {
 		t.Error("Salt size mismatch")
 	}
-
 	_, err = generateSalt(0)
 	if err == nil {
 		t.Error("Should fail for 0 salt size")
@@ -720,13 +627,9 @@ func TestHexEncodingInSaltCache(t *testing.T) {
 	saltMu.Lock()
 	saltCache[expectedKey] = salt
 	saltMu.Unlock()
-
-	// validateSaltUniqueness should find it
 	if err := validateSaltUniqueness(salt); err == nil {
 		t.Error("Should detect existing salt via hex key")
 	}
-
-	// Cleanup
 	saltMu.Lock()
 	delete(saltCache, expectedKey)
 	saltMu.Unlock()

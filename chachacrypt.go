@@ -177,14 +177,8 @@ func (sb *SecureBuffer) Zero() {
 	sink(sb.data)
 }
 
-func (sb *SecureBuffer) IsZeroed() bool {
-	return sb.zeroed.Load()
-}
-
-func (sb *SecureBuffer) Close() error {
-	sb.Zero()
-	return nil
-}
+func (sb *SecureBuffer) IsZeroed() bool { return sb.zeroed.Load() }
+func (sb *SecureBuffer) Close() error   { sb.Zero(); return nil }
 
 func ConstantTimeEqual(a, b []byte) bool {
 	if len(a) != len(b) {
@@ -247,6 +241,7 @@ func verifyFileIntegrity(header FileHeader, salt []byte) error {
 
 func buildEnhancedAAD(header FileHeader, chunkSeq uint64) ([]byte, error) {
 	var aad bytes.Buffer
+	// include all significant header fields so AAD authenticates metadata
 	if err := binary.Write(&aad, binary.LittleEndian, header.Magic); err != nil {
 		return nil, err
 	}
@@ -263,6 +258,12 @@ func buildEnhancedAAD(header FileHeader, chunkSeq uint64) ([]byte, error) {
 		return nil, err
 	}
 	if err := binary.Write(&aad, binary.LittleEndian, header.KeySize); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(&aad, binary.LittleEndian, header.SaltSize); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(&aad, binary.LittleEndian, header.NonceSize); err != nil {
 		return nil, err
 	}
 	if err := aad.WriteByte(header.KeyVersion); err != nil {
@@ -478,6 +479,11 @@ func showHelp() {
 	fmt.Println(" Rotate key: chachacrypt rotate -i input.enc -o output.enc -new-version 1")
 }
 
+// validateFilePath: robust check for forbidden traversal segments.
+// - empty paths rejected
+// - any path segment equal to ".." is rejected
+// - NUL bytes rejected
+// Absolute paths are allowed (tests and callers may pass absolute temp paths).
 func validateFilePath(p string) error {
 	if p == "" {
 		return errors.New("empty path")
@@ -502,6 +508,7 @@ func validateFileInput(inputFile, outputFile string) error {
 	if outputFile == "" {
 		return errors.New("output file required")
 	}
+	// We keep path validation but allow absolute paths; validateFilePath will reject traversal
 	if err := validateFilePath(inputFile); err != nil {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
@@ -511,15 +518,8 @@ func validateFileInput(inputFile, outputFile string) error {
 	return nil
 }
 
-func fileExists(name string) bool {
-	_, err := os.Stat(name)
-	return err == nil
-}
-
-func isTerminal(fd uintptr) bool {
-	return term.IsTerminal(int(fd))
-}
-
+func fileExists(name string) bool { _, err := os.Stat(name); return err == nil }
+func isTerminal(fd uintptr) bool  { return term.IsTerminal(int(fd)) }
 func zeroBytes(b []byte) {
 	for i := range b {
 		b[i] = 0
@@ -575,6 +575,13 @@ func generatePassword(n int) (string, error) {
 }
 
 func encryptFile(ctx context.Context, inputFile, outputFile string, password *SecureBuffer, cfg config) error {
+	// Respect cancellation as early as possible
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	// validate paths (validateFilePath accepts absolute paths but forbids traversal)
 	if err := validateFilePath(inputFile); err != nil {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
@@ -650,6 +657,11 @@ func encryptFile(ctx context.Context, inputFile, outputFile string, password *Se
 }
 
 func decryptFile(ctx context.Context, inputFile, outputFile string, password []byte, cfg config) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 	if err := validateFilePath(inputFile); err != nil {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
@@ -714,16 +726,16 @@ func decryptFile(ctx context.Context, inputFile, outputFile string, password []b
 }
 
 func rotateKey(ctx context.Context, inputFile, outputFile string, password []byte, newVersion byte) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 	if err := validateFilePath(inputFile); err != nil {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
 	if err := validateFilePath(outputFile); err != nil {
 		return fmt.Errorf("path validation failed: %w", err)
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
 	}
 	inFile, err := os.Open(inputFile)
 	if err != nil {
