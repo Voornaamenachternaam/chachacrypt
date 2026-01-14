@@ -153,7 +153,7 @@ func TestBuildConfig(t *testing.T) {
 	// Invalid cases
 	failures := []struct {
 		time, mem, threads, chunk, salt, key int
-		name                             string
+		name                                 string
 	}{
 		{2, 128 * 1024, 1, 1024, 16, 32, "Time too low"},
 		{maxArgonTime + 1, 128 * 1024, 1, 1024, 16, 32, "Time too high"},
