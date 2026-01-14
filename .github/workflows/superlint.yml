@@ -5,7 +5,6 @@ on:
   workflow_dispatch:
   push:
 
-
 concurrency:
   group: superlinter-fix-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
@@ -107,8 +106,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: super-linter/fixes-${{ github.run_id }}
-          base: main
-          title: "[super-linter] apply auto-fixes -> main"
+          title: "[super-linter] apply auto-fixes"
           body: |
             Automated fixes from Super-Linter (auto-fix enabled) and `go mod tidy`.
             If there are no changes, no PR will be created.
