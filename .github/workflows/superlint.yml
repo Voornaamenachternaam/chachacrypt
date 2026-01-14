@@ -2,13 +2,9 @@ name: Superlint
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, edited, ready_for_review]
   workflow_dispatch:
   push:
-    branches:
-      - main
-  schedule:
-    - cron: '0 2 * * *'
+
 
 concurrency:
   group: superlinter-fix-${{ github.event.pull_request.number || github.run_id }}
