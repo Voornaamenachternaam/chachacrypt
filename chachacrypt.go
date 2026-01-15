@@ -24,10 +24,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"log/slog"
+
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/term"
-	"log/slog"
 )
 
 const (
@@ -41,7 +42,7 @@ const (
 	defaultArgonThreads = 2
 	defaultChunkSize    = 64 * 1024
 
-	// Limits
+	// Limits.
 	maxArgonTime   = 1 << 12
 	maxArgonMemory = 1 << 22
 	maxChunkSize   = 1 << 22
@@ -53,7 +54,7 @@ const (
 
 	maxKeyVersion = 255
 
-	// Named magic numbers (replaces bare literals flagged by mnd)
+	// Named magic numbers (replaces bare literals flagged by mnd).
 	maxByteValues         = 256.0
 	minArgsRequired       = 2
 	defaultPasswordLength = 15
@@ -112,7 +113,7 @@ func (r *CSPRNGReader) checkEntropy(sample []byte) error {
 
 // globalsManager encapsulates previous package-level mutable state:
 // - a CSPRNG reader
-// - salt cache map, mutex and wait group
+// - salt cache map, mutex and wait group.
 type globalsManager struct {
 	csprng    *CSPRNGReader
 	saltCache map[string][]byte
@@ -521,17 +522,17 @@ func buildConfig(argTime, argMem, argThreads, chunkSize, saltSize, keySize int, 
 }
 
 func showHelp() {
- _, _ = fmt.Fprintln(os.Stdout, "Usage:")
- _, _ = fmt.Fprintln(os.Stdout, " Encrypt a file: chachacrypt enc -i input.txt -o output.enc")
- _, _ = fmt.Fprintln(os.Stdout, " Decrypt a file: chachacrypt dec -i input.enc -o decrypted.txt")
- _, _ = fmt.Fprintln(os.Stdout, " Generate a password: chachacrypt pw -s 15")
- _, _ = fmt.Fprintln(os.Stdout, " Rotate key: chachacrypt rotate -i input.enc -o output.enc -new-version 1")
+	_, _ = fmt.Fprintln(os.Stdout, "Usage:")
+	_, _ = fmt.Fprintln(os.Stdout, " Encrypt a file: chachacrypt enc -i input.txt -o output.enc")
+	_, _ = fmt.Fprintln(os.Stdout, " Decrypt a file: chachacrypt dec -i input.enc -o decrypted.txt")
+	_, _ = fmt.Fprintln(os.Stdout, " Generate a password: chachacrypt pw -s 15")
+	_, _ = fmt.Fprintln(os.Stdout, " Rotate key: chachacrypt rotate -i input.enc -o output.enc -new-version 1")
 }
 
 // validateFilePath: robust check for forbidden traversal segments.
 // - empty paths rejected
 // - any path segment equal to ".." is rejected
-// - NUL bytes rejected
+// - NUL bytes rejected.
 func validateFilePath(p string) error {
 	if p == "" {
 		return errors.New("empty path")
@@ -618,7 +619,7 @@ func generatePassword(n int) (string, error) {
 	var result strings.Builder
 	result.Grow(n)
 	maxIdx := big.NewInt(int64(len(letters)))
-	for i := 0; i < n; i++ {
+	for range n {
 		idx, err := rand.Int(globals.csprng, maxIdx)
 		if err != nil {
 			return "", fmt.Errorf("random generation failed: %w", err)
