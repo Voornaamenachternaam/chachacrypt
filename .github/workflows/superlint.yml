@@ -53,7 +53,7 @@ jobs:
           version: v2.8.0
           # We deliberately set JSON output to avoid GitHub annotations.
           # We still run --fix so supported auto-fixes are applied.
-          args: run --fix ./...
+          args: --output.json.path=stdout --fix ./...
           # keep problem-matchers disabled (default = false) to avoid introducing embedded matchers
           problem-matchers: "false"
           only-new-issues: "false"
