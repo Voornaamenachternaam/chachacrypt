@@ -455,7 +455,6 @@ func TestContextCancellation(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error on cancelled context")
 	} else if !errors.Is(err, context.Canceled) {
-		// It might return a wrapped error, check Is
 		if !strings.Contains(err.Error(), "context canceled") {
 			t.Errorf("Expected context canceled error, got: %v", err)
 		}
@@ -534,7 +533,6 @@ func TestConcurrentProcessing(t *testing.T) {
 	pw := getTestPassword()
 	defer pw.Close()
 	cfg := getTestConfig()
-
 	for i := range count {
 		wg.Add(1)
 		go func(idx int) {

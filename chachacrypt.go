@@ -478,6 +478,11 @@ func showHelp() {
 	fmt.Println(" Rotate key: chachacrypt rotate -i input.enc -o output.enc -new-version 1")
 }
 
+// validateFilePath: robust check for forbidden traversal segments.
+// - empty paths rejected
+// - any path segment equal to ".." is rejected
+// - NUL bytes rejected
+// Absolute paths are allowed (tests and callers may pass absolute temp paths).
 func validateFilePath(p string) error {
 	if p == "" {
 		return errors.New("empty path")
