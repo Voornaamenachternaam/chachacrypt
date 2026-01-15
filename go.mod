@@ -1,6 +1,7 @@
 module chachacrypt
 
-go 1.25.5
+go 1.25.6
+time 2026-01-08T21:56:04Z
 
 require (
 	golang.org/x/crypto v0.47.0
