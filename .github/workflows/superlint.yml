@@ -27,29 +27,40 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Setup Go (for go mod tidy)
+      - name: Setup Go (for go mod tidy + golangci-lint)
         uses: actions/setup-go@v6.2.0
         with:
           go-version-file: 'go.mod'
           cache: false
 
-      - name: Run Super-Linter (auto-fix enabled)
-        uses: super-linter/super-linter@v8.3.2
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VALIDATE_GO: true
-          VALIDATE_GO_MODULES: true
-          VALIDATE_GIT_COMMITTER: true
-          VALIDATE_GIT_MERGE_CONFLICT_MARKERS: true
-          VALIDATE_GIT_COMMITLINT: true
-          FIX_GO: true
-          FIX_GO_MODULES: true
-          SAVE_SUPER_LINTER_OUTPUT: 'false'
-          SAVE_SUPER_LINTER_SUMMARY: 'false'
-          ENABLE_GITHUB_ACTIONS_STEP_SUMMARY: 'false'
+      # Ensure modules are downloaded so the analyzer can load packages.
+      - name: Prepare Go modules (download)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t mods < <(git ls-files -- '*/go.mod' 'go.mod' || true)
+          if [ ${#mods[@]} -gt 0 ]; then
+            for gm in "${mods[@]}"; do
+              (cd "$(dirname "$gm")" && go mod download)
+            done
+          fi
 
-      - name: Fix ownership of any files created by container (defensive)
+      - name: Install / Run golangci-lint (official action) -- fix mode
+        uses: golangci/golangci-lint-action@v9.2.0
+        continue-on-error: true            # preserve previous behaviour (don't abort subsequent steps)
+        with:
+          # install golangci-lint binary (default install-mode=binary)
+          version: latest
+          # We deliberately set JSON output to avoid GitHub annotations.
+          # We still run --fix so supported auto-fixes are applied.
+          args: --out-format=json --fix ./...
+          # keep problem-matchers disabled (default = false) to avoid introducing embedded matchers
+          problem-matchers: "false"
+          only-new-issues: "false"
+          # the action will use the go version already set by actions/setup-go above
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fix ownership of any files created by action (defensive)
         run: sudo chown -R "$(id -u):$(id -g)" .
         shell: bash
 
@@ -97,7 +108,7 @@ jobs:
             echo "No staged changes to commit"
             exit 0
           fi
-          git commit -m "chore(lint): apply super-linter auto-fixes and go mod tidy [skip ci]" || true
+          git commit -m "chore(lint): apply golangci-lint auto-fixes and go mod tidy [skip ci]" || true
         shell: bash
 
       - name: Create or update Pull Request with fixes
@@ -106,12 +117,12 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: super-linter/fixes-${{ github.run_id }}
-          title: "[super-linter] apply auto-fixes"
+          title: "[golangci-lint] apply auto-fixes"
           body: |
-            Automated fixes from Super-Linter (auto-fix enabled) and `go mod tidy`.
+            Automated fixes from golangci-lint (auto-fix enabled) and `go mod tidy`.
             If there are no changes, no PR will be created.
-          commit-message: "chore(lint): apply super-linter fixes [skip ci]"
-          author: "super-linter[bot] <super-linter@super-linter.dev>"
+          commit-message: "chore(lint): apply golangci-lint fixes [skip ci]"
+          author: "golangci-lint[bot] <golangci-lint@users.noreply.github.com>"
           update-existing: true
 
       - name: Print created/updated PR url
