@@ -50,10 +50,10 @@ jobs:
         continue-on-error: true            # preserve previous behaviour (don't abort subsequent steps)
         with:
           # install golangci-lint binary (default install-mode=binary)
-          version: latest
+          version-file: go.mod
           # We deliberately set JSON output to avoid GitHub annotations.
           # We still run --fix so supported auto-fixes are applied.
-          args: --out-format=json --fix ./...
+          args: run --fix ./...
           # keep problem-matchers disabled (default = false) to avoid introducing embedded matchers
           problem-matchers: "false"
           only-new-issues: "false"
