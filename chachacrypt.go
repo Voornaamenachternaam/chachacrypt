@@ -619,7 +619,30 @@ func generatePassword(n int) (string, error) {
 	result.Grow(n)
 	maxIdx := big.NewInt(int64(len(letters)))
 	for i := 0; i < n; i++ {
-		idx, err := rand.Int(globals.csprng, maxIdx)
+  func (g *globalsManager) ReadCSPRNG(p []byte) (int, error) {
+  	return g.csprng.Read(p)
+  }
+
+  func (g *globalsManager) CSPRNG() io.Reader {
+  	return g.csprng
+  }
+
+  func (g *globalsManager) AddSalt(key string, data []byte) {
+  	g.saltMu.Lock()
+  	g.saltCache[key] = data
+  	g.saltMu.Unlock()
+  	g.saltWg.Add(1)
+  	// background cleanup goroutine
+  	go func() {
+  		defer g.saltWg.Done()
+  		time.Sleep(time.Hour)
+  		g.saltMu.Lock()
+  		delete(g.saltCache, key)
+  		g.saltMu.Unlock()
+  	}()
+  }
+
+  idx, err := rand.Int(globals.CSPRNG(), maxIdx)
 		if err != nil {
 			return "", fmt.Errorf("random generation failed: %w", err)
 		}
