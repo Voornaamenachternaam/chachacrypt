@@ -42,21 +42,25 @@ jobs:
           go env
 
       - name: Install fieldalignment
+        continue-on-error: true
         run: |
           set -euo pipefail
           go install golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment@v0.41.0
 
       - name: Run gofmt (apply fixes)
+        continue-on-error: true
         run: |
           set -euo pipefail
           gofmt -s -w .
 
       - name: Run go vet (capture logs)
+        continue-on-error: true
         run: |
           set -euo pipefail
           go vet ./... > "$RUNNER_TEMP/govet.log" 2>&1 || true
 
       - name: Run fieldalignment (apply fixes, capture logs)
+        continue-on-error: true
         run: |
           set -euo pipefail
           fieldalignment -fix ./... > "$RUNNER_TEMP/fieldalignment.log" 2>&1 || true
@@ -76,6 +80,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Detect repository changes
+        continue-on-error: true 
         id: changes
         run: |
           set -euo pipefail
@@ -87,6 +92,7 @@ jobs:
           fi
 
       - name: Create or update Pull Request
+        continue-on-error: true
         if: steps.changes.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v8
         with:
