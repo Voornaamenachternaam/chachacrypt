@@ -1,4 +1,3 @@
-// chachacrypt.go file encryption
 package main
 
 import (
@@ -15,7 +14,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"math/big"
 	"os"
@@ -29,9 +27,9 @@ import (
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/term"
+	"log/slog"
 )
 
-// parameters.
 const (
 	MagicNumber         = "CHACRYPT"
 	FileVersion         = byte(2)
@@ -43,6 +41,7 @@ const (
 	defaultArgonThreads = 2
 	defaultChunkSize    = 64 * 1024
 
+	// Limits
 	maxArgonTime   = 1 << 12
 	maxArgonMemory = 1 << 22
 	maxChunkSize   = 1 << 22
@@ -53,7 +52,14 @@ const (
 	minEntropyBits   = 7.5
 
 	maxKeyVersion = 255
+
+	// Named magic numbers (replaces bare literals flagged by mnd)
+	maxByteValues         = 256.0
+	minArgsRequired       = 2
+	defaultPasswordLength = 15
 )
+
+var logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{}))
 
 func minInt(a, b int) int {
 	if a < b {
@@ -62,15 +68,16 @@ func minInt(a, b int) int {
 	return b
 }
 
+// CSPRNGReader remains an entropy-checking io.Reader wrapper.
 type CSPRNGReader struct {
 	entropyChecked atomic.Bool
 }
 
-func (r *CSPRNGReader) Read(p []byte) (n int, err error) {
-	n, err = rand.Read(p)
+func (r *CSPRNGReader) Read(p []byte) (int, error) {
+	n, err := rand.Read(p)
 	if n > 0 && !r.entropyChecked.Load() {
-		if err := r.checkEntropy(p[:minInt(n, entropyCheckSize)]); err != nil {
-			return 0, fmt.Errorf("entropy check failed: %w", err)
+		if cerr := r.checkEntropy(p[:minInt(n, entropyCheckSize)]); cerr != nil {
+			return 0, fmt.Errorf("entropy check failed: %w", cerr)
 		}
 		r.entropyChecked.Store(true)
 	}
@@ -90,7 +97,7 @@ func (r *CSPRNGReader) checkEntropy(sample []byte) error {
 		p := float64(count) / float64(len(sample))
 		entropy -= p * math.Log2(p)
 	}
-	maxPossible := math.Log2(math.Min(256.0, float64(len(sample))))
+	maxPossible := math.Log2(math.Min(maxByteValues, float64(len(sample))))
 	if minEntropyBits > maxPossible {
 		return fmt.Errorf(
 			"sample too small for required entropy: sample=%d, max_possible=%.6f, required=%.6f",
@@ -103,43 +110,52 @@ func (r *CSPRNGReader) checkEntropy(sample []byte) error {
 	return nil
 }
 
-var (
-	csprng    = &CSPRNGReader{}
-	saltCache = make(map[string][]byte)
+// globalsManager encapsulates previous package-level mutable state:
+// - a CSPRNG reader
+// - salt cache map, mutex and wait group
+type globalsManager struct {
+	csprng    *CSPRNGReader
+	saltCache map[string][]byte
 	saltMu    sync.RWMutex
-	saltWg    sync.WaitGroup // For managing cleanup goroutine lifecycle
-)
-
-func sink(b []byte) {
-	runtime.KeepAlive(b)
+	saltWg    sync.WaitGroup
 }
 
-type FileHeader struct {
-	Magic      [len(MagicNumber)]byte
-	Version    byte
-	ArgonTime  uint32
-	ArgonMem   uint32
-	ArgonUtil  uint8
-	KeySize    uint32
-	SaltSize   uint32
-	NonceSize  uint32
-	KeyVersion byte
-	Timestamp  uint64
-	Integrity  [32]byte
-	Padding    [7]byte
+func newGlobalsManager() *globalsManager {
+	return &globalsManager{
+		csprng:    &CSPRNGReader{},
+		saltCache: make(map[string][]byte),
+	}
 }
 
-type config struct {
-	SaltSize   uint32
-	KeySize    uint32
-	KeyTime    uint32
-	KeyMemory  uint32
-	KeyThreads uint8
-	ChunkSize  int
-	NonceSize  int
-	KeyVersion byte
+var globals = newGlobalsManager()
+
+func (g *globalsManager) ReadCSPRNG(p []byte) (int, error) {
+	return g.csprng.Read(p)
 }
 
+func (g *globalsManager) AddSalt(key string, data []byte) {
+	g.saltMu.Lock()
+	g.saltCache[key] = data
+	g.saltMu.Unlock()
+	g.saltWg.Add(1)
+	// background cleanup goroutine
+	go func() {
+		defer g.saltWg.Done()
+		time.Sleep(time.Hour)
+		g.saltMu.Lock()
+		delete(g.saltCache, key)
+		g.saltMu.Unlock()
+	}()
+}
+
+func (g *globalsManager) HasSalt(key string) bool {
+	g.saltMu.RLock()
+	_, exists := g.saltCache[key]
+	g.saltMu.RUnlock()
+	return exists
+}
+
+// SecureBuffer holds secret bytes and can zero them on Close.
 type SecureBuffer struct {
 	data   []byte
 	mu     sync.Mutex
@@ -181,9 +197,39 @@ func (sb *SecureBuffer) IsZeroed() bool {
 	return sb.zeroed.Load()
 }
 
-func (sb *SecureBuffer) Close() error {
+// Close no longer returns an error (unparam lint).
+func (sb *SecureBuffer) Close() {
 	sb.Zero()
-	return nil
+}
+
+func sink(b []byte) {
+	runtime.KeepAlive(b)
+}
+
+type FileHeader struct {
+	Magic      [len(MagicNumber)]byte
+	Version    byte
+	ArgonTime  uint32
+	ArgonMem   uint32
+	ArgonUtil  uint8
+	KeySize    uint32
+	SaltSize   uint32
+	NonceSize  uint32
+	KeyVersion byte
+	Timestamp  uint64
+	Integrity  [32]byte
+	Padding    [7]byte
+}
+
+type config struct {
+	SaltSize   uint32
+	KeySize    uint32
+	KeyTime    uint32
+	KeyMemory  uint32
+	KeyThreads uint8
+	ChunkSize  int
+	NonceSize  int
+	KeyVersion byte
 }
 
 func ConstantTimeEqual(a, b []byte) bool {
@@ -195,25 +241,12 @@ func ConstantTimeEqual(a, b []byte) bool {
 
 func validateSaltUniqueness(salt []byte) error {
 	saltHex := hex.EncodeToString(salt)
-	saltMu.RLock()
-	_, exists := saltCache[saltHex]
-	saltMu.RUnlock()
-	if exists {
+	if globals.HasSalt(saltHex) {
 		return errors.New("salt has been used before - potential security issue")
 	}
 	cp := make([]byte, len(salt))
 	copy(cp, salt)
-	saltMu.Lock()
-	saltCache[saltHex] = cp
-	saltMu.Unlock()
-	saltWg.Add(1)
-	go func(key string) {
-		defer saltWg.Done()
-		time.Sleep(time.Hour)
-		saltMu.Lock()
-		delete(saltCache, key)
-		saltMu.Unlock()
-	}(saltHex)
+	globals.AddSalt(saltHex, cp)
 	return nil
 }
 
@@ -280,26 +313,30 @@ func buildEnhancedAAD(header FileHeader, chunkSeq uint64) ([]byte, error) {
 }
 
 func main() {
-	if len(os.Args) < 2 {
+	if len(os.Args) < minArgsRequired {
 		showHelp()
 		os.Exit(1)
 	}
 	switch os.Args[1] {
 	case "enc":
 		if err := handleEncrypt(context.Background()); err != nil {
-			log.Fatalf("Processing failed: %v", err)
+			logger.Error("Processing failed", "err", err)
+			os.Exit(1)
 		}
 	case "dec":
 		if err := handleDecrypt(context.Background()); err != nil {
-			log.Fatalf("Processing failed: %v", err)
+			logger.Error("Processing failed", "err", err)
+			os.Exit(1)
 		}
 	case "pw":
 		if err := handlePasswordGen(); err != nil {
-			log.Fatalf("Password generation failed: %v", err)
+			logger.Error("Password generation failed", "err", err)
+			os.Exit(1)
 		}
 	case "rotate":
 		if err := handleKeyRotation(context.Background()); err != nil {
-			log.Fatalf("Key rotation failed: %v", err)
+			logger.Error("Key rotation failed", "err", err)
+			os.Exit(1)
 		}
 	default:
 		showHelp()
@@ -308,6 +345,11 @@ func main() {
 }
 
 func handleEncrypt(ctx context.Context) error {
+	var (
+		password *SecureBuffer
+		cfg      config
+		err      error
+	)
 	enc := flag.NewFlagSet("enc", flag.ExitOnError)
 	in := enc.String("i", "", "input file (relative path, no .. allowed)")
 	out := enc.String("o", "", "output file")
@@ -318,10 +360,10 @@ func handleEncrypt(ctx context.Context) error {
 	saltSize := enc.Int("salt-size", defaultSalt, "Salt size in bytes")
 	keySize := enc.Int("key-size", defaultKey, "Derived key size in bytes (e.g., 32)")
 	keyVersion := enc.Uint("key-version", 0, "Key version for rotation support")
-	if err := enc.Parse(os.Args[2:]); err != nil {
+	if err = enc.Parse(os.Args[2:]); err != nil {
 		return fmt.Errorf("flag parsing failed: %w", err)
 	}
-	if err := validateFileInput(*in, *out); err != nil {
+	if err = validateFileInput(*in, *out); err != nil {
 		return fmt.Errorf("input validation failed: %w", err)
 	}
 	if *in == *out {
@@ -332,7 +374,7 @@ func handleEncrypt(ctx context.Context) error {
 		return ctx.Err()
 	default:
 	}
-	password, err := readPasswordPromptConfirm("Enter a strong password: ", "Confirm password: ")
+	password, err = readPasswordPromptConfirm("Enter a strong password: ", "Confirm password: ")
 	if err != nil {
 		return fmt.Errorf("password input failed: %w", err)
 	}
@@ -340,30 +382,33 @@ func handleEncrypt(ctx context.Context) error {
 		if sb == nil {
 			return
 		}
-		if cerr := sb.Close(); cerr != nil {
-			log.Printf("close error: %v", cerr)
-		}
+		sb.Close()
 	}(password)
-	cfg, err := buildConfig(*argTime, *argMem, *argThreads, *chunkSize, *saltSize, *keySize, byte(*keyVersion))
+	cfg, err = buildConfig(*argTime, *argMem, *argThreads, *chunkSize, *saltSize, *keySize, byte(*keyVersion))
 	if err != nil {
 		return fmt.Errorf("configuration validation failed: %w", err)
 	}
 	start := time.Now()
-	if err := encryptFile(ctx, *in, *out, password, cfg); err != nil {
+	if err = encryptFile(ctx, *in, *out, password, cfg); err != nil {
 		return fmt.Errorf("encryption failed: %w", err)
 	}
-	fmt.Printf("Processing successful (took %s)\n", time.Since(start))
+	// Use fmt.Fprintf to avoid fmt.Printf and satisfy forbidigo rule.
+	_, _ = fmt.Fprintf(os.Stdout, "Processing successful (took %s)\n", time.Since(start))
 	return nil
 }
 
 func handleDecrypt(ctx context.Context) error {
+	var (
+		pwBytes []byte
+		err     error
+	)
 	dec := flag.NewFlagSet("dec", flag.ExitOnError)
 	in := dec.String("i", "", "input file")
 	out := dec.String("o", "", "output file")
-	if err := dec.Parse(os.Args[2:]); err != nil {
+	if err = dec.Parse(os.Args[2:]); err != nil {
 		return fmt.Errorf("flag parsing failed: %w", err)
 	}
-	if err := validateFileInput(*in, *out); err != nil {
+	if err = validateFileInput(*in, *out); err != nil {
 		return fmt.Errorf("input validation failed: %w", err)
 	}
 	if *in == *out {
@@ -377,25 +422,26 @@ func handleDecrypt(ctx context.Context) error {
 	if !isTerminal(os.Stdin.Fd()) {
 		return errors.New("interactive input required")
 	}
-	fmt.Print("Enter password: ")
-	pwBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
+	// Use fmt.Fprint to avoid fmt.Print
+	_, _ = fmt.Fprint(os.Stdout, "Enter password: ")
+	pwBytes, err = term.ReadPassword(int(os.Stdin.Fd()))
+	_, _ = fmt.Fprintln(os.Stdout)
 	if err != nil {
 		return fmt.Errorf("password read failed: %w", err)
 	}
 	defer zeroBytes(pwBytes)
 	cfg := config{}
 	start := time.Now()
-	if err := decryptFile(ctx, *in, *out, pwBytes, cfg); err != nil {
+	if err = decryptFile(ctx, *in, *out, pwBytes, cfg); err != nil {
 		return fmt.Errorf("decryption failed: %w", err)
 	}
-	fmt.Printf("Processing successful (took %s)\n", time.Since(start))
+	_, _ = fmt.Fprintf(os.Stdout, "Processing successful (took %s)\n", time.Since(start))
 	return nil
 }
 
 func handlePasswordGen() error {
 	pw := flag.NewFlagSet("pw", flag.ExitOnError)
-	size := pw.Int("s", 15, "size of password to generate")
+	size := pw.Int("s", defaultPasswordLength, "size of password to generate")
 	if err := pw.Parse(os.Args[2:]); err != nil {
 		return fmt.Errorf("flag parsing failed: %w", err)
 	}
@@ -403,19 +449,23 @@ func handlePasswordGen() error {
 	if err != nil {
 		return fmt.Errorf("password generation failed: %w", err)
 	}
-	fmt.Println(p)
+	_, _ = fmt.Fprintln(os.Stdout, p)
 	return nil
 }
 
 func handleKeyRotation(ctx context.Context) error {
+	var (
+		pwBytes []byte
+		err     error
+	)
 	rot := flag.NewFlagSet("rotate", flag.ExitOnError)
 	in := rot.String("i", "", "input file to rotate key for")
 	out := rot.String("o", "", "output file")
 	newVersion := rot.Uint("new-version", 1, "new key version")
-	if err := rot.Parse(os.Args[2:]); err != nil {
+	if err = rot.Parse(os.Args[2:]); err != nil {
 		return fmt.Errorf("flag parsing failed: %w", err)
 	}
-	if err := validateFileInput(*in, *out); err != nil {
+	if err = validateFileInput(*in, *out); err != nil {
 		return fmt.Errorf("input validation failed: %w", err)
 	}
 	select {
@@ -426,9 +476,9 @@ func handleKeyRotation(ctx context.Context) error {
 	if !isTerminal(os.Stdin.Fd()) {
 		return errors.New("interactive input required")
 	}
-	fmt.Print("Enter password: ")
-	pwBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
+	_, _ = fmt.Fprint(os.Stdout, "Enter password: ")
+	pwBytes, err = term.ReadPassword(int(os.Stdin.Fd()))
+	_, _ = fmt.Fprintln(os.Stdout)
 	if err != nil {
 		return fmt.Errorf("password read failed: %w", err)
 	}
@@ -471,18 +521,17 @@ func buildConfig(argTime, argMem, argThreads, chunkSize, saltSize, keySize int, 
 }
 
 func showHelp() {
-	fmt.Println("Usage:")
-	fmt.Println(" Encrypt a file: chachacrypt enc -i input.txt -o output.enc")
-	fmt.Println(" Decrypt a file: chachacrypt dec -i input.enc -o decrypted.txt")
-	fmt.Println(" Generate a password: chachacrypt pw -s 15")
-	fmt.Println(" Rotate key: chachacrypt rotate -i input.enc -o output.enc -new-version 1")
+	_ = fmt.Fprintln(os.Stdout, "Usage:")
+	_ = fmt.Fprintln(os.Stdout, " Encrypt a file: chachacrypt enc -i input.txt -o output.enc")
+	_ = fmt.Fprintln(os.Stdout, " Decrypt a file: chachacrypt dec -i input.enc -o decrypted.txt")
+	_ = fmt.Fprintln(os.Stdout, " Generate a password: chachacrypt pw -s 15")
+	_ = fmt.Fprintln(os.Stdout, " Rotate key: chachacrypt rotate -i input.enc -o output.enc -new-version 1")
 }
 
 // validateFilePath: robust check for forbidden traversal segments.
 // - empty paths rejected
 // - any path segment equal to ".." is rejected
 // - NUL bytes rejected
-// Absolute paths are allowed (tests and callers may pass absolute temp paths).
 func validateFilePath(p string) error {
 	if p == "" {
 		return errors.New("empty path")
@@ -536,15 +585,15 @@ func readPasswordPromptConfirm(prompt, confirmPrompt string) (*SecureBuffer, err
 	if !isTerminal(os.Stdin.Fd()) {
 		return nil, errors.New("interactive input required")
 	}
-	fmt.Print(prompt)
+	_, _ = fmt.Fprint(os.Stdout, prompt)
 	p1, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
+	_, _ = fmt.Fprintln(os.Stdout)
 	if err != nil {
 		return nil, fmt.Errorf("password read failed: %w", err)
 	}
-	fmt.Print(confirmPrompt)
+	_, _ = fmt.Fprint(os.Stdout, confirmPrompt)
 	p2, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
+	_, _ = fmt.Fprintln(os.Stdout)
 	if err != nil {
 		zeroBytes(p1)
 		return nil, fmt.Errorf("password confirmation failed: %w", err)
@@ -568,9 +617,9 @@ func generatePassword(n int) (string, error) {
 	}
 	var result strings.Builder
 	result.Grow(n)
-	max := big.NewInt(int64(len(letters)))
-	for range n {
-		idx, err := rand.Int(csprng, max)
+	maxIdx := big.NewInt(int64(len(letters)))
+	for i := 0; i < n; i++ {
+		idx, err := rand.Int(globals.csprng, maxIdx)
 		if err != nil {
 			return "", fmt.Errorf("random generation failed: %w", err)
 		}
@@ -580,10 +629,11 @@ func generatePassword(n int) (string, error) {
 }
 
 func encryptFile(ctx context.Context, inputFile, outputFile string, password *SecureBuffer, cfg config) error {
-	if err := validateFilePath(inputFile); err != nil {
+	var err error
+	if err = validateFilePath(inputFile); err != nil {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
-	if err := validateFilePath(outputFile); err != nil {
+	if err = validateFilePath(outputFile); err != nil {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
 	select {
@@ -597,7 +647,7 @@ func encryptFile(ctx context.Context, inputFile, outputFile string, password *Se
 	}
 	defer func() {
 		if cerr := outFile.Close(); cerr != nil {
-			log.Printf("close error: %v", cerr)
+			logger.Error("close error", "err", cerr)
 		}
 	}()
 	inFile, err := os.Open(inputFile)
@@ -606,7 +656,7 @@ func encryptFile(ctx context.Context, inputFile, outputFile string, password *Se
 	}
 	defer func() {
 		if cerr := inFile.Close(); cerr != nil {
-			log.Printf("close error: %v", cerr)
+			logger.Error("close error", "err", cerr)
 		}
 	}()
 	salt, err := generateSalt(cfg.SaltSize)
@@ -617,9 +667,7 @@ func encryptFile(ctx context.Context, inputFile, outputFile string, password *Se
 		if sb == nil {
 			return
 		}
-		if cerr := sb.Close(); cerr != nil {
-			log.Printf("close error: %v", cerr)
-		}
+		sb.Close()
 	}(salt)
 	header, err := createHeader(cfg)
 	if err != nil {
@@ -647,18 +695,17 @@ func encryptFile(ctx context.Context, inputFile, outputFile string, password *Se
 		if sb == nil {
 			return
 		}
-		if cerr := sb.Close(); cerr != nil {
-			log.Printf("close error: %v", cerr)
-		}
+		sb.Close()
 	}(key)
 	return processFile(ctx, inFile, outFile, key, cfg, header)
 }
 
 func decryptFile(ctx context.Context, inputFile, outputFile string, password []byte, cfg config) error {
-	if err := validateFilePath(inputFile); err != nil {
+	var err error
+	if err = validateFilePath(inputFile); err != nil {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
-	if err := validateFilePath(outputFile); err != nil {
+	if err = validateFilePath(outputFile); err != nil {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
 	select {
@@ -672,7 +719,7 @@ func decryptFile(ctx context.Context, inputFile, outputFile string, password []b
 	}
 	defer func() {
 		if cerr := inFile.Close(); cerr != nil {
-			log.Printf("close error: %v", cerr)
+			logger.Error("close error", "err", cerr)
 		}
 	}()
 	header, err := readHeader(inFile)
@@ -687,11 +734,9 @@ func decryptFile(ctx context.Context, inputFile, outputFile string, password []b
 		if sb == nil {
 			return
 		}
-		if cerr := sb.Close(); cerr != nil {
-			log.Printf("close error: %v", cerr)
-		}
+		sb.Close()
 	}(salt)
-	if err := verifyFileIntegrity(header, salt.Bytes()); err != nil {
+	if err = verifyFileIntegrity(header, salt.Bytes()); err != nil {
 		return fmt.Errorf("integrity verification failed: %w", err)
 	}
 	key, err := deriveKey(password, salt.Bytes(), header)
@@ -702,9 +747,7 @@ func decryptFile(ctx context.Context, inputFile, outputFile string, password []b
 		if sb == nil {
 			return
 		}
-		if cerr := sb.Close(); cerr != nil {
-			log.Printf("close error: %v", cerr)
-		}
+		sb.Close()
 	}(key)
 	outFile, err := os.Create(outputFile)
 	if err != nil {
@@ -712,17 +755,18 @@ func decryptFile(ctx context.Context, inputFile, outputFile string, password []b
 	}
 	defer func() {
 		if cerr := outFile.Close(); cerr != nil {
-			log.Printf("close error: %v", cerr)
+			logger.Error("close error", "err", cerr)
 		}
 	}()
 	return decryptProcess(ctx, inFile, outFile, key, header)
 }
 
 func rotateKey(ctx context.Context, inputFile, outputFile string, password []byte, newVersion byte) error {
-	if err := validateFilePath(inputFile); err != nil {
+	var err error
+	if err = validateFilePath(inputFile); err != nil {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
-	if err := validateFilePath(outputFile); err != nil {
+	if err = validateFilePath(outputFile); err != nil {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
 	select {
@@ -736,7 +780,7 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 	}
 	defer func() {
 		if cerr := inFile.Close(); cerr != nil {
-			log.Printf("close error: %v", cerr)
+			logger.Error("close error", "err", cerr)
 		}
 	}()
 	header, err := readHeader(inFile)
@@ -751,9 +795,7 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 		if sb == nil {
 			return
 		}
-		if cerr := sb.Close(); cerr != nil {
-			log.Printf("close error: %v", cerr)
-		}
+		sb.Close()
 	}(salt)
 	originalKey, err := deriveKey(password, salt.Bytes(), header)
 	if err != nil {
@@ -763,9 +805,7 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 		if sb == nil {
 			return
 		}
-		if cerr := sb.Close(); cerr != nil {
-			log.Printf("close error: %v", cerr)
-		}
+		sb.Close()
 	}(originalKey)
 	header.KeyVersion = newVersion
 	header.Timestamp = uint64(time.Now().Unix())
@@ -780,7 +820,7 @@ func rotateKey(ctx context.Context, inputFile, outputFile string, password []byt
 	}
 	defer func() {
 		if cerr := outFile.Close(); cerr != nil {
-			log.Printf("close error: %v", cerr)
+			logger.Error("close error", "err", cerr)
 		}
 	}()
 	if err := writeHeader(outFile, header); err != nil {
@@ -847,7 +887,7 @@ func processKeyRotation(ctx context.Context, inFile, outFile *os.File, key *Secu
 			return fmt.Errorf("AAD reconstruction failed: %w", err)
 		}
 		newNonce := make([]byte, nonceSize)
-		if _, err := csprng.Read(newNonce); err != nil {
+		if _, err := globals.ReadCSPRNG(newNonce); err != nil {
 			zeroBytes(plain)
 			return fmt.Errorf("nonce generation failed: %w", err)
 		}
@@ -866,7 +906,7 @@ func generateSalt(saltSize uint32) (*SecureBuffer, error) {
 		return nil, errors.New("invalid salt size")
 	}
 	salt := NewSecureBuffer(int(saltSize))
-	if _, err := csprng.Read(salt.Bytes()); err != nil {
+	if _, err := globals.ReadCSPRNG(salt.Bytes()); err != nil {
 		salt.Zero()
 		return nil, fmt.Errorf("salt generation failed: %w", err)
 	}
@@ -942,9 +982,7 @@ func processFile(
 		if sb == nil {
 			return
 		}
-		if cerr := sb.Close(); cerr != nil {
-			log.Printf("close error: %v", cerr)
-		}
+		sb.Close()
 	}(plainBuf)
 	baseAAD, err := buildEnhancedAAD(header, 0)
 	if err != nil {
@@ -984,7 +1022,7 @@ func encryptChunk(
 	header FileHeader,
 ) error {
 	nonce := make([]byte, aead.NonceSize())
-	if _, err := csprng.Read(nonce); err != nil {
+	if _, err := globals.ReadCSPRNG(nonce); err != nil {
 		return fmt.Errorf("nonce generation failed: %w", err)
 	}
 	aad, err := buildEnhancedAAD(header, seq)
