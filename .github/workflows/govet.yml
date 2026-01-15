@@ -42,7 +42,6 @@ jobs:
 
     - name: Go Format Check
       if: github.event_name == 'pull_request' || github.event_name == 'push'
-      continue-on-error: true
       run: test -z $(gofmt -l .)
 
     - name: Go Format Fix
@@ -52,7 +51,6 @@ jobs:
 
     - name: Go Vet Check
       if: github.event_name == 'pull_request' || github.event_name == 'push'
-      continue-on-error: true
       run: go vet ./...
 
     - name: Go Vet Fix
@@ -62,10 +60,10 @@ jobs:
 
     - name: Create Pull Request
       if: github.event_name != 'pull_request' && github.event_name != 'push'
-      uses: peter-evans/create-pull-request@v8
+      uses: peter-evans/create-pull-request@v8.0.0
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
         commit-message: "fix: apply go formatting and vet fixes"
         title: "Automated Go Formatting and Vet Fixes"
         body: "This PR applies automated formatting using gofmt and vet fixes using fieldalignment."
-        branch: "au to-fixes"
+        branch: "auto-fixes"
