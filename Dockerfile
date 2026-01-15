@@ -1,5 +1,5 @@
 # Builder: use the exact Go version declared in go.mod
-FROM golang:1.25.5 AS builder
+FROM golang:1.25.6 AS builder
 WORKDIR /src
 COPY . .
 # Build a static linux binary
