@@ -521,11 +521,11 @@ func buildConfig(argTime, argMem, argThreads, chunkSize, saltSize, keySize int, 
 }
 
 func showHelp() {
-	_ = fmt.Fprintln(os.Stdout, "Usage:")
-	_ = fmt.Fprintln(os.Stdout, " Encrypt a file: chachacrypt enc -i input.txt -o output.enc")
-	_ = fmt.Fprintln(os.Stdout, " Decrypt a file: chachacrypt dec -i input.enc -o decrypted.txt")
-	_ = fmt.Fprintln(os.Stdout, " Generate a password: chachacrypt pw -s 15")
-	_ = fmt.Fprintln(os.Stdout, " Rotate key: chachacrypt rotate -i input.enc -o output.enc -new-version 1")
+ _, _ = fmt.Fprintln(os.Stdout, "Usage:")
+ _, _ = fmt.Fprintln(os.Stdout, " Encrypt a file: chachacrypt enc -i input.txt -o output.enc")
+ _, _ = fmt.Fprintln(os.Stdout, " Decrypt a file: chachacrypt dec -i input.enc -o decrypted.txt")
+ _, _ = fmt.Fprintln(os.Stdout, " Generate a password: chachacrypt pw -s 15")
+ _, _ = fmt.Fprintln(os.Stdout, " Rotate key: chachacrypt rotate -i input.enc -o output.enc -new-version 1")
 }
 
 // validateFilePath: robust check for forbidden traversal segments.
