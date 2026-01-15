@@ -139,13 +139,13 @@ func (g *globalsManager) AddSalt(key string, data []byte) {
 	g.saltMu.Unlock()
 	g.saltWg.Add(1)
 	// background cleanup goroutine
-	go func() {
+	go func(key string) {
 		defer g.saltWg.Done()
 		time.Sleep(time.Hour)
 		g.saltMu.Lock()
 		delete(g.saltCache, key)
 		g.saltMu.Unlock()
-	}()
+	}(key)
 }
 
 func (g *globalsManager) HasSalt(key string) bool {
