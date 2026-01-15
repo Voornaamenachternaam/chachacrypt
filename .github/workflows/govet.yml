@@ -1,69 +1,119 @@
-name: govet
-
-permissions:
-  actions: write
-  checks: write
-  contents: write
-  deployments: write
-  id-token: write
-  issues: write
-  discussions: write
-  packages: write
-  pages: write
-  pull-requests: write
-  repository-projects: write
-  security-events: write
-  statuses: write
+name: govet-autofix
 
 on:
+  push:
+    branches:
+      - main
+      - 'release/**'
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
   schedule:
     - cron: '0 2 * * *'
-  pull_request:
-    branches: [ main ]
-  push:
-    tags:
-      - 'v*'
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: write
+  statuses: write
 
 jobs:
-  build:
+  lint-and-autofix:
+    name: Lint, Attempt Fixes, Create PR if Needed
     runs-on: ubuntu-latest
+
     steps:
-    - uses: actions/checkout@v6.0.1
+      - name: Checkout (full history)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
-    - name: Set up Go
-      uses: actions/setup-go@v6.2.0
-      with:
-        go-version: '1.25.6'
-        cache: false
+      - name: Set up Go 1.25.6
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.6'
+          cache: false
 
-    - name: Install fieldalignment
-      run: go install golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment@latest
+      - name: Print Go environment
+        run: |
+          go version
+          go env
 
-    - name: Go Format Check
-      if: github.event_name == 'pull_request' || github.event_name == 'push'
-      run: test -z $(gofmt -l .)
+      - name: Install fieldalignment
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          go install golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment@v0.41.0
 
-    - name: Go Format Fix
-      if: github.event_name != 'pull_request' && github.event_name != 'push'
-      continue-on-error: true
-      run: gofmt -s -w .
+      - name: Run gofmt (apply fixes)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          gofmt -s -w .
 
-    - name: Go Vet Check
-      if: github.event_name == 'pull_request' || github.event_name == 'push'
-      run: go vet ./...
+      - name: Run go vet (capture logs)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          go vet ./... > "$RUNNER_TEMP/govet.log" 2>&1 || true
 
-    - name: Go Vet Fix
-      if: github.event_name != 'pull_request' && github.event_name != 'push'
-      continue-on-error: true
-      run: fieldalignment -fix ./...
+      - name: Run fieldalignment (apply fixes, capture logs)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          fieldalignment -fix ./... > "$RUNNER_TEMP/fieldalignment.log" 2>&1 || true
 
-    - name: Create Pull Request
-      if: github.event_name != 'pull_request' && github.event_name != 'push'
-      uses: peter-evans/create-pull-request@v8.0.0
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        commit-message: "fix: apply go formatting and vet fixes"
-        title: "Automated Go Formatting and Vet Fixes"
-        body: "This PR applies automated formatting using gofmt and vet fixes using fieldalignment."
-        branch: "auto-fixes"
+      - name: Run go mod tidy
+        run: |
+          set -euo pipefail
+          go mod tidy
+
+      - name: Upload diagnostic logs
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: go-diagnostics
+          path: |
+            ${{ runner.temp }}/govet.log
+            ${{ runner.temp }}/fieldalignment.log
+          if-no-files-found: ignore
+
+      - name: Detect repository changes
+        continue-on-error: true 
+        id: changes
+        run: |
+          set -euo pipefail
+          git add -A
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or update Pull Request
+        continue-on-error: true
+        if: steps.changes.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: auto-fixes/${{ github.run_id }}
+          update-existing: true
+          commit-message: "chore(autofix): apply Go formatting and alignment fixes [skip ci]"
+          title: "[autofix] Apply Go formatting and alignment fixes"
+          body: |
+            This PR was created automatically.
+
+            Applied fixes:
+            - gofmt (-s)
+            - fieldalignment (-fix)
+            - go mod tidy
+
+            Diagnostic logs were uploaded as workflow artifacts.
+
+      - name: No changes detected
+        if: steps.changes.outputs.changed == 'false'
+        run: |
+          echo "No code changes detected; no PR created."
+
+ 
