@@ -1,71 +1,241 @@
-name: govet
+name: govet-autofix
 
-permissions:
-  actions: write
-  checks: write
-  contents: write
-  deployments: write
-  id-token: write
-  issues: write
-  discussions: write
-  packages: write
-  pages: write
-  pull-requests: write
-  repository-projects: write
-  security-events: write
-  statuses: write
-
+# Run on push, PRs, manual trigger and nightly schedule
 on:
+  push:
+    branches:
+      - main
+      - 'release/**'
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
   schedule:
-    - cron: '0 2 * * *'
-  pull_request:
-    branches: [ main ]
-  push:
-    tags:
-      - 'v*'
+    - cron: '0 2 * * *' # nightly at 02:00 UTC
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: write
+  statuses: write
 
 jobs:
-  build:
+  lint-and-autofix:
+    name: Lint, Attempt Fixes, Create PR (if issues)
     runs-on: ubuntu-latest
+    env:
+      REPORT_DIR: autofix-reports
     steps:
-    - uses: actions/checkout@v6.0.1
 
-    - name: Set up Go
-      uses: actions/setup-go@v6.2.0
-      with:
-        go-version: '1.25.6'
-        cache: false
+      - name: Checkout (full history)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
-    - name: Install fieldalignment
-      run: go install golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment@latest
+      - name: Set up Go 1.25.6
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.6'
+          cache: false
 
-    - name: Go Format Check
-      if: github.event_name == 'pull_request' || github.event_name == 'push'
-      continue-on-error: true
-      run: test -z $(gofmt -l .)
+      - name: Ensure report directory exists
+        run: |
+          set -euo pipefail
+          rm -rf "${REPORT_DIR}"
+          mkdir -p "${REPORT_DIR}"
 
-    - name: Go Format Fix
-      if: github.event_name != 'pull_request' && github.event_name != 'push'
-      continue-on-error: true
-      run: gofmt -s -w .
+      - name: Print Go environment
+        run: |
+          go version
+          go env
 
-    - name: Go Vet Check
-      if: github.event_name == 'pull_request' || github.event_name == 'push'
-      continue-on-error: true
-      run: go vet ./...
+      - name: Install fieldalignment (explicit version)
+        run: |
+          set -euo pipefail
+          # use a stable go/tools version available by Jan 2026; adjust if you prefer another tag
+          go install golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment@v0.41.0
 
-    - name: Go Vet Fix
-      if: github.event_name != 'pull_request' && github.event_name != 'push'
-      continue-on-error: true
-      run: fieldalignment -fix ./...
+      - name: Capture gofmt list (files that need formatting)
+        id: gofmt-list
+        run: |
+          set -euo pipefail
+          # list files that would be changed by gofmt
+          gofmt -s -l . > "${REPORT_DIR}/gofmt-files.txt" || true
+          # write a short summary for PR body
+          if [ -s "${REPORT_DIR}/gofmt-files.txt" ]; then
+            echo "gofmt_problem=true" >> $GITHUB_OUTPUT
+          else
+            echo "gofmt_problem=false" >> $GITHUB_OUTPUT
+          fi
 
-    - name: Create Pull Request
-      if: github.event_name != 'pull_request' && github.event_name != 'push'
-      uses: peter-evans/create-pull-request@v8
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        commit-message: "fix: apply go formatting and vet fixes"
-        title: "Automated Go Formatting and Vet Fixes"
-        body: "This PR applies automated formatting using gofmt and vet fixes using fieldalignment."
-        branch: "auto-fixes"
+      - name: Try to apply gofmt fixes (won't fail the job)
+        id: gofmt-fix
+        run: |
+          set -euo pipefail
+          # Attempt to rewrite files in place; capture stderr/stdout to report file.
+          { gofmt -s -w . 2>&1 || true; } > "${REPORT_DIR}/gofmt-fix.txt" || true
+          # make results visible at a glance
+          if [ -s "${REPORT_DIR}/gofmt-fix.txt" ]; then
+            echo "gofmt_fix_output=true" >> $GITHUB_OUTPUT
+          else
+            echo "gofmt_fix_output=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run go vet and capture output
+        id: govet
+        run: |
+          set -euo pipefail
+          # run go vet; capture output even if it fails
+          { go vet ./... 2>&1 || true; } > "${REPORT_DIR}/govet.txt" || true
+          if [ -s "${REPORT_DIR}/govet.txt" ]; then
+            echo "govet_problem=true" >> $GITHUB_OUTPUT
+          else
+            echo "govet_problem=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run fieldalignment -fix and capture output
+        id: fieldalignment
+        run: |
+          set -euo pipefail
+          # fieldalignment -fix tries to reorder struct fields to reduce padding
+          { fieldalignment -fix ./... 2>&1 || true; } > "${REPORT_DIR}/fieldalignment.txt" || true
+          if [ -s "${REPORT_DIR}/fieldalignment.txt" ]; then
+            echo "fieldalignment_problem=true" >> $GITHUB_OUTPUT
+          else
+            echo "fieldalignment_problem=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run gofmt again and capture remaining differences
+        run: |
+          set -euo pipefail
+          gofmt -s -l . > "${REPORT_DIR}/gofmt-files-after.txt" || true
+
+      - name: Run go mod tidy (capture diff)
+        run: |
+          set -euo pipefail
+          # attempt tidy; record any output for the report
+          { go mod tidy 2>&1 || true; } > "${REPORT_DIR}/go-mod-tidy.txt" || true
+
+      - name: Prepare git for potential commit
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # ensure we can push from the runner using the token
+          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+
+      - name: Detect repo changes or non-empty reports (decide to create PR)
+        id: detect
+        run: |
+          set -euo pipefail
+          # Stage everything (fixes + reports)
+          git add -A || true
+
+          # detect git changes
+          repo_changed=false
+          if git diff --cached --quiet && git diff --quiet; then
+            repo_changed=false
+          else
+            repo_changed=true
+          fi
+          echo "repo_changed=${repo_changed}" >> $GITHUB_OUTPUT
+
+          # detect non-empty report files
+          report_found=false
+          for f in ${REPORT_DIR}/*.txt; do
+            [ -e "$f" ] || continue
+            if [ -s "$f" ]; then
+              report_found=true
+              break
+            fi
+          done
+          echo "report_found=${report_found}" >> $GITHUB_OUTPUT
+
+          # overall decision
+          if [ "${repo_changed}" = "false" ] && [ "${report_found}" = "false" ]; then
+            echo "create_pr=false" >> $GITHUB_OUTPUT
+          else
+            echo "create_pr=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Show summary (for logs)
+        if: steps.detect.outputs.create_pr == 'true'
+        run: |
+          echo "Repository changed: ${{ steps.detect.outputs.repo_changed }}"
+          echo "Non-empty reports found: ${{ steps.detect.outputs.report_found }}"
+          echo "gofmt files before:"
+          sed -n '1,120p' "${REPORT_DIR}/gofmt-files.txt" || true
+          echo "gofmt fixes output (first 200 lines):"
+          sed -n '1,200p' "${REPORT_DIR}/gofmt-fix.txt" || true
+          echo "govet (first 200 lines):"
+          sed -n '1,200p' "${REPORT_DIR}/govet.txt" || true
+          echo "fieldalignment (first 200 lines):"
+          sed -n '1,200p' "${REPORT_DIR}/fieldalignment.txt" || true
+
+      - name: Create branch, commit fixes+reports and push (if needed)
+        if: steps.detect.outputs.create_pr == 'true'
+        env:
+          BRANCH_PREFIX: auto-fixes
+        run: |
+          set -euo pipefail
+          BRANCH="${BRANCH_PREFIX}/${GITHUB_RUN_ID}-${GITHUB_SHA::7}"
+          echo "Creating branch ${BRANCH}"
+          git checkout -b "${BRANCH}"
+          # ensure report folder is tracked
+          git add -A "${REPORT_DIR}" || true
+          # if there are changes, commit them; if commit fails because nothing to commit, ignore
+          if git diff --cached --quiet && git diff --quiet; then
+            echo "No staged changes to commit (unexpected because detect said create_pr=true)."
+          else
+            git commit -m "chore(autofix): apply automatic gofmt/fieldalignment fixes and add diagnostic reports [skip ci]" || true
+          fi
+          # push the branch (force to ensure latest state)
+          git push --force --set-upstream origin "${BRANCH}"
+
+          # export branch name for the PR action
+          echo "branch=${BRANCH}" >> $GITHUB_OUTPUT
+
+      - name: Create or update Pull Request with fixes/reports
+        if: steps.detect.outputs.create_pr == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ steps.create-branch.outputs.branch || steps.detect.outputs.branch || github.ref_name }}
+          title: |
+            [autofix] apply automatic Go fixes and diagnostics — run #${{ github.run_id }}
+          body: |
+            This PR was opened automatically by the govet-autofix workflow.
+
+            **Summary**
+            - repo_changed: ${{ steps.detect.outputs.repo_changed }}
+            - report_found: ${{ steps.detect.outputs.report_found }}
+            - run id: ${{ github.run_id }}
+            - triggered by: ${{ github.event_name }}
+
+            **What I attempted**
+            - `gofmt -s -w .` (go formatting)
+            - `fieldalignment -fix ./...` (struct field order adjustments)
+            - `go vet ./...` (static checks)
+            - `go mod tidy`
+
+            **Included**
+            - diagnostic files under `autofix-reports/` with the outputs of the commands above.
+
+            If you are a repository maintainer and this PR came from a fork, please allow the workflow permissions or re-run from the main repository to allow pushing fixes.
+
+            _If this PR only contains diagnostic files and the automatic fixers couldn't change source code, it is because the source contains syntax/compile issues that require a human fix._
+          commit-message: "chore(autofix): apply automatic go fixes and include diagnostic reports [skip ci]"
+          branch: ${{ steps.create-branch.outputs.branch || format('auto-fixes/{0}-{1}', github.run_id, github.sha[0:7]) }}
+          update-existing: true
+          labels: |
+            autobuild
+            autofix
+
+      - name: No issues detected — exit
+        if: steps.detect.outputs.create_pr == 'false'
+        run: |
+          echo "No fixes or reports to create a PR for. Exiting."
+
+
+ 
