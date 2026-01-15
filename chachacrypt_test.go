@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -453,7 +454,7 @@ func TestContextCancellation(t *testing.T) {
 	err := encryptFile(ctx, inputFile, outputFile, pw, cfg)
 	if err == nil {
 		t.Error("Expected error on cancelled context")
-	} else if err != context.Canceled {
+	} else if !errors.Is(err, context.Canceled) {
 		// It might return a wrapped error, check Is
 		if !strings.Contains(err.Error(), "context canceled") {
 			t.Errorf("Expected context canceled error, got: %v", err)
@@ -534,7 +535,7 @@ func TestConcurrentProcessing(t *testing.T) {
 	defer pw.Close()
 	cfg := getTestConfig()
 
-	for i := 0; i < count; i++ {
+	for i := range count {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
