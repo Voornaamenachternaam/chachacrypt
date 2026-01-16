@@ -844,15 +844,15 @@ func parsePreset(preset string) (uint32, uint32, uint8, error) {
 }
 
 type runConfig struct {
-	enc, dec, rot    bool
-	in, out          string
-	force            bool
-	allowAbsolute    bool
-	chunkSize        uint32
-	argTime, argMem  uint32
-	argThreads       uint8
-	keyVersion       uint32
-	verbose          bool
+	enc, dec, rot   bool
+	in, out         string
+	force           bool
+	allowAbsolute   bool
+	chunkSize       uint32
+	argTime, argMem uint32
+	argThreads      uint8
+	keyVersion      uint32
+	verbose         bool
 }
 
 func parseFlags() (runConfig, error) {
