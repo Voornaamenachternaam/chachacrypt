@@ -21,7 +21,6 @@ permissions:
 jobs:
   lint-and-autofix:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -35,71 +34,81 @@ jobs:
           go-version: '1.25.6'
           cache: false
 
-      - name: Print Go info
-        run: |
-          go version
-          go env
-
       - name: Install fieldalignment
         run: |
           set -euo pipefail
           go install golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment@v0.41.0
 
-      - name: Pre-fix checks
+      - name: Run gofmt (apply formatting)
         run: |
           set -euo pipefail
           gofmt -s -w . || true
-          go vet ./... > "$RUNNER_TEMP/govet-pre.log" 2>&1 || true
-          fieldalignment -fix ./... > "$RUNNER_TEMP/fieldalignment-pre.log" 2>&1 || true
-          go mod tidy || true
 
-      - name: Create autofix script
+      - name: Create conservative autofix script
         run: |
           cat > "$RUNNER_TEMP/attempt_autofix.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-tmp="$(mktemp)"
+tmp="$(mktemp -t autofix.XXXXXX)" || tmp="/tmp/autofix.$$"
 modified=0
 
-process_file() {
+process_go() {
   f="$1"
-  case "$f" in */vendor/*|*_generated.go|*generated.go) return ;; esac
-  if grep -q $'\x00' "$f" 2>/dev/null; then tr -d '\000' < "$f" > "$tmp" && mv "$tmp" "$f" && modified=1; fi
-  if grep -q $'\r' "$f" 2>/dev/null; then sed -i 's/\r$//' "$f" && modified=1; fi
-  if grep -q '^vmodule[[:space:]]' "$f" 2>/dev/null; then sed -i '/^vmodule[[:space:]]/d' "$f" && modified=1; fi
-  if head -n60 "$f" | grep -Eq '^(module[[:space:]]+|go[[:space:]]+[0-9]|toolchain[[:space:]]+)'; then
-    awk 'NR<=60{ if (/^(module[[:space:]]+|go[[:space:]]+[0-9]|toolchain[[:space:]]+)/) next } { print }' "$f" > "$tmp"
-    tail -n +61 "$f" >> "$tmp" 2>/dev/null || true
-    if ! cmp -s "$f" "$tmp"; then mv "$tmp" "$f"; modified=1; fi
+  case "$f" in
+    */vendor/*|*_generated.go|*generated.go) return ;;
+  esac
+
+  # remove vmodule lines and stray toolchain/module/go headers in source files
+  if grep -q '^vmodule[[:space:]]' "$f" 2>/dev/null; then
+    sed -i '/^vmodule[[:space:]]/d' "$f" && modified=1 || true
   fi
+
+  # remove simple merge conflict markers
   if grep -q '^<<<<<<< ' "$f" 2>/dev/null || grep -q '^>>>>>>> ' "$f" 2>/dev/null; then
-    awk 'BEGIN{skip=0} /^<<<<<<< /{skip=1; next} /^>>>>>>> /{skip=0; next} skip==0 { print }' "$f" > "$tmp"
-    if ! cmp -s "$f" "$tmp"; then mv "$tmp" "$f"; modified=1; fi
+    awk 'BEGIN{skip=0}
+         /^<<<<<<< /{skip=1; next}
+         /^>>>>>>> /{skip=0; next}
+         skip==0{print}' "$f" > "$tmp" && mv "$tmp" "$f" && modified=1 || true
   fi
+
+  # normalize CRLF and NULs
+  if grep -q $'\r' "$f" 2>/dev/null; then sed -i 's/\r$//' "$f" && modified=1 || true; fi
+  if grep -q $'\x00' "$f" 2>/dev/null; then tr -d '\000' < "$f" > "$tmp" && mv "$tmp" "$f" && modified=1 || true; fi
+
+  # run gofmt on file
   gofmt -s -w "$f" || true
 }
 
-export -f process_file
-find . -type f -name '*.go' -print0 | xargs -0 -n1 -I{} bash -c 'process_file "$1"' _ {}
+export -f process_go
+
+find . -type f -name '*.go' -print0 | xargs -0 -n1 -I{} bash -c 'process_go "$0"' {}
 
 if [ "$modified" -ne 0 ]; then
-  git add -A
+  git add -A || true
 fi
-rm -f "$tmp"
+
+rm -f "$tmp" || true
 EOF
           chmod +x "$RUNNER_TEMP/attempt_autofix.sh"
 
-      - name: Run autofix
+      - name: Run conservative autofixer
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/attempt_autofix.sh" || true
 
-      - name: Post-fix checks
+      - name: Run fieldalignment fixes
         run: |
           set -euo pipefail
-          gofmt -s -w . || true
-          go vet ./... > "$RUNNER_TEMP/govet-post.log" 2>&1 || true
-          fieldalignment -fix ./... > "$RUNNER_TEMP/fieldalignment-post.log" 2>&1 || true
+          fieldalignment -fix ./... > "${RUNNER_TEMP}/fieldalignment.log" 2>&1 || true
+
+      - name: Run govet (capture log)
+        run: |
+          set -euo pipefail
+          go vet ./... > "${RUNNER_TEMP}/govet.log" 2>&1 || true
+
+      - name: Run go mod tidy
+        run: |
+          set -euo pipefail
           go mod tidy || true
 
       - name: Upload diagnostic logs
@@ -107,27 +116,25 @@ EOF
         with:
           name: go-diagnostics
           path: |
-            ${{ runner.temp }}/govet-pre.log
-            ${{ runner.temp }}/fieldalignment-pre.log
-            ${{ runner.temp }}/govet-post.log
-            ${{ runner.temp }}/fieldalignment-post.log
+            ${{ runner.temp }}/fieldalignment.log
+            ${{ runner.temp }}/govet.log
           if-no-files-found: ignore
 
-      - name: Prepare commit & detect changes
+      - name: Prepare commit and detect changes
         id: changes
         run: |
           set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A || true
-          if git diff --cached --quiet && git diff --quiet; then
+          if git diff --quiet --exit-code && git diff --cached --quiet --exit-code; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git commit -m "chore(autofix): apply formatting and safe repairs [skip ci]" || true
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create or update PR
+      - name: Create or update Pull Request
         if: steps.changes.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v8
         with:
