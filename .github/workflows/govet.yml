@@ -20,23 +20,22 @@ permissions:
 
 jobs:
   lint-and-autofix:
-    name: Lint, Attempt Fixes, Create PR if Needed
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository (full history)
+      - name: Checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Set up Go 1.25.6
+      - name: Setup Go
         uses: actions/setup-go@v6
         with:
           go-version: '1.25.6'
           cache: false
 
-      - name: Print Go environment
+      - name: Print Go info
         run: |
           go version
           go env
@@ -46,122 +45,67 @@ jobs:
           set -euo pipefail
           go install golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment@v0.41.0
 
-      - name: Run gofmt (first pass)
+      - name: Pre-fix checks (gofmt, govet, fieldalignment)
         run: |
           set -euo pipefail
           gofmt -s -w . || true
-
-      - name: Run go vet (capture pre-fix logs)
-        run: |
-          set -euo pipefail
           go vet ./... > "$RUNNER_TEMP/govet-pre.log" 2>&1 || true
-
-      - name: Run fieldalignment (first pass, capture logs)
-        run: |
-          set -euo pipefail
           fieldalignment -fix ./... > "$RUNNER_TEMP/fieldalignment-pre.log" 2>&1 || true
-
-      - name: Run go mod tidy (first pass)
-        run: |
-          set -euo pipefail
           go mod tidy || true
 
-      - name: Create conservative auto-fixer script
+      - name: Create conservative auto-fix script
         run: |
           cat > "$RUNNER_TEMP/attempt_autofix.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-
-tmpfile="$(mktemp)"
-cleanup() { rm -f "$tmpfile"; }
-trap cleanup EXIT
-
+tmp="$(mktemp)"
 modified=0
 
-clean_file() {
-  local f="$1"
-  if grep -q $'\x00' "$f" >/dev/null 2>&1; then
-    tr -d '\000' < "$f" > "$tmpfile"
-    mv "$tmpfile" "$f"
+process_file() {
+  f="$1"
+  # skip vendor and generated files
+  case "$f" in
+    */vendor/*|*_generated.go|*generated.go) return ;;
+  esac
+  # normalize nulls and CRLF
+  if grep -q $'\x00' "$f" 2>/dev/null; then
+    tr -d '\000' < "$f" > "$tmp"
+    mv "$tmp" "$f"
     modified=1
   fi
-  if grep -q $'\r' "$f" >/dev/null 2>&1; then
+  if grep -q $'\r' "$f" 2>/dev/null; then
     sed -i 's/\r$//' "$f"
     modified=1
   fi
-}
-
-remove_merge_conflicts() {
-  local f="$1"
-  if grep -q '^<<<<<<< ' "$f" >/dev/null 2>&1 || grep -q '^>>>>>>>' "$f" >/dev/null 2>&1; then
+  # remove vmodule lines anywhere
+  if grep -q '^vmodule[[:space:]]' "$f" 2>/dev/null; then
+    sed -i '/^vmodule[[:space:]]/d' "$f"
+    modified=1
+  fi
+  # remove leading module/go/toolchain lines within first 60 lines
+  if head -n60 "$f" | grep -Eq '^(module[[:space:]]+|go[[:space:]]+[0-9]|toolchain[[:space:]]+)'; then
+    awk 'NR<=60{ if (/^(module[[:space:]]+|go[[:space:]]+[0-9]|toolchain[[:space:]]+)/) next } { print }' "$f" > "$tmp"
+    tail -n +61 "$f" >> "$tmp" 2>/dev/null || true
+    if ! cmp -s "$f" "$tmp"; then mv "$tmp" "$f"; modified=1; fi
+  fi
+  # remove simple merge conflict blocks
+  if grep -q '^<<<<<<< ' "$f" 2>/dev/null || grep -q '^>>>>>>>' "$f" 2>/dev/null; then
     awk 'BEGIN{skip=0}
          /^<<<<<<< /{skip=1; next}
          /^>>>>>>> /{skip=0; next}
-         skip==0 { print }
-    ' "$f" > "$tmpfile"
-    if ! cmp -s "$f" "$tmpfile"; then
-      mv "$tmpfile" "$f"
-      modified=1
-    fi
+         skip==0 { print }' "$f" > "$tmp"
+    if ! cmp -s "$f" "$tmp"; then mv "$tmp" "$f"; modified=1; fi
   fi
+  # run gofmt per-file
+  gofmt -s -w "$f" || true
 }
 
-strip_mod_like_lines() {
-  local f="$1"
-  if awk 'NR<=60 && (/^module[[:space:]]+/ || /^go[[:space:]]+[0-9]/ || /^toolchain[[:space:]]+/ || /^vmodule[[:space:]]+/) { print; exit 0 }' "$f" | grep -q .; then
-    awk 'NR<=60{ if (/^module[[:space:]]+/ || /^go[[:space:]]+[0-9]/ || /^toolchain[[:space:]]+/ || /^vmodule[[:space:]]+/) next } { print }' "$f" > "$tmpfile"
-    tail -n +61 "$f" >> "$tmpfile"
-    if ! cmp -s "$f" "$tmpfile"; then
-      mv "$tmpfile" "$f"
-      modified=1
-    fi
-  fi
-}
-
-remove_vmodule_lines() {
-  local f="$1"
-  if grep -q '^vmodule[[:space:]]' "$f" >/dev/null 2>&1; then
-    sed -e '/^vmodule[[:space:]]/d' "$f" > "$tmpfile"
-    mv "$tmpfile" "$f"
-    modified=1
-  fi
-}
-
-fix_for_range_n() {
-  local f="$1"
-  if grep -qE '\bfor[[:space:]]+range[[:space:]]+n[[:space:]]*\{' "$f"; then
-    if [ "$(stat -c%s "$f")" -le $((100*1024)) ]; then
-      perl -0777 -pe 's/\bfor\s+range\s+n\s*\{/for i := 0; i < n; i++ {/g' "$f" > "$tmpfile"
-      if ! cmp -s "$f" "$tmpfile"; then
-        mv "$tmpfile" "$f"
-        modified=1
-      fi
-    fi
-  fi
-}
-
-find . -type f -name '*.go' -print0 | while IFS= read -r -d '' file; do
-  case "$file" in
-    */vendor/*|*_generated.go|*generated.go) continue ;;
-  esac
-
-  clean_file "$file"
-  remove_merge_conflicts "$file"
-  strip_mod_like_lines "$file"
-  remove_vmodule_lines "$file"
-  fix_for_range_n "$file"
-
-  if ! gofmt -s -w "$file"; then
-    true
-  fi
-done
-
+export -f process_file
+find . -type f -name '*.go' -print0 | xargs -0 -n1 -I{} bash -c 'process_file "{}"'
 if [ "$modified" -ne 0 ]; then
   git add -A
-  echo "autofix: changes staged"
-else
-  echo "autofix: no changes"
 fi
+rm -f "$tmp"
 EOF
           chmod +x "$RUNNER_TEMP/attempt_autofix.sh"
 
@@ -170,27 +114,15 @@ EOF
           set -euo pipefail
           "$RUNNER_TEMP/attempt_autofix.sh" || true
 
-      - name: Run gofmt (second pass)
+      - name: Post-fix checks (gofmt, govet, fieldalignment)
         run: |
           set -euo pipefail
           gofmt -s -w . || true
-
-      - name: Run go vet (capture post-fix logs)
-        run: |
-          set -euo pipefail
           go vet ./... > "$RUNNER_TEMP/govet-post.log" 2>&1 || true
-
-      - name: Run fieldalignment (second pass, capture logs)
-        run: |
-          set -euo pipefail
           fieldalignment -fix ./... > "$RUNNER_TEMP/fieldalignment-post.log" 2>&1 || true
-
-      - name: Run go mod tidy (second pass)
-        run: |
-          set -euo pipefail
           go mod tidy || true
 
-      - name: Upload diagnostic logs (pre/post)
+      - name: Upload diagnostic logs
         uses: actions/upload-artifact@v6.0.0
         with:
           name: go-diagnostics
@@ -201,7 +133,7 @@ EOF
             ${{ runner.temp }}/fieldalignment-post.log
           if-no-files-found: ignore
 
-      - name: Detect repository changes (staged)
+      - name: Prepare commit and detect changes
         id: changes
         run: |
           set -euo pipefail
@@ -209,30 +141,19 @@ EOF
           if git diff --cached --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
+            git commit -m "chore(autofix): apply formatting and safe repairs [skip ci]" || true
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create or update Pull Request (if changes)
+      - name: Create or update PR
         if: steps.changes.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: auto-fixes/${{ github.run_id }}
+          base: main
           update-existing: 'true'
-          commit-message: "chore(autofix): apply safe automatic repairs and formatting [skip ci]"
+          commit-message: "chore(autofix): apply formatting and safe repairs [skip ci]"
           title: "[autofix] Apply safe automatic repairs and formatting"
           body: |
-            This PR was created automatically if safe repairs were made.
-
-            Actions performed by the workflow:
-            - conservative auto-fix heuristics (merge conflict removal, stray go.mod/toolchain lines, null-byte removal, a small set of safe text rewrites)
-            - gofmt -s -w
-            - fieldalignment -fix (attempted)
-            - go mod tidy
-
-            Diagnostic logs (pre/post) are attached as workflow artifacts.
-
-      - name: No auto-fix changes detected
-        if: steps.changes.outputs.changed == 'false'
-        run: |
-          echo "No auto-fixable changes detected; no PR created."
+            Automatic fixes applied where safe. Diagnostic logs are attached as workflow artifacts.
