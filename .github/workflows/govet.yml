@@ -36,34 +36,40 @@ jobs:
           cache: false
 
       - name: Print Go environment
+        continue-on-error: true
         run: |
           go version
           go env
 
       - name: Install fieldalignment
+        continue-on-error: true
         run: |
           set -euo pipefail
           go install golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment@v0.41.0
 
       - name: Run gofmt
+        continue-on-error: true
         run: |
           set -euo pipefail
-          gofmt -s -w . || true
+          gofmt -s -w .
 
       - name: Run fieldalignment (fix)
+        continue-on-error: true
         run: |
           set -euo pipefail
-          fieldalignment -fix ./... > "${RUNNER_TEMP}/fieldalignment.log" 2>&1 || true
+          fieldalignment -fix ./... > "${RUNNER_TEMP}/fieldalignment.log" 2>&1
 
       - name: Run go vet
+        continue-on-error: true
         run: |
           set -euo pipefail
-          go vet ./... > "${RUNNER_TEMP}/govet.log" 2>&1 || true
+          go vet ./... > "${RUNNER_TEMP}/govet.log" 2>&1
 
       - name: Run go mod tidy
+        continue-on-error: true
         run: |
           set -euo pipefail
-          go mod tidy || true
+          go mod tidy
 
       - name: Upload diagnostic logs
         uses: actions/upload-artifact@v6.0.0
