@@ -115,28 +115,28 @@ func sink(b []byte) {
 }
 
 type FileHeader struct {
-	Magic      [len(MagicNumber)]byte
-	Version    byte
+	Timestamp  uint64
 	ArgonTime  uint32
 	ArgonMem   uint32
-	ArgonUtil  uint8
 	KeySize    uint32
 	SaltSize   uint32
 	NonceSize  uint32
-	KeyVersion byte
-	Timestamp  uint64
 	Integrity  [32]byte
+	Magic      [len(MagicNumber)]byte
 	Padding    [7]byte
+	Version    byte
+	ArgonUtil  uint8
+	KeyVersion byte
 }
 
 type config struct {
+	ChunkSize  int
+	NonceSize  int
 	SaltSize   uint32
 	KeySize    uint32
 	KeyTime    uint32
 	KeyMemory  uint32
 	KeyThreads uint8
-	ChunkSize  int
-	NonceSize  int
 	KeyVersion byte
 }
 
