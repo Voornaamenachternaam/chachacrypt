@@ -59,7 +59,7 @@ const (
 const headerTotalSize = magicLen + 2 + 4 + 8 + 4 + 4 + 1 + saltSize + 4 + 2 + reservedLen + headerMACSize
 
 const (
-	// presets in KiB units for Argon2
+	// presets in KiB units for Argon2.
 	defaultArgonTime    = 3
 	defaultArgonMemory  = 128 * 1024
 	defaultArgonThreads = 4
@@ -173,7 +173,7 @@ func serializeHeaderCanonical(hdr *fileHeader) ([]byte, error) {
 
 func serializeHeaderForMAC(hdr *fileHeader) ([]byte, error) {
 	tmp := *hdr
-	for i := 0; i < headerMACSize; i++ {
+	for i := range headerMACSize {
 		tmp.HeaderMAC[i] = 0
 	}
 	return serializeHeaderCanonical(&tmp)
@@ -349,7 +349,16 @@ func readChunkFrame(r io.Reader) ([]byte, []byte, error) {
 
 /*** Chunk processors (small, no-named returns) ***/
 
-func processOneEncrypt(ctx context.Context, in io.Reader, out io.Writer, hdr *fileHeader, aead cipherAEAD, buf []byte, idx uint64, verbose bool) (bool, error) {
+func processOneEncrypt(
+	ctx context.Context,
+	in io.Reader,
+	out io.Writer,
+	hdr *fileHeader,
+	aead cipherAEAD,
+	buf []byte,
+	idx uint64,
+	verbose bool,
+) (bool, error) {
 	select {
 	case <-ctx.Done():
 		return true, ctx.Err()
@@ -386,7 +395,14 @@ func processOneEncrypt(ctx context.Context, in io.Reader, out io.Writer, hdr *fi
 	return false, nil
 }
 
-func encryptChunks(ctx context.Context, in io.Reader, out io.Writer, hdr *fileHeader, aead cipherAEAD, verbose bool) error {
+func encryptChunks(
+	ctx context.Context,
+	in io.Reader,
+	out io.Writer,
+	hdr *fileHeader,
+	aead cipherAEAD,
+	verbose bool,
+) error {
 	buf := make([]byte, hdr.ChunkSize)
 	var idx uint64
 	for {
@@ -401,7 +417,15 @@ func encryptChunks(ctx context.Context, in io.Reader, out io.Writer, hdr *fileHe
 	}
 }
 
-func processOneDecrypt(ctx context.Context, in io.Reader, out io.Writer, hdr *fileHeader, aead cipherAEAD, idx uint64, verbose bool) (bool, error) {
+func processOneDecrypt(
+	ctx context.Context,
+	in io.Reader,
+	out io.Writer,
+	hdr *fileHeader,
+	aead cipherAEAD,
+	idx uint64,
+	verbose bool,
+) (bool, error) {
 	select {
 	case <-ctx.Done():
 		return true, ctx.Err()
@@ -431,7 +455,14 @@ func processOneDecrypt(ctx context.Context, in io.Reader, out io.Writer, hdr *fi
 	return false, nil
 }
 
-func decryptChunks(ctx context.Context, in io.Reader, out io.Writer, hdr *fileHeader, aead cipherAEAD, verbose bool) error {
+func decryptChunks(
+	ctx context.Context,
+	in io.Reader,
+	out io.Writer,
+	hdr *fileHeader,
+	aead cipherAEAD,
+	verbose bool,
+) error {
 	var idx uint64
 	for {
 		done, err := processOneDecrypt(ctx, in, out, hdr, aead, idx, verbose)
@@ -445,7 +476,17 @@ func decryptChunks(ctx context.Context, in io.Reader, out io.Writer, hdr *fileHe
 	}
 }
 
-func processOneRotate(ctx context.Context, in io.ReadSeeker, out io.Writer, origHdr *fileHeader, oldAEAD cipherAEAD, newHdr *fileHeader, newAEAD cipherAEAD, idx uint64, verbose bool) (bool, error) {
+func processOneRotate(
+	ctx context.Context,
+	in io.ReadSeeker,
+	out io.Writer,
+	origHdr *fileHeader,
+	oldAEAD cipherAEAD,
+	newHdr *fileHeader,
+	newAEAD cipherAEAD,
+	idx uint64,
+	verbose bool,
+) (bool, error) {
 	select {
 	case <-ctx.Done():
 		return true, ctx.Err()
@@ -484,7 +525,16 @@ func processOneRotate(ctx context.Context, in io.ReadSeeker, out io.Writer, orig
 	return false, nil
 }
 
-func rotateChunks(ctx context.Context, in io.ReadSeeker, out io.Writer, origHdr *fileHeader, oldAEAD cipherAEAD, newHdr *fileHeader, newAEAD cipherAEAD, verbose bool) error {
+func rotateChunks(
+	ctx context.Context,
+	in io.ReadSeeker,
+	out io.Writer,
+	origHdr *fileHeader,
+	oldAEAD cipherAEAD,
+	newHdr *fileHeader,
+	newAEAD cipherAEAD,
+	verbose bool,
+) error {
 	if _, err := in.Seek(int64(headerTotalSize), io.SeekStart); err != nil {
 		return fmt.Errorf("seek input: %w", err)
 	}
@@ -503,7 +553,13 @@ func rotateChunks(ctx context.Context, in io.ReadSeeker, out io.Writer, origHdr 
 
 /*** High-level helpers ***/
 
-func buildHeaderAndKeysForEncrypt(password []byte, chunkSize uint32, argonTime, argonMem uint32, argonThreads uint8, keyVersion uint32) (*fileHeader, []byte, []byte, error) {
+func buildHeaderAndKeysForEncrypt(
+	password []byte,
+	chunkSize uint32,
+	argonTime, argonMem uint32,
+	argonThreads uint8,
+	keyVersion uint32,
+) (*fileHeader, []byte, []byte, error) {
 	var hdr fileHeader
 	copy(hdr.Magic[:], []byte(MagicString))
 	hdr.Version = fileVersion
@@ -534,7 +590,16 @@ func buildHeaderAndKeysForEncrypt(password []byte, chunkSize uint32, argonTime, 
 	return &hdr, encKey, macKey, nil
 }
 
-func encryptFile(ctx context.Context, inPath, outPath string, force bool, chunkSize uint32, argonTime, argonMem uint32, argonThreads uint8, keyVersion uint32, verbose bool) error {
+func encryptFile(
+	ctx context.Context,
+	inPath, outPath string,
+	force bool,
+	chunkSize uint32,
+	argonTime, argonMem uint32,
+	argonThreads uint8,
+	keyVersion uint32,
+	verbose bool,
+) error {
 	in, err := os.Open(inPath)
 	if err != nil {
 		return fmt.Errorf("open input: %w", err)
@@ -554,7 +619,14 @@ func encryptFile(ctx context.Context, inPath, outPath string, force bool, chunkS
 	}
 	zero(pw2)
 
-	hdr, encKey, macKey, err := buildHeaderAndKeysForEncrypt(pw1, chunkSize, argonTime, argonMem, argonThreads, keyVersion)
+	hdr, encKey, macKey, err := buildHeaderAndKeysForEncrypt(
+		pw1,
+		chunkSize,
+		argonTime,
+		argonMem,
+		argonThreads,
+		keyVersion,
+	)
 	zero(pw1)
 	if err != nil {
 		return err
@@ -642,7 +714,11 @@ func decryptFile(ctx context.Context, inPath, outPath string, force bool, verbos
 	return atomicWriteReplace(dir, outPath, writer, force)
 }
 
-func prepareRotationKeys(pwNew []byte, newArgonTime, newArgonMem uint32, newArgonThreads uint8) (*fileHeader, []byte, []byte, error) {
+func prepareRotationKeys(
+	pwNew []byte,
+	newArgonTime, newArgonMem uint32,
+	newArgonThreads uint8,
+) (*fileHeader, []byte, []byte, error) {
 	var hdr fileHeader
 	copy(hdr.Magic[:], []byte(MagicString))
 	hdr.Version = fileVersion
@@ -669,7 +745,15 @@ func prepareRotationKeys(pwNew []byte, newArgonTime, newArgonMem uint32, newArgo
 	return &hdr, encKey, macKey, nil
 }
 
-func rotateFile(ctx context.Context, inPath, outPath string, force bool, newArgonTime, newArgonMem uint32, newArgonThreads uint8, newKeyVersion uint32, verbose bool) error {
+func rotateFile(
+	ctx context.Context,
+	inPath, outPath string,
+	force bool,
+	newArgonTime, newArgonMem uint32,
+	newArgonThreads uint8,
+	newKeyVersion uint32,
+	verbose bool,
+) error {
 	in, err := os.Open(inPath)
 	if err != nil {
 		return fmt.Errorf("open input: %w", err)
@@ -690,7 +774,13 @@ func rotateFile(ctx context.Context, inPath, outPath string, force bool, newArgo
 
 	pwOld := readPasswordPrompt("Current password: ")
 	defer zero(pwOld)
-	masterOld := deriveMasterKeyArgon(pwOld, origHdr.Salt[:], origHdr.ArgonTime, origHdr.ArgonMemory, origHdr.ArgonThreads)
+	masterOld := deriveMasterKeyArgon(
+		pwOld,
+		origHdr.Salt[:],
+		origHdr.ArgonTime,
+		origHdr.ArgonMemory,
+		origHdr.ArgonThreads,
+	)
 	oldEncKey, oldMacKey, err := deriveEncAndMacKeys(masterOld)
 	zero(masterOld)
 	if err != nil {
@@ -844,15 +934,15 @@ func parsePreset(preset string) (uint32, uint32, uint8, error) {
 }
 
 type runConfig struct {
-	enc, dec, rot    bool
-	in, out          string
-	force            bool
-	allowAbsolute    bool
-	chunkSize        uint32
-	argTime, argMem  uint32
-	argThreads       uint8
-	keyVersion       uint32
-	verbose          bool
+	enc, dec, rot   bool
+	in, out         string
+	force           bool
+	allowAbsolute   bool
+	chunkSize       uint32
+	argTime, argMem uint32
+	argThreads      uint8
+	keyVersion      uint32
+	verbose         bool
 }
 
 func parseFlags() (runConfig, error) {
@@ -862,7 +952,11 @@ func parseFlags() (runConfig, error) {
 	rot := flag.Bool("r", false, "rotate (re-encrypt with new password/params)")
 	force := flag.Bool("force", false, "overwrite output if exists")
 	allowAbs := flag.Bool("allow-absolute", false, "allow writing output outside current working directory")
-	chunkSizeFlag := flag.Uint("chunk-size", defaultChunkSize, fmt.Sprintf("chunk size in bytes (max %d)", maxChunkSize))
+	chunkSizeFlag := flag.Uint(
+		"chunk-size",
+		defaultChunkSize,
+		fmt.Sprintf("chunk size in bytes (max %d)", maxChunkSize),
+	)
 	preset := flag.String("preset", "default", "argon preset: default | high | low")
 	argonTimeFlag := flag.Uint("argon-time", 0, "override argon time (optional)")
 	argonMemFlag := flag.Uint("argon-memory", 0, "override argon memory (KiB) (optional)")
@@ -929,9 +1023,27 @@ func runOperation(ctx context.Context, cfg runConfig) error {
 	if cfg.enc {
 		if cfg.verbose {
 			fmt.Fprintf(os.Stderr, "Encrypting %s -> %s ...\n", absIn, absOut)
-			fmt.Fprintf(os.Stderr, "Argon2: time=%d memory=%d KiB threads=%d chunk=%d\n", cfg.argTime, cfg.argMem, cfg.argThreads, cfg.chunkSize)
+			fmt.Fprintf(
+				os.Stderr,
+				"Argon2: time=%d memory=%d KiB threads=%d chunk=%d\n",
+				cfg.argTime,
+				cfg.argMem,
+				cfg.argThreads,
+				cfg.chunkSize,
+			)
 		}
-		return encryptFile(ctx, absIn, absOut, cfg.force, cfg.chunkSize, cfg.argTime, cfg.argMem, cfg.argThreads, cfg.keyVersion, cfg.verbose)
+		return encryptFile(
+			ctx,
+			absIn,
+			absOut,
+			cfg.force,
+			cfg.chunkSize,
+			cfg.argTime,
+			cfg.argMem,
+			cfg.argThreads,
+			cfg.keyVersion,
+			cfg.verbose,
+		)
 	}
 	if cfg.dec {
 		if cfg.verbose {
@@ -942,9 +1054,25 @@ func runOperation(ctx context.Context, cfg runConfig) error {
 	if cfg.rot {
 		if cfg.verbose {
 			fmt.Fprintf(os.Stderr, "Rotating %s -> %s ...\n", absIn, absOut)
-			fmt.Fprintf(os.Stderr, "New Argon2: time=%d memory=%d KiB threads=%d\n", cfg.argTime, cfg.argMem, cfg.argThreads)
+			fmt.Fprintf(
+				os.Stderr,
+				"New Argon2: time=%d memory=%d KiB threads=%d\n",
+				cfg.argTime,
+				cfg.argMem,
+				cfg.argThreads,
+			)
 		}
-		return rotateFile(ctx, absIn, absOut, cfg.force, cfg.argTime, cfg.argMem, cfg.argThreads, cfg.keyVersion, cfg.verbose)
+		return rotateFile(
+			ctx,
+			absIn,
+			absOut,
+			cfg.force,
+			cfg.argTime,
+			cfg.argMem,
+			cfg.argThreads,
+			cfg.keyVersion,
+			cfg.verbose,
+		)
 	}
 	return errors.New("no operation")
 }
