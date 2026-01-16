@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repository (full history)
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -66,54 +66,38 @@ jobs:
           set -euo pipefail
           go mod tidy || true
 
-      - name: Create and run targeted auto-fixer
+      - name: Create conservative auto-fixer script
         run: |
-          set -euo pipefail
           cat > "$RUNNER_TEMP/attempt_autofix.sh" <<'EOF'
 #!/usr/bin/env bash
-# attempt_autofix.sh - conservative heuristics for repairing common Go syntax blockers
 set -euo pipefail
-cd "$(git rev-parse --show-toplevel || echo .)"
 
-modified=0
 tmpfile="$(mktemp)"
 cleanup() { rm -f "$tmpfile"; }
 trap cleanup EXIT
 
-# Helper: canonicalize newline endings and remove NULs
+modified=0
+
 clean_file() {
   local f="$1"
-  # remove NULs, ensure unix newlines
   if grep -q $'\x00' "$f" >/dev/null 2>&1; then
-    tr < "$f" -d '\000' > "$tmpfile" && mv "$tmpfile" "$f"
+    tr -d '\000' < "$f" > "$tmpfile"
+    mv "$tmpfile" "$f"
+    modified=1
+  fi
+  if grep -q $'\r' "$f" >/dev/null 2>&1; then
+    sed -i 's/\r$//' "$f"
     modified=1
   fi
 }
 
-# Remove merge-conflict blocks: <<<<<<< ... ======= ... >>>>>>>
 remove_merge_conflicts() {
   local f="$1"
-  if perl -0777 -ne 'print if !/^<<<<<<<.*?\n.*?^=======.*?\n.*?^>>>>>>>.*?\n/ms' "$f" > "$tmpfile" 2>/dev/null; then
-    # If file changed (i.e. file had conflict blocks removed), update.
-    if ! cmp -s "$tmpfile" "$f"; then
-      mv "$tmpfile" "$f"
-      modified=1
-    fi
-  fi
-}
-
-# Remove accidental go.mod / toolchain / module headers that may have been injected into a .go file.
-strip_mod_like_lines() {
-  local f="$1"
-  # If file contains a line starting with 'module ' or 'go ' or 'toolchain ' near top, remove contiguous block up to first blank line.
-  if awk 'NR<=60 && (/^module[[:space:]]+/ || /^go[[:space:]]+[0-9]/ || /^toolchain[[:space:]]+/ || /^vmodule[[:space:]]+/) { print "YES"; exit }' "$f" | grep -q YES; then
+  if grep -q '^<<<<<<< ' "$f" >/dev/null 2>&1 || grep -q '^>>>>>>>' "$f" >/dev/null 2>&1; then
     awk 'BEGIN{skip=0}
-      /^module[[:space:]]+/ && skip==0 { skip=1; next }
-      /^go[[:space:]]+[0-9]/ && skip==0 { skip=1; next }
-      /^toolchain[[:space:]]+/ && skip==0 { skip=1; next }
-      /^vmodule[[:space:]]+/ && skip==0 { skip=1; next }
-      skip==1 && /^$/ { skip=0; next }
-      skip==0 { print }
+         /^<<<<<<< /{skip=1; next}
+         /^>>>>>>> /{skip=0; next}
+         skip==0 { print }
     ' "$f" > "$tmpfile"
     if ! cmp -s "$f" "$tmpfile"; then
       mv "$tmpfile" "$f"
@@ -122,12 +106,30 @@ strip_mod_like_lines() {
   fi
 }
 
-# Very conservative text rewrite: fix 'for range n {' -> 'for i := 0; i < n; i++ {' if present.
-# Only apply if pattern appears AND file is small (avoid risky mass edits).
+strip_mod_like_lines() {
+  local f="$1"
+  if awk 'NR<=60 && (/^module[[:space:]]+/ || /^go[[:space:]]+[0-9]/ || /^toolchain[[:space:]]+/ || /^vmodule[[:space:]]+/) { print; exit 0 }' "$f" | grep -q .; then
+    awk 'NR<=60{ if (/^module[[:space:]]+/ || /^go[[:space:]]+[0-9]/ || /^toolchain[[:space:]]+/ || /^vmodule[[:space:]]+/) next } { print }' "$f" > "$tmpfile"
+    tail -n +61 "$f" >> "$tmpfile"
+    if ! cmp -s "$f" "$tmpfile"; then
+      mv "$tmpfile" "$f"
+      modified=1
+    fi
+  fi
+}
+
+remove_vmodule_lines() {
+  local f="$1"
+  if grep -q '^vmodule[[:space:]]' "$f" >/dev/null 2>&1; then
+    sed -e '/^vmodule[[:space:]]/d' "$f" > "$tmpfile"
+    mv "$tmpfile" "$f"
+    modified=1
+  fi
+}
+
 fix_for_range_n() {
   local f="$1"
-  if grep -qE 'for[[:space:]]+range[[:space:]]+n[[:space:]]*\{' "$f"; then
-    # Only apply to files smaller than 100 KB to keep risk low
+  if grep -qE '\bfor[[:space:]]+range[[:space:]]+n[[:space:]]*\{' "$f"; then
     if [ "$(stat -c%s "$f")" -le $((100*1024)) ]; then
       perl -0777 -pe 's/\bfor\s+range\s+n\s*\{/for i := 0; i < n; i++ {/g' "$f" > "$tmpfile"
       if ! cmp -s "$f" "$tmpfile"; then
@@ -138,59 +140,35 @@ fix_for_range_n() {
   fi
 }
 
-# Remove lines that start with "vmodule " which were observed in your logs
-remove_vmodule_lines() {
-  local f="$1"
-  if grep -q '^vmodule[[:space:]]' "$f" >/dev/null 2>&1; then
-    sed -e '/^vmodule[[:space:]]/d' "$f" > "$tmpfile"
-    mv "$tmpfile" "$f"
-    modified=1
-  fi
-}
-
-# iterate over .go files (skip vendor)
-while IFS= read -r -d '' file; do
-  # skip generated files by convention (do not modify)
+find . -type f -name '*.go' -print0 | while IFS= read -r -d '' file; do
   case "$file" in
     */vendor/*|*_generated.go|*generated.go) continue ;;
   esac
 
-  # Clean NULs and unify line endings
   clean_file "$file"
-
-  # Remove merge conflict marker blocks
   remove_merge_conflicts "$file"
-
-  # Remove accidental go.mod/module/toolchain/vmodule content injected into .go
   strip_mod_like_lines "$file"
   remove_vmodule_lines "$file"
-
-  # Small targeted rewrite for a known accidental pattern
   fix_for_range_n "$file"
 
-  # Run gofmt on the file to normalize
   if ! gofmt -s -w "$file"; then
-    # if gofmt cannot run (syntax errors remain), leave file as-is
     true
   fi
-done < <(find . -type f -name '*.go' -print0)
+done
 
-# If we touched anything, stage it for commit (but do not commit)
 if [ "$modified" -ne 0 ]; then
   git add -A
-  echo "AUTOFIX: staged modified files."
-  git --no-pager status --porcelain
-  echo "autofix_made_changes=true"
+  echo "autofix: changes staged"
 else
-  echo "autofix_made_changes=false"
+  echo "autofix: no changes"
 fi
-
 EOF
-
           chmod +x "$RUNNER_TEMP/attempt_autofix.sh"
-          # run the fixer
-          "$RUNNER_TEMP/attempt_autofix.sh"
-        shell: bash
+
+      - name: Run conservative auto-fixer
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/attempt_autofix.sh" || true
 
       - name: Run gofmt (second pass)
         run: |
@@ -227,7 +205,7 @@ EOF
         id: changes
         run: |
           set -euo pipefail
-          # we intentionally leave any changes staged (the create-pull-request action will commit them)
+          git add -A || true
           if git diff --cached --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
@@ -240,7 +218,7 @@ EOF
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: auto-fixes/${{ github.run_id }}
-          update-existing: true
+          update-existing: 'true'
           commit-message: "chore(autofix): apply safe automatic repairs and formatting [skip ci]"
           title: "[autofix] Apply safe automatic repairs and formatting"
           body: |
