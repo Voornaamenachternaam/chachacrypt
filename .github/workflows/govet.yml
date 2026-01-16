@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout (full history)
+      - name: Checkout repository
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -42,33 +42,25 @@ jobs:
           go env
 
       - name: Install fieldalignment
-        continue-on-error: true
         run: |
           set -euo pipefail
           go install golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment@v0.41.0
 
       - name: Run gofmt (apply fixes)
-        continue-on-error: true
         run: |
-          set -euo pipefail
-          gofmt -s -w .
+          gofmt -s -w . || true
 
       - name: Run go vet (capture logs)
-        continue-on-error: true
         run: |
-          set -euo pipefail
           go vet ./... > "$RUNNER_TEMP/govet.log" 2>&1 || true
 
       - name: Run fieldalignment (apply fixes, capture logs)
-        continue-on-error: true
         run: |
-          set -euo pipefail
           fieldalignment -fix ./... > "$RUNNER_TEMP/fieldalignment.log" 2>&1 || true
 
       - name: Run go mod tidy
         run: |
-          set -euo pipefail
-          go mod tidy
+          go mod tidy || true
 
       - name: Upload diagnostic logs
         uses: actions/upload-artifact@v6.0.0
@@ -80,10 +72,8 @@ jobs:
           if-no-files-found: ignore
 
       - name: Detect repository changes
-        continue-on-error: true 
         id: changes
         run: |
-          set -euo pipefail
           git add -A
           if git diff --cached --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -92,7 +82,6 @@ jobs:
           fi
 
       - name: Create or update Pull Request
-        continue-on-error: true
         if: steps.changes.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v8
         with:
@@ -114,4 +103,4 @@ jobs:
       - name: No changes detected
         if: steps.changes.outputs.changed == 'false'
         run: |
-          echo "No code changes detected; no PR created."
+          echo "No auto-fixable changes detected; no PR created."
