@@ -45,7 +45,7 @@ jobs:
           set -euo pipefail
           go install golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment@v0.41.0
 
-      - name: Pre-fix checks (gofmt, govet, fieldalignment)
+      - name: Pre-fix checks
         run: |
           set -euo pipefail
           gofmt -s -w . || true
@@ -53,7 +53,7 @@ jobs:
           fieldalignment -fix ./... > "$RUNNER_TEMP/fieldalignment-pre.log" 2>&1 || true
           go mod tidy || true
 
-      - name: Create conservative auto-fix script
+      - name: Create autofix script
         run: |
           cat > "$RUNNER_TEMP/attempt_autofix.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -63,45 +63,25 @@ modified=0
 
 process_file() {
   f="$1"
-  # skip vendor and generated files
-  case "$f" in
-    */vendor/*|*_generated.go|*generated.go) return ;;
-  esac
-  # normalize nulls and CRLF
-  if grep -q $'\x00' "$f" 2>/dev/null; then
-    tr -d '\000' < "$f" > "$tmp"
-    mv "$tmp" "$f"
-    modified=1
-  fi
-  if grep -q $'\r' "$f" 2>/dev/null; then
-    sed -i 's/\r$//' "$f"
-    modified=1
-  fi
-  # remove vmodule lines anywhere
-  if grep -q '^vmodule[[:space:]]' "$f" 2>/dev/null; then
-    sed -i '/^vmodule[[:space:]]/d' "$f"
-    modified=1
-  fi
-  # remove leading module/go/toolchain lines within first 60 lines
+  case "$f" in */vendor/*|*_generated.go|*generated.go) return ;; esac
+  if grep -q $'\x00' "$f" 2>/dev/null; then tr -d '\000' < "$f" > "$tmp" && mv "$tmp" "$f" && modified=1; fi
+  if grep -q $'\r' "$f" 2>/dev/null; then sed -i 's/\r$//' "$f" && modified=1; fi
+  if grep -q '^vmodule[[:space:]]' "$f" 2>/dev/null; then sed -i '/^vmodule[[:space:]]/d' "$f" && modified=1; fi
   if head -n60 "$f" | grep -Eq '^(module[[:space:]]+|go[[:space:]]+[0-9]|toolchain[[:space:]]+)'; then
     awk 'NR<=60{ if (/^(module[[:space:]]+|go[[:space:]]+[0-9]|toolchain[[:space:]]+)/) next } { print }' "$f" > "$tmp"
     tail -n +61 "$f" >> "$tmp" 2>/dev/null || true
     if ! cmp -s "$f" "$tmp"; then mv "$tmp" "$f"; modified=1; fi
   fi
-  # remove simple merge conflict blocks
-  if grep -q '^<<<<<<< ' "$f" 2>/dev/null || grep -q '^>>>>>>>' "$f" 2>/dev/null; then
-    awk 'BEGIN{skip=0}
-         /^<<<<<<< /{skip=1; next}
-         /^>>>>>>> /{skip=0; next}
-         skip==0 { print }' "$f" > "$tmp"
+  if grep -q '^<<<<<<< ' "$f" 2>/dev/null || grep -q '^>>>>>>> ' "$f" 2>/dev/null; then
+    awk 'BEGIN{skip=0} /^<<<<<<< /{skip=1; next} /^>>>>>>> /{skip=0; next} skip==0 { print }' "$f" > "$tmp"
     if ! cmp -s "$f" "$tmp"; then mv "$tmp" "$f"; modified=1; fi
   fi
-  # run gofmt per-file
   gofmt -s -w "$f" || true
 }
 
 export -f process_file
-find . -type f -name '*.go' -print0 | xargs -0 -n1 -I{} bash -c 'process_file "{}"'
+find . -type f -name '*.go' -print0 | xargs -0 -n1 -I{} bash -c 'process_file "$1"' _ {}
+
 if [ "$modified" -ne 0 ]; then
   git add -A
 fi
@@ -109,12 +89,12 @@ rm -f "$tmp"
 EOF
           chmod +x "$RUNNER_TEMP/attempt_autofix.sh"
 
-      - name: Run conservative auto-fixer
+      - name: Run autofix
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/attempt_autofix.sh" || true
 
-      - name: Post-fix checks (gofmt, govet, fieldalignment)
+      - name: Post-fix checks
         run: |
           set -euo pipefail
           gofmt -s -w . || true
@@ -133,14 +113,16 @@ EOF
             ${{ runner.temp }}/fieldalignment-post.log
           if-no-files-found: ignore
 
-      - name: Prepare commit and detect changes
+      - name: Prepare commit & detect changes
         id: changes
         run: |
           set -euo pipefail
           git add -A || true
-          if git diff --cached --quiet; then
+          if git diff --cached --quiet && git diff --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git commit -m "chore(autofix): apply formatting and safe repairs [skip ci]" || true
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
@@ -156,4 +138,4 @@ EOF
           commit-message: "chore(autofix): apply formatting and safe repairs [skip ci]"
           title: "[autofix] Apply safe automatic repairs and formatting"
           body: |
-            Automatic fixes applied where safe. Diagnostic logs are attached as workflow artifacts.
+            Automatic safe repairs and formatting were applied. Diagnostic logs are attached as workflow artifacts.
