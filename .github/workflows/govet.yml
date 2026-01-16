@@ -21,8 +21,9 @@ permissions:
 jobs:
   lint-and-autofix:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -34,74 +35,27 @@ jobs:
           go-version: '1.25.6'
           cache: false
 
+      - name: Print Go environment
+        run: |
+          go version
+          go env
+
       - name: Install fieldalignment
         run: |
           set -euo pipefail
           go install golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment@v0.41.0
 
-      - name: Run gofmt (apply formatting)
+      - name: Run gofmt
         run: |
           set -euo pipefail
           gofmt -s -w . || true
 
-      - name: Create conservative autofix script
-        run: |
-          cat > "$RUNNER_TEMP/attempt_autofix.sh" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-tmp="$(mktemp -t autofix.XXXXXX)" || tmp="/tmp/autofix.$$"
-modified=0
-
-process_go() {
-  f="$1"
-  case "$f" in
-    */vendor/*|*_generated.go|*generated.go) return ;;
-  esac
-
-  # remove vmodule lines and stray toolchain/module/go headers in source files
-  if grep -q '^vmodule[[:space:]]' "$f" 2>/dev/null; then
-    sed -i '/^vmodule[[:space:]]/d' "$f" && modified=1 || true
-  fi
-
-  # remove simple merge conflict markers
-  if grep -q '^<<<<<<< ' "$f" 2>/dev/null || grep -q '^>>>>>>> ' "$f" 2>/dev/null; then
-    awk 'BEGIN{skip=0}
-         /^<<<<<<< /{skip=1; next}
-         /^>>>>>>> /{skip=0; next}
-         skip==0{print}' "$f" > "$tmp" && mv "$tmp" "$f" && modified=1 || true
-  fi
-
-  # normalize CRLF and NULs
-  if grep -q $'\r' "$f" 2>/dev/null; then sed -i 's/\r$//' "$f" && modified=1 || true; fi
-  if grep -q $'\x00' "$f" 2>/dev/null; then tr -d '\000' < "$f" > "$tmp" && mv "$tmp" "$f" && modified=1 || true; fi
-
-  # run gofmt on file
-  gofmt -s -w "$f" || true
-}
-
-export -f process_go
-
-find . -type f -name '*.go' -print0 | xargs -0 -n1 -I{} bash -c 'process_go "$0"' {}
-
-if [ "$modified" -ne 0 ]; then
-  git add -A || true
-fi
-
-rm -f "$tmp" || true
-EOF
-          chmod +x "$RUNNER_TEMP/attempt_autofix.sh"
-
-      - name: Run conservative autofixer
-        run: |
-          set -euo pipefail
-          "$RUNNER_TEMP/attempt_autofix.sh" || true
-
-      - name: Run fieldalignment fixes
+      - name: Run fieldalignment (fix)
         run: |
           set -euo pipefail
           fieldalignment -fix ./... > "${RUNNER_TEMP}/fieldalignment.log" 2>&1 || true
 
-      - name: Run govet (capture log)
+      - name: Run go vet
         run: |
           set -euo pipefail
           go vet ./... > "${RUNNER_TEMP}/govet.log" 2>&1 || true
@@ -116,33 +70,44 @@ EOF
         with:
           name: go-diagnostics
           path: |
-            ${{ runner.temp }}/fieldalignment.log
             ${{ runner.temp }}/govet.log
+            ${{ runner.temp }}/fieldalignment.log
           if-no-files-found: ignore
 
-      - name: Prepare commit and detect changes
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Detect changes
         id: changes
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A || true
-          if git diff --quiet --exit-code && git diff --cached --quiet --exit-code; then
+          git add -A
+          if git diff --cached --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
-            git commit -m "chore(autofix): apply formatting and safe repairs [skip ci]" || true
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create or update Pull Request
+      - name: Commit changes
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git commit -m "chore(autofix): apply gofmt, fieldalignment, govet [skip ci]"
+
+      - name: Create Pull Request
         if: steps.changes.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: auto-fixes/${{ github.run_id }}
           base: main
-          update-existing: 'true'
-          commit-message: "chore(autofix): apply formatting and safe repairs [skip ci]"
-          title: "[autofix] Apply safe automatic repairs and formatting"
+          update-existing: true
+          commit-message: "chore(autofix): apply gofmt, fieldalignment, govet [skip ci]"
+          title: "[autofix] Apply Go formatting and vet fixes"
           body: |
-            Automatic safe repairs and formatting were applied. Diagnostic logs are attached as workflow artifacts.
+            Automated fixes applied:
+            - gofmt
+            - fieldalignment
+            - go vet
+            Diagnostic logs are attached as workflow artifacts.
