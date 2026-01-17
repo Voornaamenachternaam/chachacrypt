@@ -1,1180 +1,1329 @@
+/*
+Package main implements chachacrypt, a password-based file encryption tool
+using Argon2id and XChaCha20-Poly1305 with authenticated headers and
+streaming chunked I/O.
+
+Security properties:
+- Confidentiality, integrity, tamper detection
+- Wrong-password detection
+- Memory-hard KDF
+- Constant-memory streaming
+- Cross-platform (Windows 11, Linux)
+
+This file is intentionally verbose and explicit to maximize auditability.
+*/
 package main
 
 import (
 	"bytes"
 	"context"
-	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"math"
-	"math/big"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
+	"golang.org/x/crypto/hkdf"
 	"golang.org/x/term"
-	"log/slog"
 )
 
 const (
-	MagicNumber         = "CHACRYPT"
-	FileVersion         = byte(2)
-	defaultSalt         = 32
-	defaultKey          = 32
-	defaultNonce        = chacha20poly1305.NonceSizeX
-	defaultArgonTime    = 6
-	defaultArgonMemory  = 256 * 1024
-	defaultArgonThreads = 2
-	defaultChunkSize    = 64 * 1024
+	magicString = "CHACHACRYPT"
+	formatVersion uint32 = 1
 
-	// Limits
-	maxArgonTime   = 1 << 12
-	maxArgonMemory = 1 << 22
-	maxChunkSize   = 1 << 22
-	maxSaltSize    = 1 << 8
-	maxKeySize     = 1 << 8
+	defaultChunkSize = 1 << 20 // 1 MiB
+	maxChunkSize     = 16 << 20
 
-	entropyCheckSize = 4096
-	minEntropyBits   = 7.5
+	nonceSizeXChaCha = chacha20poly1305.NonceSizeX
 
-	maxKeyVersion = 255
+	saltSize = 16
 
-	// Named magic numbers (replaces bare literals flagged by mnd)
-	maxByteValues         = 256.0
-	minArgsRequired       = 2
-	defaultPasswordLength = 15
+	headerReservedSize = 32
+	headerMACSize      = 32
+
+	maxCTAbsolute = 1 << 30 // 1 GiB hard upper bound
+
+	keyLen = 32
 )
 
-var logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{}))
+var (
+	errWrongPassword = errors.New("wrong password or file corrupted")
+	errSameFile      = errors.New("input and output are the same file; in-place operations are not supported")
+)
 
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// CSPRNGReader remains an entropy-checking io.Reader wrapper.
-type CSPRNGReader struct {
-	entropyChecked atomic.Bool
-}
-
-func (r *CSPRNGReader) Read(p []byte) (int, error) {
-	n, err := rand.Read(p)
-	if n > 0 && !r.entropyChecked.Load() {
-		if cerr := r.checkEntropy(p[:minInt(n, entropyCheckSize)]); cerr != nil {
-			return 0, fmt.Errorf("entropy check failed: %w", cerr)
-		}
-		r.entropyChecked.Store(true)
-	}
-	return n, err
-}
-
-func (r *CSPRNGReader) checkEntropy(sample []byte) error {
-	if len(sample) < entropyCheckSize/2 {
-		return nil // Not enough data for meaningful check
-	}
-	freq := make(map[byte]int)
-	for _, b := range sample {
-		freq[b]++
-	}
-	entropy := 0.0
-	for _, count := range freq {
-		p := float64(count) / float64(len(sample))
-		entropy -= p * math.Log2(p)
-	}
-	maxPossible := math.Log2(math.Min(maxByteValues, float64(len(sample))))
-	if minEntropyBits > maxPossible {
-		return fmt.Errorf(
-			"sample too small for required entropy: sample=%d, max_possible=%.6f, required=%.6f",
-			len(sample), maxPossible, minEntropyBits,
-		)
-	}
-	if entropy < minEntropyBits {
-		return fmt.Errorf("insufficient entropy: %f < %f", entropy, minEntropyBits)
-	}
-	return nil
-}
-
-// globalsManager encapsulates previous package-level mutable state:
-// - a CSPRNG reader
-// - salt cache map, mutex and wait group
-type globalsManager struct {
-	csprng    *CSPRNGReader
-	saltCache map[string][]byte
-	saltMu    sync.RWMutex
-	saltWg    sync.WaitGroup
-}
-
-func newGlobalsManager() *globalsManager {
-	return &globalsManager{
-		csprng:    &CSPRNGReader{},
-		saltCache: make(map[string][]byte),
-	}
-}
-
-var globals = newGlobalsManager()
-
-func (g *globalsManager) ReadCSPRNG(p []byte) (int, error) {
-	return g.csprng.Read(p)
-}
-
-func (g *globalsManager) AddSalt(key string, data []byte) {
-	g.saltMu.Lock()
-	g.saltCache[key] = data
-	g.saltMu.Unlock()
-	g.saltWg.Add(1)
-	// background cleanup goroutine
-	go func(key string) {
-		defer g.saltWg.Done()
-		time.Sleep(time.Hour)
-		g.saltMu.Lock()
-		delete(g.saltCache, key)
-		g.saltMu.Unlock()
-	}(key)
-}
-
-func (g *globalsManager) HasSalt(key string) bool {
-	g.saltMu.RLock()
-	_, exists := g.saltCache[key]
-	g.saltMu.RUnlock()
-	return exists
-}
-
-// SecureBuffer holds secret bytes and can zero them on Close.
-type SecureBuffer struct {
-	data   []byte
-	mu     sync.Mutex
-	zeroed atomic.Bool
-}
-
-func NewSecureBuffer(size int) *SecureBuffer {
-	if size < 0 {
-		size = 0
-	}
-	return &SecureBuffer{
-		data: make([]byte, size),
-	}
-}
-
-func (sb *SecureBuffer) Bytes() []byte {
-	sb.mu.Lock()
-	defer sb.mu.Unlock()
-	return sb.data
-}
-
-func (sb *SecureBuffer) Zero() {
-	if sb.zeroed.Load() {
-		return
-	}
-	sb.mu.Lock()
-	defer sb.mu.Unlock()
-	if sb.zeroed.Load() {
-		return
-	}
-	for i := range sb.data {
-		sb.data[i] = 0
-	}
-	sb.zeroed.Store(true)
-	sink(sb.data)
-}
-
-func (sb *SecureBuffer) IsZeroed() bool {
-	return sb.zeroed.Load()
-}
-
-// Close no longer returns an error (unparam lint).
-func (sb *SecureBuffer) Close() {
-	sb.Zero()
-}
-
-func sink(b []byte) {
-	runtime.KeepAlive(b)
-}
-
-type FileHeader struct {
-	Magic      [len(MagicNumber)]byte
-	Version    byte
-	ArgonTime  uint32
-	ArgonMem   uint32
-	ArgonUtil  uint8
-	KeySize    uint32
-	SaltSize   uint32
-	NonceSize  uint32
-	KeyVersion byte
-	Timestamp  uint64
-	Integrity  [32]byte
-	Padding    [7]byte
-}
-
-type config struct {
-	SaltSize   uint32
-	KeySize    uint32
-	KeyTime    uint32
-	KeyMemory  uint32
-	KeyThreads uint8
-	ChunkSize  int
-	NonceSize  int
-	KeyVersion byte
-}
-
-func ConstantTimeEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	return subtle.ConstantTimeCompare(a, b) == 1
-}
-
-func validateSaltUniqueness(salt []byte) error {
-	saltHex := hex.EncodeToString(salt)
-	if globals.HasSalt(saltHex) {
-		return errors.New("salt has been used before - potential security issue")
-	}
-	cp := make([]byte, len(salt))
-	copy(cp, salt)
-	globals.AddSalt(saltHex, cp)
-	return nil
-}
-
-func createFileIntegrity(header FileHeader, salt []byte) ([32]byte, error) {
-	headerCopy := header
-	var zeroIntegrity [32]byte
-	headerCopy.Integrity = zeroIntegrity
-	var headerBuf bytes.Buffer
-	if err := binary.Write(&headerBuf, binary.LittleEndian, headerCopy); err != nil {
-		return zeroIntegrity, fmt.Errorf("failed to serialize header: %w", err)
-	}
-	mac := hmac.New(sha256.New, salt)
-	if _, err := mac.Write(headerBuf.Bytes()); err != nil {
-		return zeroIntegrity, fmt.Errorf("hmac write failed: %w", err)
-	}
-	var integrity [32]byte
-	copy(integrity[:], mac.Sum(nil))
-	return integrity, nil
-}
-
-func verifyFileIntegrity(header FileHeader, salt []byte) error {
-	expected, err := createFileIntegrity(header, salt)
-	if err != nil {
-		return fmt.Errorf("integrity check failed: %w", err)
-	}
-	if !hmac.Equal(header.Integrity[:], expected[:]) {
-		return errors.New("file metadata has been tampered with")
-	}
-	return nil
-}
-
-func buildEnhancedAAD(header FileHeader, chunkSeq uint64) ([]byte, error) {
-	var aad bytes.Buffer
-	if err := binary.Write(&aad, binary.LittleEndian, header.Magic); err != nil {
-		return nil, err
-	}
-	if err := aad.WriteByte(header.Version); err != nil {
-		return nil, err
-	}
-	if err := binary.Write(&aad, binary.LittleEndian, header.ArgonTime); err != nil {
-		return nil, err
-	}
-	if err := binary.Write(&aad, binary.LittleEndian, header.ArgonMem); err != nil {
-		return nil, err
-	}
-	if err := aad.WriteByte(header.ArgonUtil); err != nil {
-		return nil, err
-	}
-	if err := binary.Write(&aad, binary.LittleEndian, header.KeySize); err != nil {
-		return nil, err
-	}
-	if err := aad.WriteByte(header.KeyVersion); err != nil {
-		return nil, err
-	}
-	if err := binary.Write(&aad, binary.LittleEndian, header.Timestamp); err != nil {
-		return nil, err
-	}
-	var seqBytes [8]byte
-	binary.BigEndian.PutUint64(seqBytes[:], chunkSeq)
-	if _, err := aad.Write(seqBytes[:]); err != nil {
-		return nil, err
-	}
-	return aad.Bytes(), nil
-}
-
-func main() {
-	if len(os.Args) < minArgsRequired {
-		showHelp()
-		os.Exit(1)
-	}
-	switch os.Args[1] {
-	case "enc":
-		if err := handleEncrypt(context.Background()); err != nil {
-			logger.Error("Processing failed", "err", err)
-			os.Exit(1)
-		}
-	case "dec":
-		if err := handleDecrypt(context.Background()); err != nil {
-			logger.Error("Processing failed", "err", err)
-			os.Exit(1)
-		}
-	case "pw":
-		if err := handlePasswordGen(); err != nil {
-			logger.Error("Password generation failed", "err", err)
-			os.Exit(1)
-		}
-	case "rotate":
-		if err := handleKeyRotation(context.Background()); err != nil {
-			logger.Error("Key rotation failed", "err", err)
-			os.Exit(1)
-		}
-	default:
-		showHelp()
-		os.Exit(1)
-	}
-}
-
-func handleEncrypt(ctx context.Context) error {
-	var (
-		password *SecureBuffer
-		cfg      config
-		err      error
-	)
-	enc := flag.NewFlagSet("enc", flag.ExitOnError)
-	in := enc.String("i", "", "input file (relative path, no .. allowed)")
-	out := enc.String("o", "", "output file")
-	argTime := enc.Int("argon-time", defaultArgonTime, "Argon2id time parameter (iterations)")
-	argMem := enc.Int("argon-mem", defaultArgonMemory, "Argon2id memory parameter (KiB)")
-	argThreads := enc.Int("argon-threads", defaultArgonThreads, "Argon2id parallelism (threads)")
-	chunkSize := enc.Int("chunk-size", defaultChunkSize, "Chunk size in bytes for streaming encryption")
-	saltSize := enc.Int("salt-size", defaultSalt, "Salt size in bytes")
-	keySize := enc.Int("key-size", defaultKey, "Derived key size in bytes (e.g., 32)")
-	keyVersion := enc.Uint("key-version", 0, "Key version for rotation support")
-	if err = enc.Parse(os.Args[2:]); err != nil {
-		return fmt.Errorf("flag parsing failed: %w", err)
-	}
-	if err = validateFileInput(*in, *out); err != nil {
-		return fmt.Errorf("input validation failed: %w", err)
-	}
-	if *in == *out {
-		return errors.New("input and output file must be different")
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-	password, err = readPasswordPromptConfirm("Enter a strong password: ", "Confirm password: ")
-	if err != nil {
-		return fmt.Errorf("password input failed: %w", err)
-	}
-	defer func(sb *SecureBuffer) {
-		if sb == nil {
-			return
-		}
-		sb.Close()
-	}(password)
-	cfg, err = buildConfig(*argTime, *argMem, *argThreads, *chunkSize, *saltSize, *keySize, byte(*keyVersion))
-	if err != nil {
-		return fmt.Errorf("configuration validation failed: %w", err)
-	}
-	start := time.Now()
-	if err = encryptFile(ctx, *in, *out, password, cfg); err != nil {
-		return fmt.Errorf("encryption failed: %w", err)
-	}
-	// Use fmt.Fprintf to avoid fmt.Printf and satisfy forbidigo rule.
-	_, _ = fmt.Fprintf(os.Stdout, "Processing successful (took %s)\n", time.Since(start))
-	return nil
-}
-
-func handleDecrypt(ctx context.Context) error {
-	var (
-		pwBytes []byte
-		err     error
-	)
-	dec := flag.NewFlagSet("dec", flag.ExitOnError)
-	in := dec.String("i", "", "input file")
-	out := dec.String("o", "", "output file")
-	if err = dec.Parse(os.Args[2:]); err != nil {
-		return fmt.Errorf("flag parsing failed: %w", err)
-	}
-	if err = validateFileInput(*in, *out); err != nil {
-		return fmt.Errorf("input validation failed: %w", err)
-	}
-	if *in == *out {
-		return errors.New("input and output file must be different")
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-	if !isTerminal(os.Stdin.Fd()) {
-		return errors.New("interactive input required")
-	}
-	// Use fmt.Fprint to avoid fmt.Print
-	_, _ = fmt.Fprint(os.Stdout, "Enter password: ")
-	pwBytes, err = term.ReadPassword(int(os.Stdin.Fd()))
-	_, _ = fmt.Fprintln(os.Stdout)
-	if err != nil {
-		return fmt.Errorf("password read failed: %w", err)
-	}
-	defer zeroBytes(pwBytes)
-	cfg := config{}
-	start := time.Now()
-	if err = decryptFile(ctx, *in, *out, pwBytes, cfg); err != nil {
-		return fmt.Errorf("decryption failed: %w", err)
-	}
-	_, _ = fmt.Fprintf(os.Stdout, "Processing successful (took %s)\n", time.Since(start))
-	return nil
-}
-
-func handlePasswordGen() error {
-	pw := flag.NewFlagSet("pw", flag.ExitOnError)
-	size := pw.Int("s", defaultPasswordLength, "size of password to generate")
-	if err := pw.Parse(os.Args[2:]); err != nil {
-		return fmt.Errorf("flag parsing failed: %w", err)
-	}
-	p, err := generatePassword(*size)
-	if err != nil {
-		return fmt.Errorf("password generation failed: %w", err)
-	}
-	_, _ = fmt.Fprintln(os.Stdout, p)
-	return nil
-}
-
-func handleKeyRotation(ctx context.Context) error {
-	var (
-		pwBytes []byte
-		err     error
-	)
-	rot := flag.NewFlagSet("rotate", flag.ExitOnError)
-	in := rot.String("i", "", "input file to rotate key for")
-	out := rot.String("o", "", "output file")
-	newVersion := rot.Uint("new-version", 1, "new key version")
-	if err = rot.Parse(os.Args[2:]); err != nil {
-		return fmt.Errorf("flag parsing failed: %w", err)
-	}
-	if err = validateFileInput(*in, *out); err != nil {
-		return fmt.Errorf("input validation failed: %w", err)
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-	if !isTerminal(os.Stdin.Fd()) {
-		return errors.New("interactive input required")
-	}
-	_, _ = fmt.Fprint(os.Stdout, "Enter password: ")
-	pwBytes, err = term.ReadPassword(int(os.Stdin.Fd()))
-	_, _ = fmt.Fprintln(os.Stdout)
-	if err != nil {
-		return fmt.Errorf("password read failed: %w", err)
-	}
-	defer zeroBytes(pwBytes)
-	if *newVersion > maxKeyVersion {
-		return fmt.Errorf("key version too large (max %d): %d", maxKeyVersion, *newVersion)
-	}
-	return rotateKey(ctx, *in, *out, pwBytes, byte(*newVersion))
-}
-
-func buildConfig(argTime, argMem, argThreads, chunkSize, saltSize, keySize int, keyVersion byte) (config, error) {
-	if argTime < 3 || argTime > maxArgonTime {
-		return config{}, fmt.Errorf("argon-time out of bounds (3-%d): %d", maxArgonTime, argTime)
-	}
-	if argMem < 128*1024 || argMem > maxArgonMemory {
-		return config{}, fmt.Errorf("argon-mem out of bounds (131072-%d KiB): %d", maxArgonMemory, argMem)
-	}
-	if argThreads < 1 || argThreads > runtime.NumCPU() {
-		return config{}, fmt.Errorf("argon-threads out of bounds (1-%d): %d", runtime.NumCPU(), argThreads)
-	}
-	if chunkSize < 1024 || chunkSize > maxChunkSize {
-		return config{}, fmt.Errorf("chunk-size out of bounds (1024-%d bytes): %d", maxChunkSize, chunkSize)
-	}
-	if saltSize < 16 || saltSize > maxSaltSize {
-		return config{}, fmt.Errorf("salt-size out of bounds (16-%d bytes): %d", maxSaltSize, saltSize)
-	}
-	if keySize < 16 || keySize > maxKeySize {
-		return config{}, fmt.Errorf("key-size out of bounds (16-%d bytes): %d", maxKeySize, keySize)
-	}
-	return config{
-		SaltSize:   uint32(saltSize),
-		KeySize:    uint32(keySize),
-		KeyTime:    uint32(argTime),
-		KeyMemory:  uint32(argMem),
-		KeyThreads: uint8(argThreads),
-		ChunkSize:  chunkSize,
-		NonceSize:  defaultNonce,
-		KeyVersion: keyVersion,
-	}, nil
-}
-
-func showHelp() {
- _, _ = fmt.Fprintln(os.Stdout, "Usage:")
- _, _ = fmt.Fprintln(os.Stdout, " Encrypt a file: chachacrypt enc -i input.txt -o output.enc")
- _, _ = fmt.Fprintln(os.Stdout, " Decrypt a file: chachacrypt dec -i input.enc -o decrypted.txt")
- _, _ = fmt.Fprintln(os.Stdout, " Generate a password: chachacrypt pw -s 15")
- _, _ = fmt.Fprintln(os.Stdout, " Rotate key: chachacrypt rotate -i input.enc -o output.enc -new-version 1")
-}
-
-// validateFilePath: robust check for forbidden traversal segments.
-// - empty paths rejected
-// - any path segment equal to ".." is rejected
-// - NUL bytes rejected
-func validateFilePath(p string) error {
-	if p == "" {
-		return errors.New("empty path")
-	}
-	cleaned := filepath.Clean(p)
-	if filepath.IsAbs(cleaned) {
-		return errors.New("absolute paths not allowed")
-	}
-	parts := strings.Split(cleaned, string(os.PathSeparator))
-	for _, part := range parts {
-		if part == ".." {
-			return errors.New("directory traversal not allowed")
-		}
-	}
-	return nil
-}
-
-func validateFileInput(inputFile, outputFile string) error {
-	if inputFile == "" || !fileExists(inputFile) {
-		return errors.New("valid input file required")
-	}
-	if outputFile == "" {
-		return errors.New("output file required")
-	}
-	if err := validateFilePath(inputFile); err != nil {
-		return fmt.Errorf("path validation failed: %w", err)
-	}
-	if err := validateFilePath(outputFile); err != nil {
-		return fmt.Errorf("path validation failed: %w", err)
-	}
-	return nil
-}
-
-func fileExists(name string) bool {
-	_, err := os.Stat(name)
-	return err == nil
-}
-
-func isTerminal(fd uintptr) bool {
-	return term.IsTerminal(int(fd))
-}
-
-func zeroBytes(b []byte) {
+func zero(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
-	sink(b)
 }
 
-func readPasswordPromptConfirm(prompt, confirmPrompt string) (*SecureBuffer, error) {
-	if !isTerminal(os.Stdin.Fd()) {
-		return nil, errors.New("interactive input required")
-	}
-	_, _ = fmt.Fprint(os.Stdout, prompt)
-	p1, err := term.ReadPassword(int(os.Stdin.Fd()))
-	_, _ = fmt.Fprintln(os.Stdout)
+func mustReadRandom(b []byte) error {
+	n, err := io.ReadFull(rand.Reader, b)
 	if err != nil {
-		return nil, fmt.Errorf("password read failed: %w", err)
+		return err
 	}
-	_, _ = fmt.Fprint(os.Stdout, confirmPrompt)
-	p2, err := term.ReadPassword(int(os.Stdin.Fd()))
-	_, _ = fmt.Fprintln(os.Stdout)
-	if err != nil {
-		zeroBytes(p1)
-		return nil, fmt.Errorf("password confirmation failed: %w", err)
-	}
-	if len(p1) != len(p2) || !ConstantTimeEqual(p1, p2) {
-		zeroBytes(p1)
-		zeroBytes(p2)
-		return nil, errors.New("password mismatch")
-	}
-	sb := NewSecureBuffer(len(p1))
-	copy(sb.Bytes(), p1)
-	zeroBytes(p1)
-	zeroBytes(p2)
-	return sb, nil
-}
-
-func generatePassword(n int) (string, error) {
-	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-!@#$%^&*()[]{}"
-	if n <= 0 {
-		return "", errors.New("invalid password length")
-	}
-	var result strings.Builder
-	result.Grow(n)
-	maxIdx := big.NewInt(int64(len(letters)))
-	for i := 0; i < n; i++ {
-  func (g *globalsManager) ReadCSPRNG(p []byte) (int, error) {
-  	return g.csprng.Read(p)
-  }
-
-  func (g *globalsManager) CSPRNG() io.Reader {
-  	return g.csprng
-  }
-
-  func (g *globalsManager) AddSalt(key string, data []byte) {
-  	g.saltMu.Lock()
-  	g.saltCache[key] = data
-  	g.saltMu.Unlock()
-  	g.saltWg.Add(1)
-  	// background cleanup goroutine
-  	go func() {
-  		defer g.saltWg.Done()
-  		time.Sleep(time.Hour)
-  		g.saltMu.Lock()
-  		delete(g.saltCache, key)
-  		g.saltMu.Unlock()
-  	}()
-  }
-
-  idx, err := rand.Int(globals.CSPRNG(), maxIdx)
-		if err != nil {
-			return "", fmt.Errorf("random generation failed: %w", err)
-		}
-		result.WriteByte(letters[idx.Int64()])
-	}
-	return result.String(), nil
-}
-
-func encryptFile(ctx context.Context, inputFile, outputFile string, password *SecureBuffer, cfg config) error {
-	var err error
-	if err = validateFilePath(inputFile); err != nil {
-		return fmt.Errorf("path validation failed: %w", err)
-	}
-	if err = validateFilePath(outputFile); err != nil {
-		return fmt.Errorf("path validation failed: %w", err)
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-	outFile, err := os.Create(outputFile)
-	if err != nil {
-		return fmt.Errorf("file creation failed: %w", err)
-	}
-	defer func() {
-		if cerr := outFile.Close(); cerr != nil {
-			logger.Error("close error", "err", cerr)
-		}
-	}()
-	inFile, err := os.Open(inputFile)
-	if err != nil {
-		return fmt.Errorf("file access failed: %w", err)
-	}
-	defer func() {
-		if cerr := inFile.Close(); cerr != nil {
-			logger.Error("close error", "err", cerr)
-		}
-	}()
-	salt, err := generateSalt(cfg.SaltSize)
-	if err != nil {
-		return fmt.Errorf("salt generation failed: %w", err)
-	}
-	defer func(sb *SecureBuffer) {
-		if sb == nil {
-			return
-		}
-		sb.Close()
-	}(salt)
-	header, err := createHeader(cfg)
-	if err != nil {
-		return fmt.Errorf("header creation failed: %w", err)
-	}
-	if err := validateSaltUniqueness(salt.Bytes()); err != nil {
-		return fmt.Errorf("salt validation failed: %w", err)
-	}
-	integrity, err := createFileIntegrity(header, salt.Bytes())
-	if err != nil {
-		return fmt.Errorf("integrity creation failed: %w", err)
-	}
-	header.Integrity = integrity
-	if err := writeHeader(outFile, header); err != nil {
-		return fmt.Errorf("header write failed: %w", err)
-	}
-	if err := writeSalt(outFile, salt.Bytes()); err != nil {
-		return fmt.Errorf("salt write failed: %w", err)
-	}
-	key, err := deriveKey(password.Bytes(), salt.Bytes(), header)
-	if err != nil {
-		return fmt.Errorf("key derivation failed: %w", err)
-	}
-	defer func(sb *SecureBuffer) {
-		if sb == nil {
-			return
-		}
-		sb.Close()
-	}(key)
-	return processFile(ctx, inFile, outFile, key, cfg, header)
-}
-
-func decryptFile(ctx context.Context, inputFile, outputFile string, password []byte, cfg config) error {
-	var err error
-	if err = validateFilePath(inputFile); err != nil {
-		return fmt.Errorf("path validation failed: %w", err)
-	}
-	if err = validateFilePath(outputFile); err != nil {
-		return fmt.Errorf("path validation failed: %w", err)
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-	inFile, err := os.Open(inputFile)
-	if err != nil {
-		return fmt.Errorf("file access failed: %w", err)
-	}
-	defer func() {
-		if cerr := inFile.Close(); cerr != nil {
-			logger.Error("close error", "err", cerr)
-		}
-	}()
-	header, err := readHeader(inFile)
-	if err != nil {
-		return fmt.Errorf("file format error: %w", err)
-	}
-	salt, err := readSalt(inFile, header.SaltSize)
-	if err != nil {
-		return fmt.Errorf("salt read failed: %w", err)
-	}
-	defer func(sb *SecureBuffer) {
-		if sb == nil {
-			return
-		}
-		sb.Close()
-	}(salt)
-	if err = verifyFileIntegrity(header, salt.Bytes()); err != nil {
-		return fmt.Errorf("integrity verification failed: %w", err)
-	}
-	key, err := deriveKey(password, salt.Bytes(), header)
-	if err != nil {
-		return fmt.Errorf("key derivation failed: %w", err)
-	}
-	defer func(sb *SecureBuffer) {
-		if sb == nil {
-			return
-		}
-		sb.Close()
-	}(key)
-	outFile, err := os.Create(outputFile)
-	if err != nil {
-		return fmt.Errorf("file creation failed: %w", err)
-	}
-	defer func() {
-		if cerr := outFile.Close(); cerr != nil {
-			logger.Error("close error", "err", cerr)
-		}
-	}()
-	return decryptProcess(ctx, inFile, outFile, key, header)
-}
-
-func rotateKey(ctx context.Context, inputFile, outputFile string, password []byte, newVersion byte) error {
-	var err error
-	if err = validateFilePath(inputFile); err != nil {
-		return fmt.Errorf("path validation failed: %w", err)
-	}
-	if err = validateFilePath(outputFile); err != nil {
-		return fmt.Errorf("path validation failed: %w", err)
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-	inFile, err := os.Open(inputFile)
-	if err != nil {
-		return fmt.Errorf("file access failed: %w", err)
-	}
-	defer func() {
-		if cerr := inFile.Close(); cerr != nil {
-			logger.Error("close error", "err", cerr)
-		}
-	}()
-	header, err := readHeader(inFile)
-	if err != nil {
-		return fmt.Errorf("file format error: %w", err)
-	}
-	salt, err := readSalt(inFile, header.SaltSize)
-	if err != nil {
-		return fmt.Errorf("salt read failed: %w", err)
-	}
-	defer func(sb *SecureBuffer) {
-		if sb == nil {
-			return
-		}
-		sb.Close()
-	}(salt)
-	originalKey, err := deriveKey(password, salt.Bytes(), header)
-	if err != nil {
-		return fmt.Errorf("key derivation failed: %w", err)
-	}
-	defer func(sb *SecureBuffer) {
-		if sb == nil {
-			return
-		}
-		sb.Close()
-	}(originalKey)
-	header.KeyVersion = newVersion
-	header.Timestamp = uint64(time.Now().Unix())
-	integrity, err := createFileIntegrity(header, salt.Bytes())
-	if err != nil {
-		return fmt.Errorf("integrity creation failed: %w", err)
-	}
-	header.Integrity = integrity
-	outFile, err := os.Create(outputFile)
-	if err != nil {
-		return fmt.Errorf("file creation failed: %w", err)
-	}
-	defer func() {
-		if cerr := outFile.Close(); cerr != nil {
-			logger.Error("close error", "err", cerr)
-		}
-	}()
-	if err := writeHeader(outFile, header); err != nil {
-		return fmt.Errorf("header write failed: %w", err)
-	}
-	if err := writeSalt(outFile, salt.Bytes()); err != nil {
-		return fmt.Errorf("salt write failed: %w", err)
-	}
-	if _, err := inFile.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("seek failed: %w", err)
-	}
-	return processKeyRotation(ctx, inFile, outFile, originalKey, header)
-}
-
-func processKeyRotation(ctx context.Context, inFile, outFile *os.File, key *SecureBuffer, header FileHeader) error {
-	aead, err := chacha20poly1305.NewX(key.Bytes())
-	if err != nil {
-		return fmt.Errorf("AEAD initialization failed: %w", err)
-	}
-	baseAAD, err := buildEnhancedAAD(header, 0)
-	if err != nil {
-		return fmt.Errorf("AAD construction failed: %w", err)
-	}
-	headerSize := binary.Size(header)
-	if headerSize <= 0 {
-		return errors.New("invalid header size")
-	}
-	if _, err := inFile.Seek(int64(headerSize)+int64(header.SaltSize), io.SeekStart); err != nil {
-		return fmt.Errorf("seek failed: %w", err)
-	}
-	nonceSize := int(header.NonceSize)
-	var seq uint64
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		nonce := make([]byte, nonceSize)
-		if _, err := io.ReadFull(inFile, nonce); err == io.EOF {
-			break
-		} else if err != nil {
-			return fmt.Errorf("nonce read failed: %w", err)
-		}
-		var clen uint32
-		if err := binary.Read(inFile, binary.LittleEndian, &clen); err != nil {
-			return fmt.Errorf("length read failed: %w", err)
-		}
-		if clen > uint32(maxChunkSize) {
-			return errors.New("chunk size exceeds limit")
-		}
-		ct := make([]byte, clen)
-		if _, err := io.ReadFull(inFile, ct); err != nil {
-			return fmt.Errorf("ciphertext read failed: %w", err)
-		}
-		plain, err := aead.Open(nil, nonce, ct, baseAAD)
-		zeroBytes(ct)
-		if err != nil {
-			return fmt.Errorf("decryption failed during rotation: %w", err)
-		}
-		newAAD, err := buildEnhancedAAD(header, seq)
-		if err != nil {
-			zeroBytes(plain)
-			return fmt.Errorf("AAD reconstruction failed: %w", err)
-		}
-		newNonce := make([]byte, nonceSize)
-		if _, err := globals.ReadCSPRNG(newNonce); err != nil {
-			zeroBytes(plain)
-			return fmt.Errorf("nonce generation failed: %w", err)
-		}
-		newCT := aead.Seal(nil, newNonce, plain, newAAD)
-		zeroBytes(plain)
-		if err := writeChunk(outFile, newNonce, newCT); err != nil {
-			return fmt.Errorf("chunk write failed: %w", err)
-		}
-		seq++
+	if n != len(b) {
+		return errors.New("short read from crypto/rand")
 	}
 	return nil
 }
 
-func generateSalt(saltSize uint32) (*SecureBuffer, error) {
-	if saltSize < 1 || saltSize > maxSaltSize {
-		return nil, errors.New("invalid salt size")
-	}
-	salt := NewSecureBuffer(int(saltSize))
-	if _, err := globals.ReadCSPRNG(salt.Bytes()); err != nil {
-		salt.Zero()
-		return nil, fmt.Errorf("salt generation failed: %w", err)
-	}
-	return salt, nil
-}
-
-func createHeader(cfg config) (FileHeader, error) {
-	var header FileHeader
-	copy(header.Magic[:], MagicNumber)
-	header.Version = FileVersion
-	header.ArgonTime = cfg.KeyTime
-	header.ArgonMem = cfg.KeyMemory
-	header.ArgonUtil = cfg.KeyThreads
-	header.KeySize = cfg.KeySize
-	header.SaltSize = cfg.SaltSize
-	header.NonceSize = uint32(cfg.NonceSize)
-	header.KeyVersion = cfg.KeyVersion
-	header.Timestamp = uint64(time.Now().Unix())
-	for i := range header.Padding {
-		if header.Padding[i] != 0 {
-			return FileHeader{}, errors.New("non-zero padding detected")
-		}
-	}
-	return header, nil
-}
-
-func writeHeader(outFile *os.File, header FileHeader) error {
-	var headerBuf bytes.Buffer
-	if err := binary.Write(&headerBuf, binary.LittleEndian, header); err != nil {
-		return fmt.Errorf("header serialization failed: %w", err)
-	}
-	if _, err := outFile.Write(headerBuf.Bytes()); err != nil {
-		return fmt.Errorf("header write failed: %w", err)
-	}
-	return nil
-}
-
-func writeSalt(outFile *os.File, salt []byte) error {
-	if _, err := outFile.Write(salt); err != nil {
-		return fmt.Errorf("salt write failed: %w", err)
-	}
-	return nil
-}
-
-func deriveKey(password []byte, salt []byte, header FileHeader) (*SecureBuffer, error) {
-	key := NewSecureBuffer(int(header.KeySize))
-	derived := argon2.IDKey(password, salt, header.ArgonTime, header.ArgonMem, header.ArgonUtil, header.KeySize)
-	copy(key.Bytes(), derived)
-	for i := range derived {
-		derived[i] = 0
-	}
-	if _, err := chacha20poly1305.NewX(key.Bytes()); err != nil {
-		key.Zero()
-		return nil, fmt.Errorf("AEAD initialization failed: %w", err)
-	}
-	return key, nil
-}
-
-func processFile(
-	ctx context.Context,
-	inFile *os.File,
-	outFile *os.File,
-	key *SecureBuffer,
-	cfg config,
-	header FileHeader,
-) error {
-	aead, err := chacha20poly1305.NewX(key.Bytes())
+func die(msg string, err error) {
 	if err != nil {
-		return fmt.Errorf("AEAD initialization failed: %w", err)
+		fmt.Fprintf(os.Stderr, "%s: %v\n", msg, err)
+	} else {
+		fmt.Fprintln(os.Stderr, msg)
 	}
-	plainBuf := NewSecureBuffer(cfg.ChunkSize)
-	defer func(sb *SecureBuffer) {
-		if sb == nil {
-			return
-		}
-		sb.Close()
-	}(plainBuf)
-	baseAAD, err := buildEnhancedAAD(header, 0)
+	os.Exit(1)
+}
+
+func readPassword(prompt string) ([]byte, error) {
+	fmt.Fprint(os.Stderr, prompt)
+	pw, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
 	if err != nil {
-		return fmt.Errorf("AAD construction failed: %w", err)
+		return nil, err
 	}
-	var seq uint64
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		n, readErr := inFile.Read(plainBuf.Bytes())
-		if n > 0 {
-			if err := encryptChunk(outFile, plainBuf.Bytes()[:n], aead, baseAAD, seq, header); err != nil {
-				return fmt.Errorf("encryption failed for chunk %d: %w", seq, err)
-			}
-			plainBuf.Zero()
-			seq++
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return fmt.Errorf("read failed: %w", readErr)
-		}
+	if len(pw) == 0 {
+		zero(pw)
+		return nil, errors.New("empty password")
 	}
-	return nil
+	return pw, nil
 }
 
-func encryptChunk(
-	outFile *os.File,
-	plainBuf []byte,
-	aead cipher.AEAD,
-	baseAAD []byte,
-	seq uint64,
-	header FileHeader,
-) error {
-	nonce := make([]byte, aead.NonceSize())
-	if _, err := globals.ReadCSPRNG(nonce); err != nil {
-		return fmt.Errorf("nonce generation failed: %w", err)
-	}
-	aad, err := buildEnhancedAAD(header, seq)
+func confirmPassword() ([]byte, error) {
+	pw1, err := readPassword("Enter password: ")
 	if err != nil {
-		return fmt.Errorf("AAD construction failed: %w", err)
+		return nil, err
 	}
-	ct := aead.Seal(nil, nonce, plainBuf, aad)
-	if err := writeChunk(outFile, nonce, ct); err != nil {
-		return fmt.Errorf("chunk write failed: %w", err)
+	defer zero(pw1)
+
+	pw2, err := readPassword("Confirm password: ")
+	if err != nil {
+		return nil, err
+	}
+	defer zero(pw2)
+
+	if !hmac.Equal(pw1, pw2) {
+		return nil, errors.New("passwords do not match")
+	}
+
+	out := make([]byte, len(pw1))
+	copy(out, pw1)
+	return out, nil
+}
+
+func validateArgon2Params(t uint32, mem uint32, threads uint8) error {
+	const minTime = 2
+	const minMemory = 32 * 1024 // 32 MiB in KiB units
+	const minThreads = 1
+
+	if t < minTime {
+		return fmt.Errorf("Argon2 time too low (min %d)", minTime)
+	}
+	if mem < minMemory {
+		return fmt.Errorf("Argon2 memory too low (min %d KiB)", minMemory)
+	}
+	maxThreads := uint8(runtime.NumCPU() * 2)
+	if threads < minThreads || threads > maxThreads {
+		return fmt.Errorf("Argon2 threads must be between %d and %d", minThreads, maxThreads)
 	}
 	return nil
 }
 
-func writeChunk(outFile *os.File, nonce []byte, ct []byte) error {
-	if _, err := outFile.Write(nonce); err != nil {
-		return fmt.Errorf("nonce write failed: %w", err)
-	}
-	var clen = uint32(len(ct))
-	if err := binary.Write(outFile, binary.LittleEndian, clen); err != nil {
-		return fmt.Errorf("length write failed: %w", err)
-	}
-	if _, err := outFile.Write(ct); err != nil {
-		return fmt.Errorf("ciphertext write failed: %w", err)
-	}
-	return nil
+type fileHeader struct {
+	Magic        [16]byte
+	Version      uint32
+	KeyVersion   uint32
+	ChunkSize    uint32
+	NonceSize    uint32
+
+	ArgonTime    uint32
+	ArgonMemory uint32
+	ArgonThreads uint8
+	_            [3]byte // padding
+
+	Salt        [saltSize]byte
+	Reserved    [headerReservedSize]byte
+	HeaderMAC   [headerMACSize]byte
 }
 
-func readHeader(inFile *os.File) (FileHeader, error) {
-	var header FileHeader
-	if err := binary.Read(inFile, binary.LittleEndian, &header); err != nil {
-		return FileHeader{}, fmt.Errorf("header read failed: %w", err)
+const headerSize = 16 + 4*5 + 4 + saltSize + headerReservedSize + headerMACSize
+
+func (h *fileHeader) encode(withMAC bool) []byte {
+	buf := make([]byte, headerSize)
+	off := 0
+
+	copy(buf[off:], h.Magic[:])
+	off += 16
+
+	binary.BigEndian.PutUint32(buf[off:], h.Version)
+	off += 4
+	binary.BigEndian.PutUint32(buf[off:], h.KeyVersion)
+	off += 4
+	binary.BigEndian.PutUint32(buf[off:], h.ChunkSize)
+	off += 4
+	binary.BigEndian.PutUint32(buf[off:], h.NonceSize)
+	off += 4
+
+	binary.BigEndian.PutUint32(buf[off:], h.ArgonTime)
+	off += 4
+	binary.BigEndian.PutUint32(buf[off:], h.ArgonMemory)
+	off += 4
+	buf[off] = h.ArgonThreads
+	off += 4
+
+	copy(buf[off:], h.Salt[:])
+	off += saltSize
+
+	copy(buf[off:], h.Reserved[:])
+	off += headerReservedSize
+
+	if withMAC {
+		copy(buf[off:], h.HeaderMAC[:])
 	}
-	if string(header.Magic[:]) != MagicNumber {
-		return FileHeader{}, errors.New("invalid file format")
+
+	return buf
+}
+
+func parseHeader(b []byte) (*fileHeader, error) {
+	if len(b) != headerSize {
+		return nil, errors.New("invalid header size")
 	}
-	if header.Version > FileVersion {
-		return FileHeader{}, fmt.Errorf("unsupported file version: %d", header.Version)
+
+	h := &fileHeader{}
+	off := 0
+
+	copy(h.Magic[:], b[off:off+16])
+	off += 16
+
+	h.Version = binary.BigEndian.Uint32(b[off:])
+	off += 4
+	h.KeyVersion = binary.BigEndian.Uint32(b[off:])
+	off += 4
+	h.ChunkSize = binary.BigEndian.Uint32(b[off:])
+	off += 4
+	h.NonceSize = binary.BigEndian.Uint32(b[off:])
+	off += 4
+
+	h.ArgonTime = binary.BigEndian.Uint32(b[off:])
+	off += 4
+	h.ArgonMemory = binary.BigEndian.Uint32(b[off:])
+	off += 4
+	h.ArgonThreads = b[off]
+	off += 4
+
+	copy(h.Salt[:], b[off:off+saltSize])
+	off += saltSize
+
+	copy(h.Reserved[:], b[off:off+headerReservedSize])
+	off += headerReservedSize
+
+	copy(h.HeaderMAC[:], b[off:off+headerMACSize])
+
+	return h, nil
+}
+
+func validateHeader(h *fileHeader) error {
+	if !hmac.Equal(bytes.TrimRight(h.Magic[:], "\x00"), []byte(magicString)) {
+		return errors.New("invalid magic")
 	}
-	for i, b := range header.Padding {
+	if h.Version != formatVersion {
+		return fmt.Errorf("unsupported version %d", h.Version)
+	}
+	if h.ChunkSize == 0 || h.ChunkSize > maxChunkSize {
+		return errors.New("invalid chunk size")
+	}
+	if h.NonceSize != nonceSizeXChaCha {
+		return errors.New("invalid nonce size")
+	}
+	if err := validateArgon2Params(h.ArgonTime, h.ArgonMemory, h.ArgonThreads); err != nil {
+		return err
+	}
+	for _, b := range h.Reserved {
 		if b != 0 {
-			return FileHeader{}, fmt.Errorf("non-zero padding at byte %d", i)
+			return errors.New("reserved bytes not zero")
 		}
-	}
-	return header, nil
-}
-
-func readSalt(inFile *os.File, saltSize uint32) (*SecureBuffer, error) {
-	if saltSize < 16 || saltSize > maxSaltSize {
-		return nil, errors.New("invalid salt size")
-	}
-	salt := NewSecureBuffer(int(saltSize))
-	if _, err := io.ReadFull(inFile, salt.Bytes()); err != nil {
-		salt.Zero()
-		return nil, fmt.Errorf("salt read failed: %w", err)
-	}
-	return salt, nil
-}
-
-func decryptProcess(
-	ctx context.Context,
-	inFile *os.File,
-	outFile *os.File,
-	key *SecureBuffer,
-	header FileHeader,
-) error {
-	aead, err := chacha20poly1305.NewX(key.Bytes())
-	if err != nil {
-		return fmt.Errorf("AEAD initialization failed: %w", err)
-	}
-	nonceSize := int(header.NonceSize)
-	if nonceSize != aead.NonceSize() {
-		return errors.New("invalid file format")
-	}
-	baseAAD, err := buildEnhancedAAD(header, 0)
-	if err != nil {
-		return fmt.Errorf("AAD construction failed: %w", err)
-	}
-	var seq uint64
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		plain, err := decryptChunk(inFile, aead, baseAAD, seq, header)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("processing failed for chunk %d: %w", seq, err)
-		}
-		if _, err := outFile.Write(plain); err != nil {
-			zeroBytes(plain)
-			return fmt.Errorf("write failed: %w", err)
-		}
-		zeroBytes(plain)
-		seq++
 	}
 	return nil
 }
 
-func decryptChunk(inFile *os.File, aead cipher.AEAD, baseAAD []byte, seq uint64, header FileHeader) ([]byte, error) {
-	nonceSize := int(header.NonceSize)
-	nonce := make([]byte, nonceSize)
-	if _, err := io.ReadFull(inFile, nonce); err == io.EOF {
-		return nil, io.EOF
-	} else if err != nil {
-		return nil, fmt.Errorf("nonce read failed: %w", err)
+func computeHeaderHMAC(h *fileHeader, macKey []byte) ([]byte, error) {
+	tmp := *h
+	for i := range tmp.HeaderMAC {
+		tmp.HeaderMAC[i] = 0
 	}
-	var clen uint32
-	if err := binary.Read(inFile, binary.LittleEndian, &clen); err != nil {
-		return nil, fmt.Errorf("length read failed: %w", err)
-	}
-	if clen > uint32(maxChunkSize) {
-		return nil, errors.New("chunk size exceeds limit")
-	}
-	ct := make([]byte, clen)
-	if _, err := io.ReadFull(inFile, ct); err != nil {
-		return nil, fmt.Errorf("ciphertext read failed: %w", err)
-	}
-	aad, err := buildEnhancedAAD(header, seq)
+
+	mac := hmac.New(sha256.New, macKey)
+	_, err := mac.Write(tmp.encode(false))
 	if err != nil {
-		zeroBytes(ct)
-		return nil, fmt.Errorf("AAD construction failed: %w", err)
+		return nil, err
 	}
-	plain, err := aead.Open(nil, nonce, ct, aad)
-	zeroBytes(ct)
+	return mac.Sum(nil), nil
+}
+
+func verifyHeaderHMAC(h *fileHeader, macKey []byte) error {
+	expected, err := computeHeaderHMAC(h, macKey)
 	if err != nil {
-		return nil, errors.New("processing failed - data corrupted or wrong key")
+		return err
 	}
-	return plain, nil
+	if !hmac.Equal(expected, h.HeaderMAC[:]) {
+		return errors.New("header authentication failed")
+	}
+	return nil
+}
+
+const (
+	masterKeySize = 32
+	encKeySize    = 32
+	macKeySize    = 32
+
+	hkdfInfoEnc = "chachacrypt:enc"
+	hkdfInfoMAC = "chachacrypt:mac"
+	hkdfInfoAux = "chachacrypt:aux"
+)
+
+func validateArgon2Params(t, mem uint32, threads uint8) error {
+	const minTime = 2
+	const minMemory = 32 * 1024 // 32 MiB in KiB units
+	const minThreads = 1
+
+	if t < minTime {
+		return fmt.Errorf("argon2 time too low (min %d)", minTime)
+	}
+	if mem < minMemory {
+		return fmt.Errorf("argon2 memory too low (min %d KiB)", minMemory)
+	}
+	maxThreads := uint8(runtime.NumCPU() * 2)
+	if threads < minThreads || threads > maxThreads {
+		return fmt.Errorf("argon2 threads out of range")
+	}
+	return nil
+}
+
+func deriveMasterKeyArgon(password, salt []byte, t, mem uint32, threads uint8) []byte {
+	return argon2.IDKey(password, salt, t, mem, threads, masterKeySize)
+}
+
+func deriveKeysHKDF(master []byte) (encKey, macKey, auxKey []byte, err error) {
+	hash := sha256.New
+
+	encKey = make([]byte, encKeySize)
+	if _, err = hkdf.Expand(hash, master, []byte(hkdfInfoEnc)).Read(encKey); err != nil {
+		return nil, nil, nil, err
+	}
+
+	macKey = make([]byte, macKeySize)
+	if _, err = hkdf.Expand(hash, master, []byte(hkdfInfoMAC)).Read(macKey); err != nil {
+		zero(encKey)
+		return nil, nil, nil, err
+	}
+
+	auxKey = make([]byte, encKeySize)
+	if _, err = hkdf.Expand(hash, master, []byte(hkdfInfoAux)).Read(auxKey); err != nil {
+		zero(encKey)
+		zero(macKey)
+		return nil, nil, nil, err
+	}
+
+	return encKey, macKey, auxKey, nil
+}
+
+func buildHeaderAndKeysForEncrypt(
+	password []byte,
+	chunkSize uint32,
+	argonTime uint32,
+	argonMem uint32,
+	argonThreads uint8,
+	keyVersion uint32,
+) (*fileHeader, []byte, []byte, error) {
+
+	if err := validateArgon2Params(argonTime, argonMem, argonThreads); err != nil {
+		return nil, nil, nil, err
+	}
+
+	hdr := &fileHeader{}
+	copy(hdr.Magic[:], []byte(magicString))
+	hdr.Version = formatVersion
+	hdr.KeyVersion = keyVersion
+	hdr.ChunkSize = chunkSize
+	hdr.NonceSize = nonceSizeXChaCha
+	hdr.ArgonTime = argonTime
+	hdr.ArgonMemory = argonMem
+	hdr.ArgonThreads = argonThreads
+
+	if _, err := io.ReadFull(rand.Reader, hdr.Salt[:]); err != nil {
+		return nil, nil, nil, fmt.Errorf("salt generation failed: %w", err)
+	}
+
+	master := deriveMasterKeyArgon(password, hdr.Salt[:], argonTime, argonMem, argonThreads)
+	defer zero(master)
+
+	encKey, macKey, _, err := deriveKeysHKDF(master)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	mac, err := computeHeaderHMAC(hdr, macKey)
+	if err != nil {
+		zero(encKey)
+		zero(macKey)
+		return nil, nil, nil, err
+	}
+	copy(hdr.HeaderMAC[:], mac)
+
+	return hdr, encKey, macKey, nil
+}
+
+func prepareRotationKeys(
+	password []byte,
+	argonTime uint32,
+	argonMem uint32,
+	argonThreads uint8,
+) (*fileHeader, []byte, []byte, error) {
+
+	if err := validateArgon2Params(argonTime, argonMem, argonThreads); err != nil {
+		return nil, nil, nil, err
+	}
+
+	hdr := &fileHeader{}
+	copy(hdr.Magic[:], []byte(magicString))
+	hdr.Version = formatVersion
+	hdr.ArgonTime = argonTime
+	hdr.ArgonMemory = argonMem
+	hdr.ArgonThreads = argonThreads
+	hdr.NonceSize = nonceSizeXChaCha
+
+	if _, err := io.ReadFull(rand.Reader, hdr.Salt[:]); err != nil {
+		return nil, nil, nil, err
+	}
+
+	master := deriveMasterKeyArgon(password, hdr.Salt[:], argonTime, argonMem, argonThreads)
+	defer zero(master)
+
+	encKey, macKey, _, err := deriveKeysHKDF(master)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return hdr, encKey, macKey, nil
+}
+
+type cipherAEAD interface {
+	NonceSize() int
+	Overhead() int
+	Seal(dst, nonce, plaintext, additionalData []byte) []byte
+	Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error)
+}
+
+func newXChaCha20Poly1305(key []byte) (cipherAEAD, error) {
+	return chacha20poly1305.NewX(key)
+}
+
+func buildAAD(hdr *fileHeader, chunkIndex uint64) ([]byte, error) {
+	hb, err := serializeHeaderCanonical(hdr, true)
+	if err != nil {
+		return nil, err
+	}
+	aad := make([]byte, 0, len(hb)+8)
+	aad = append(aad, hb...)
+	var idxBuf [8]byte
+	binary.BigEndian.PutUint64(idxBuf[:], chunkIndex)
+	aad = append(aad, idxBuf[:]...)
+	return aad, nil
+}
+
+func writeChunkFrame(w io.Writer, nonce, ct []byte) error {
+	if err := binary.Write(w, binary.BigEndian, uint32(len(nonce))); err != nil {
+		return err
+	}
+	if _, err := w.Write(nonce); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, uint32(len(ct))); err != nil {
+		return err
+	}
+	if _, err := w.Write(ct); err != nil {
+		return err
+	}
+	return nil
+}
+
+func readChunkFrame(r io.Reader) ([]byte, []byte, error) {
+	var nNonce uint32
+	if err := binary.Read(r, binary.BigEndian, &nNonce); err != nil {
+		return nil, nil, err
+	}
+	if nNonce == 0 || nNonce > 64 {
+		return nil, nil, fmt.Errorf("invalid nonce length: %d", nNonce)
+	}
+	nonce := make([]byte, nNonce)
+	if _, err := io.ReadFull(r, nonce); err != nil {
+		return nil, nil, err
+	}
+
+	var nCT uint32
+	if err := binary.Read(r, binary.BigEndian, &nCT); err != nil {
+		return nil, nil, err
+	}
+	const maxReasonableCT = maxChunkSize + 128
+	if nCT == 0 || nCT > maxReasonableCT || nCT > maxCTSize {
+		return nil, nil, fmt.Errorf("ciphertext too large: %d", nCT)
+	}
+	ct := make([]byte, nCT)
+	if _, err := io.ReadFull(r, ct); err != nil {
+		return nil, nil, err
+	}
+	return nonce, ct, nil
+}
+
+func processOneEncrypt(
+	ctx context.Context,
+	in io.Reader,
+	out io.Writer,
+	hdr *fileHeader,
+	aead cipherAEAD,
+	buf []byte,
+	idx uint64,
+	verbose bool,
+) (bool, error) {
+
+	select {
+	case <-ctx.Done():
+		return true, ctx.Err()
+	default:
+	}
+
+	n, rerr := io.ReadFull(in, buf)
+	if rerr != nil && rerr != io.EOF && rerr != io.ErrUnexpectedEOF {
+		return true, rerr
+	}
+	if n == 0 && rerr == io.EOF {
+		return true, nil
+	}
+
+	nonce := make([]byte, hdr.NonceSize)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return true, err
+	}
+
+	aad, err := buildAAD(hdr, idx)
+	if err != nil {
+		return true, err
+	}
+
+	ct := aead.Seal(nil, nonce, buf[:n], aad)
+
+	if err := writeChunkFrame(out, nonce, ct); err != nil {
+		return true, err
+	}
+
+	if verbose {
+		fmt.Fprintf(os.Stderr, "Encrypted chunk %d (%d bytes)\n", idx, n)
+	}
+
+	return false, nil
+}
+
+func processOneDecrypt(
+	ctx context.Context,
+	in io.Reader,
+	out io.Writer,
+	hdr *fileHeader,
+	aead cipherAEAD,
+	idx uint64,
+	verbose bool,
+) (bool, error) {
+
+	select {
+	case <-ctx.Done():
+		return true, ctx.Err()
+	default:
+	}
+
+	nonce, ct, err := readChunkFrame(in)
+	if err == io.EOF {
+		return true, nil
+	}
+	if err != nil {
+		return true, err
+	}
+
+	aad, err := buildAAD(hdr, idx)
+	if err != nil {
+		return true, err
+	}
+
+	pt, err := aead.Open(nil, nonce, ct, aad)
+	if err != nil {
+		return true, errors.New("decryption failed (wrong password or tampered data)")
+	}
+
+	if _, err := out.Write(pt); err != nil {
+		zero(pt)
+		return true, err
+	}
+	zero(pt)
+
+	if verbose {
+		fmt.Fprintf(os.Stderr, "Decrypted chunk %d (%d bytes)\n", idx, len(pt))
+	}
+
+	return false, nil
+}
+
+func serializeHeaderCanonical(hdr *fileHeader, zeroMAC bool) ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	write := func(v any) error {
+		return binary.Write(buf, binary.BigEndian, v)
+	}
+
+	if _, err := buf.Write(hdr.Magic[:]); err != nil {
+		return nil, err
+	}
+	if err := write(hdr.Version); err != nil {
+		return nil, err
+	}
+	if err := write(hdr.KeyVersion); err != nil {
+		return nil, err
+	}
+	if err := write(hdr.ArgonTime); err != nil {
+		return nil, err
+	}
+	if err := write(hdr.ArgonMemory); err != nil {
+		return nil, err
+	}
+	if err := write(hdr.ArgonThreads); err != nil {
+		return nil, err
+	}
+	if _, err := buf.Write(hdr.Salt[:]); err != nil {
+		return nil, err
+	}
+	if err := write(hdr.ChunkSize); err != nil {
+		return nil, err
+	}
+	if err := write(hdr.NonceSize); err != nil {
+		return nil, err
+	}
+	if _, err := buf.Write(hdr.Reserved[:]); err != nil {
+		return nil, err
+	}
+
+	if zeroMAC {
+		var zero [headerMACSize]byte
+		if _, err := buf.Write(zero[:]); err != nil {
+			return nil, err
+		}
+	} else {
+		if _, err := buf.Write(hdr.HeaderMAC[:]); err != nil {
+			return nil, err
+		}
+	}
+
+	return buf.Bytes(), nil
+}
+
+func parseHeaderFromBytes(b []byte, hdr *fileHeader) error {
+	r := bytes.NewReader(b)
+
+	read := func(v any) error {
+		return binary.Read(r, binary.BigEndian, v)
+	}
+
+	if _, err := io.ReadFull(r, hdr.Magic[:]); err != nil {
+		return err
+	}
+	if err := read(&hdr.Version); err != nil {
+		return err
+	}
+	if err := read(&hdr.KeyVersion); err != nil {
+		return err
+	}
+	if err := read(&hdr.ArgonTime); err != nil {
+		return err
+	}
+	if err := read(&hdr.ArgonMemory); err != nil {
+		return err
+	}
+	if err := read(&hdr.ArgonThreads); err != nil {
+		return err
+	}
+	if _, err := io.ReadFull(r, hdr.Salt[:]); err != nil {
+		return err
+	}
+	if err := read(&hdr.ChunkSize); err != nil {
+		return err
+	}
+	if err := read(&hdr.NonceSize); err != nil {
+		return err
+	}
+	if _, err := io.ReadFull(r, hdr.Reserved[:]); err != nil {
+		return err
+	}
+	if _, err := io.ReadFull(r, hdr.HeaderMAC[:]); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateHeader(hdr *fileHeader) error {
+	if !secureCompare(hdr.Magic[:], []byte(MagicString)) {
+		return errors.New("invalid magic")
+	}
+	if hdr.Version != fileVersion {
+		return fmt.Errorf("unsupported version %d", hdr.Version)
+	}
+	if err := validateArgon2Params(hdr.ArgonTime, hdr.ArgonMemory, hdr.ArgonThreads); err != nil {
+		return err
+	}
+	if hdr.ChunkSize == 0 || hdr.ChunkSize > maxChunkSize {
+		return errors.New("invalid chunk size")
+	}
+	if hdr.NonceSize != nonceSize {
+		return errors.New("invalid nonce size")
+	}
+	for _, b := range hdr.Reserved {
+		if b != 0 {
+			return errors.New("reserved bytes not zero")
+		}
+	}
+	return nil
+}
+
+func computeHeaderHMAC(hdr *fileHeader, macKey []byte) ([]byte, error) {
+	hb, err := serializeHeaderCanonical(hdr, true)
+	if err != nil {
+		return nil, err
+	}
+	h := hmac.New(sha256.New, macKey)
+	if _, err := h.Write(hb); err != nil {
+		return nil, err
+	}
+	return h.Sum(nil), nil
+}
+
+func verifyHeaderHMAC(hdr *fileHeader, macKey []byte) error {
+	mac, err := computeHeaderHMAC(hdr, macKey)
+	if err != nil {
+		return err
+	}
+	if !secureCompare(mac, hdr.HeaderMAC[:]) {
+		return errors.New("header authentication failed")
+	}
+	return nil
+}
+
+func writeChunkFrame(w io.Writer, nonce, ct []byte) error {
+	if err := binary.Write(w, binary.BigEndian, uint32(len(nonce))); err != nil {
+		return err
+	}
+	if _, err := w.Write(nonce); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, uint32(len(ct))); err != nil {
+		return err
+	}
+	if _, err := w.Write(ct); err != nil {
+		return err
+	}
+	return nil
+}
+
+func readChunkFrame(r io.Reader) ([]byte, []byte, error) {
+	var nNonce uint32
+	if err := binary.Read(r, binary.BigEndian, &nNonce); err != nil {
+		return nil, nil, err
+	}
+	if nNonce == 0 || nNonce > 64 {
+		return nil, nil, errors.New("invalid nonce length")
+	}
+	nonce := make([]byte, nNonce)
+	if _, err := io.ReadFull(r, nonce); err != nil {
+		return nil, nil, err
+	}
+
+	var nCT uint32
+	if err := binary.Read(r, binary.BigEndian, &nCT); err != nil {
+		return nil, nil, err
+	}
+	const maxReasonableCT = maxChunkSize + 128
+	if nCT == 0 || nCT > maxReasonableCT {
+		return nil, nil, errors.New("ciphertext length invalid")
+	}
+	ct := make([]byte, nCT)
+	if _, err := io.ReadFull(r, ct); err != nil {
+		return nil, nil, err
+	}
+	return nonce, ct, nil
+}
+
+func processOneEncrypt(
+	ctx context.Context,
+	in io.Reader,
+	out io.Writer,
+	hdr *fileHeader,
+	aead cipher.AEAD,
+	buf []byte,
+	idx uint64,
+	verbose bool,
+) (bool, error) {
+
+	select {
+	case <-ctx.Done():
+		return true, ctx.Err()
+	default:
+	}
+
+	n, rerr := io.ReadFull(in, buf)
+	if rerr != nil && rerr != io.EOF && rerr != io.ErrUnexpectedEOF {
+		return true, rerr
+	}
+	if n == 0 && rerr == io.EOF {
+		return true, nil
+	}
+
+	nonce := make([]byte, hdr.NonceSize)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return true, err
+	}
+
+	aad, err := buildAAD(hdr, idx)
+	if err != nil {
+		return true, err
+	}
+
+	ct := aead.Seal(nil, nonce, buf[:n], aad)
+	if err := writeChunkFrame(out, nonce, ct); err != nil {
+		return true, err
+	}
+
+	if verbose {
+		fmt.Fprintf(os.Stderr, "Encrypted chunk %d (%d bytes)\n", idx, n)
+	}
+
+	return false, nil
+}
+
+func processOneDecrypt(
+	ctx context.Context,
+	in io.Reader,
+	out io.Writer,
+	hdr *fileHeader,
+	aead cipher.AEAD,
+	idx uint64,
+	verbose bool,
+) (bool, error) {
+
+	select {
+	case <-ctx.Done():
+		return true, ctx.Err()
+	default:
+	}
+
+	nonce, ct, err := readChunkFrame(in)
+	if err == io.EOF {
+		return true, nil
+	}
+	if err != nil {
+		return true, err
+	}
+
+	aad, err := buildAAD(hdr, idx)
+	if err != nil {
+		return true, err
+	}
+
+	pt, err := aead.Open(nil, nonce, ct, aad)
+	if err != nil {
+		return true, errors.New("decryption failed (wrong password or tampered data)")
+	}
+
+	if _, err := out.Write(pt); err != nil {
+		zero(pt)
+		return true, err
+	}
+	zero(pt)
+
+	if verbose {
+		fmt.Fprintf(os.Stderr, "Decrypted chunk %d (%d bytes)\n", idx, len(ct))
+	}
+
+	return false, nil
+}
+
+func processOneRotate(
+	ctx context.Context,
+	in io.ReadSeeker,
+	out io.Writer,
+	origHdr *fileHeader,
+	oldAEAD cipher.AEAD,
+	newHdr *fileHeader,
+	newAEAD cipher.AEAD,
+	idx uint64,
+	verbose bool,
+) (bool, error) {
+
+	select {
+	case <-ctx.Done():
+		return true, ctx.Err()
+	default:
+	}
+
+	nonce, ct, err := readChunkFrame(in)
+	if err == io.EOF {
+		return true, nil
+	}
+	if err != nil {
+		return true, err
+	}
+
+	aadOld, err := buildAAD(origHdr, idx)
+	if err != nil {
+		return true, err
+	}
+
+	pt, err := oldAEAD.Open(nil, nonce, ct, aadOld)
+	if err != nil {
+		return true, errors.New("decryption failed during rotation")
+	}
+
+	newNonce := make([]byte, newHdr.NonceSize)
+	if _, err := io.ReadFull(rand.Reader, newNonce); err != nil {
+		zero(pt)
+		return true, err
+	}
+
+	aadNew, err := buildAAD(newHdr, idx)
+	if err != nil {
+		zero(pt)
+		return true, err
+	}
+
+	newCT := newAEAD.Seal(nil, newNonce, pt, aadNew)
+	zero(pt)
+
+	if err := writeChunkFrame(out, newNonce, newCT); err != nil {
+		return true, err
+	}
+
+	if verbose {
+		fmt.Fprintf(os.Stderr, "Rotated chunk %d\n", idx)
+	}
+
+	return false, nil
+}
+
+func encryptFile(
+	ctx context.Context,
+	inPath, outPath string,
+	chunkSize uint32,
+	argonTime, argonMem uint32,
+	argonThreads uint8,
+	keyVersion uint32,
+	verbose bool,
+) error {
+
+	in, err := os.Open(inPath)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	pw1 := readPasswordPrompt("Password: ")
+	defer zero(pw1)
+	if len(pw1) == 0 {
+		return errors.New("empty password not allowed")
+	}
+
+	pw2 := readPasswordPrompt("Confirm password: ")
+	defer zero(pw2)
+	if !secureCompare(pw1, pw2) {
+		return errors.New("passwords do not match")
+	}
+
+	hdr, encKey, macKey, err := buildHeaderAndKeysForEncrypt(
+		pw1, chunkSize, argonTime, argonMem, argonThreads, keyVersion,
+	)
+	if err != nil {
+		return err
+	}
+	defer zero(encKey)
+	defer zero(macKey)
+
+	aead, err := chacha20poly1305.NewX(encKey)
+	if err != nil {
+		return err
+	}
+
+	hdrMAC, err := computeHeaderHMAC(hdr, macKey)
+	if err != nil {
+		return err
+	}
+	copy(hdr.HeaderMAC[:], hdrMAC)
+
+	return atomicWriteReplace("", outPath, func(out *os.File) error {
+		hdrBytes, err := serializeHeaderCanonical(hdr)
+		if err != nil {
+			return err
+		}
+		if _, err := out.Write(hdrBytes); err != nil {
+			return err
+		}
+
+		buf := make([]byte, hdr.ChunkSize)
+		var idx uint64
+
+		for {
+			done, err := processOneEncrypt(ctx, in, out, hdr, aead, buf, idx, verbose)
+			if err != nil {
+				return err
+			}
+			if done {
+				break
+			}
+			idx++
+		}
+		return nil
+	}, false)
+}
+
+func decryptFile(
+	ctx context.Context,
+	inPath, outPath string,
+	verbose bool,
+) error {
+
+	in, err := os.Open(inPath)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	hdrBytes := make([]byte, headerSize)
+	if _, err := io.ReadFull(in, hdrBytes); err != nil {
+		return err
+	}
+
+	var hdr fileHeader
+	if err := parseHeaderFromBytes(hdrBytes, &hdr); err != nil {
+		return err
+	}
+	if err := validateHeader(&hdr); err != nil {
+		return err
+	}
+
+	pw := readPasswordPrompt("Password: ")
+	defer zero(pw)
+
+	master := deriveMasterKeyArgon(pw, hdr.Salt[:], hdr.ArgonTime, hdr.ArgonMemory, hdr.ArgonThreads)
+	defer zero(master)
+
+	encKey, macKey, err := deriveEncAndMacKeys(master)
+	if err != nil {
+		return err
+	}
+	defer zero(encKey)
+	defer zero(macKey)
+
+	if !verifyHeaderHMAC(&hdr, macKey) {
+		return errors.New("header authentication failed (wrong password or tampered file)")
+	}
+
+	aead, err := chacha20poly1305.NewX(encKey)
+	if err != nil {
+		return err
+	}
+
+	return atomicWriteReplace("", outPath, func(out *os.File) error {
+		var idx uint64
+		for {
+			done, err := processOneDecrypt(ctx, in, out, &hdr, aead, idx, verbose)
+			if err != nil {
+				return err
+			}
+			if done {
+				break
+			}
+			idx++
+		}
+		return nil
+	}, false)
+}
+
+func rotateFile(
+	ctx context.Context,
+	inPath, outPath string,
+	newArgonTime, newArgonMem uint32,
+	newArgonThreads uint8,
+	newKeyVersion uint32,
+	verbose bool,
+) error {
+
+	in, err := os.Open(inPath)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	hdrBytes := make([]byte, headerSize)
+	if _, err := io.ReadFull(in, hdrBytes); err != nil {
+		return err
+	}
+
+	var origHdr fileHeader
+	if err := parseHeaderFromBytes(hdrBytes, &origHdr); err != nil {
+		return err
+	}
+	if err := validateHeader(&origHdr); err != nil {
+		return err
+	}
+
+	pwOld := readPasswordPrompt("Current password: ")
+	defer zero(pwOld)
+
+	masterOld := deriveMasterKeyArgon(
+		pwOld, origHdr.Salt[:],
+		origHdr.ArgonTime, origHdr.ArgonMemory, origHdr.ArgonThreads,
+	)
+	defer zero(masterOld)
+
+	oldEncKey, oldMacKey, err := deriveEncAndMacKeys(masterOld)
+	if err != nil {
+		return err
+	}
+	defer zero(oldEncKey)
+	defer zero(oldMacKey)
+
+	if !verifyHeaderHMAC(&origHdr, oldMacKey) {
+		return errors.New("authentication failed (wrong password)")
+	}
+
+	oldAEAD, err := chacha20poly1305.NewX(oldEncKey)
+	if err != nil {
+		return err
+	}
+
+	pwNew1 := readPasswordPrompt("New password: ")
+	defer zero(pwNew1)
+	if len(pwNew1) == 0 {
+		return errors.New("empty password not allowed")
+	}
+
+	pwNew2 := readPasswordPrompt("Confirm new password: ")
+	defer zero(pwNew2)
+	if !secureCompare(pwNew1, pwNew2) {
+		return errors.New("passwords do not match")
+	}
+
+	newHdr, newEncKey, newMacKey, err := prepareRotationKeys(
+		pwNew1, newArgonTime, newArgonMem, newArgonThreads,
+	)
+	if err != nil {
+		return err
+	}
+	defer zero(newEncKey)
+	defer zero(newMacKey)
+
+	newHdr.KeyVersion = newKeyVersion
+	newHdr.ChunkSize = origHdr.ChunkSize
+	newHdr.NonceSize = origHdr.NonceSize
+
+	newMAC, err := computeHeaderHMAC(newHdr, newMacKey)
+	if err != nil {
+		return err
+	}
+	copy(newHdr.HeaderMAC[:], newMAC)
+
+	newAEAD, err := chacha20poly1305.NewX(newEncKey)
+	if err != nil {
+		return err
+	}
+
+	return atomicWriteReplace("", outPath, func(out *os.File) error {
+		hdrBytes, err := serializeHeaderCanonical(newHdr)
+		if err != nil {
+			return err
+		}
+		if _, err := out.Write(hdrBytes); err != nil {
+			return err
+		}
+
+		var idx uint64
+		for {
+			done, err := processOneRotate(
+				ctx, in, out,
+				&origHdr, oldAEAD,
+				newHdr, newAEAD,
+				idx, verbose,
+			)
+			if err != nil {
+				return err
+			}
+			if done {
+				break
+			}
+			idx++
+		}
+		return nil
+	}, false)
+}
+
+func usage() {
+	fmt.Fprintf(os.Stderr, `chachacrypt — password-based file encryption
+
+Usage:
+  chachacrypt encrypt   -in <file> -out <file> [options]
+  chachacrypt decrypt   -in <file> -out <file>
+  chachacrypt rotate    -in <file> -out <file> [options]
+
+Options (encrypt / rotate):
+  --argon default|high|low   Argon2id preset (default: default)
+  --chunk-size <bytes>       Chunk size (default 1MiB, max 16MiB)
+  --key-version <n>          Key version metadata
+  --verbose                  Verbose progress
+
+Presets:
+  default: t=3, mem=128MiB, threads=4
+  high:    t=4, mem=256MiB (resource intensive)
+  low:     t=2, mem=32MiB  (prompted)
+
+`)
+	os.Exit(2)
+}
+
+type argonPreset struct {
+	t uint32
+	m uint32
+	p uint8
+}
+
+func resolveArgonPreset(name string) (argonPreset, error) {
+	switch name {
+	case "default":
+		return argonPreset{3, 128 * 1024, 4}, nil
+	case "high":
+		return argonPreset{4, 256 * 1024, 4}, nil
+	case "low":
+		fmt.Fprintln(os.Stderr, "Warning: low Argon2 parameters reduce security.")
+		if !promptYesNo("Continue?") {
+			return argonPreset{}, errors.New("aborted")
+		}
+		return argonPreset{2, 32 * 1024, 2}, nil
+	default:
+		return argonPreset{}, fmt.Errorf("unknown Argon2 preset: %s", name)
+	}
+}
+
+func safeAbsPath(p string) (string, error) {
+	if p == "" {
+		return "", errors.New("empty path")
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
+}
+
+func ensureDistinctPaths(inPath, outPath string) error {
+	inStat, err := os.Stat(inPath)
+	if err != nil {
+		return err
+	}
+	outStat, err := os.Stat(outPath)
+	if err == nil && os.SameFile(inStat, outStat) {
+		return errors.New("input and output paths refer to the same file")
+	}
+	return nil
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		usage()
+	}
+
+	ctx := context.Background()
+	cmd := os.Args[1]
+
+	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+
+	inPath := fs.String("in", "", "input file")
+	outPath := fs.String("out", "", "output file")
+	argonPresetName := fs.String("argon", "default", "argon2 preset")
+	chunkSize := fs.Uint("chunk-size", defaultChunkSize, "chunk size bytes")
+	keyVersion := fs.Uint("key-version", 1, "key version")
+	verbose := fs.Bool("verbose", false, "verbose")
+
+	if err := fs.Parse(os.Args[2:]); err != nil {
+		die(err)
+	}
+
+	if *inPath == "" || *outPath == "" {
+		usage()
+	}
+
+	inAbs, err := safeAbsPath(*inPath)
+	if err != nil {
+		die(err)
+	}
+	outAbs, err := safeAbsPath(*outPath)
+	if err != nil {
+		die(err)
+	}
+
+	if err := ensureDistinctPaths(inAbs, outAbs); err != nil {
+		die(err)
+	}
+
+	switch cmd {
+	case "encrypt":
+		preset, err := resolveArgonPreset(*argonPresetName)
+		if err != nil {
+			die(err)
+		}
+		if *chunkSize == 0 || *chunkSize > maxChunkSize {
+			die(fmt.Errorf("invalid chunk size"))
+		}
+		err = encryptFile(
+			ctx,
+			inAbs, outAbs,
+			uint32(*chunkSize),
+			preset.t, preset.m, preset.p,
+			uint32(*keyVersion),
+			*verbose,
+		)
+	case "decrypt":
+		err = decryptFile(ctx, inAbs, outAbs, *verbose)
+	case "rotate":
+		preset, err := resolveArgonPreset(*argonPresetName)
+		if err != nil {
+			die(err)
+		}
+		err = rotateFile(
+			ctx,
+			inAbs, outAbs,
+			preset.t, preset.m, preset.p,
+			uint32(*keyVersion),
+			*verbose,
+		)
+	default:
+		usage()
+		return
+	}
+
+	if err != nil {
+		die(err)
+	}
 }
