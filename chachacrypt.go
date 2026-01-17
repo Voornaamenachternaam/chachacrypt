@@ -192,9 +192,7 @@ func serializeHeaderCanonical(hdr *fileHeader) ([]byte, error) {
 // serializeHeaderForMAC returns the canonical header bytes with HeaderMAC zeroed.
 func serializeHeaderForMAC(hdr *fileHeader) ([]byte, error) {
 	tmp := *hdr
-	for i := range headerMACSize {
-		tmp.HeaderMAC[i] = 0
-	}
+	clear(tmp.HeaderMAC[:])
 	return serializeHeaderCanonical(&tmp)
 }
 
