@@ -477,7 +477,7 @@ func readChunkFrame(r io.Reader) ([]byte, []byte, error) {
 		return nil, nil, err
 	}
 	const maxReasonableCT = maxChunkSize + 128
-if nCT == 0 || nCT > maxReasonableCT || nCT > maxCTAbsolute {
+	if nCT == 0 || nCT > maxReasonableCT || nCT > maxCTAbsolute {
 		return nil, nil, fmt.Errorf("ciphertext too large: %d", nCT)
 	}
 	ct := make([]byte, nCT)
