@@ -2,15 +2,8 @@ name: govet-autofix
 
 on:
   push:
-    branches:
-      - main
-      - 'release/**'
   pull_request:
-    branches:
-      - main
   workflow_dispatch:
-  schedule:
-    - cron: '0 2 * * *'
 
 permissions:
   contents: write
@@ -52,7 +45,7 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          gofmt -s -w .
+          gofmt -s -w $(find . -name '*.go')
 
       - name: Run fieldalignment (fix)
         continue-on-error: true
@@ -108,7 +101,6 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: auto-fixes/${{ github.run_id }}
-          base: main
           update-existing: true
           commit-message: "chore(autofix): apply gofmt, fieldalignment, govet [skip ci]"
           title: "[autofix] Apply Go formatting and vet fixes"
@@ -117,4 +109,4 @@ jobs:
             - gofmt
             - fieldalignment
             - go vet
-            Diagnostic logs are attached as workflow artifacts.
+            Diagnostic logs are attached as workflow artifacts. 
