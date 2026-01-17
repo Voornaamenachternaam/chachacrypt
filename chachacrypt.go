@@ -49,7 +49,7 @@ const (
 
 	headerMACSize = 32
 
-	defaultChunkSize = 1 << 20 // 1 MiB
+	defaultChunkSize = 1 << 20  // 1 MiB
 	maxChunkSize     = 16 << 20 // 16 MiB
 
 	nonceSize = chacha20poly1305.NonceSizeX // 24
@@ -1004,15 +1004,15 @@ func parsePreset(preset string) (uint32, uint32, uint8, error) {
 }
 
 type runConfig struct {
-	enc, dec, rot    bool
-	in, out          string
-	force            bool
-	allowAbsolute    bool
-	chunkSize        uint32
-	argTime, argMem  uint32
-	argThreads       uint8
-	keyVersion       uint32
-	verbose          bool
+	enc, dec, rot   bool
+	in, out         string
+	force           bool
+	allowAbsolute   bool
+	chunkSize       uint32
+	argTime, argMem uint32
+	argThreads      uint8
+	keyVersion      uint32
+	verbose         bool
 }
 
 func parseFlags() (runConfig, error) {
