@@ -38,7 +38,7 @@ import (
 )
 
 const (
-	magicString = "CHACHACRYPT"
+	magicString          = "CHACHACRYPT"
 	formatVersion uint32 = 1
 
 	defaultChunkSize = 1 << 20 // 1 MiB
@@ -142,20 +142,20 @@ func validateArgon2Params(t uint32, mem uint32, threads uint8) error {
 }
 
 type fileHeader struct {
-	Magic        [16]byte
-	Version      uint32
-	KeyVersion   uint32
-	ChunkSize    uint32
-	NonceSize    uint32
+	Magic      [16]byte
+	Version    uint32
+	KeyVersion uint32
+	ChunkSize  uint32
+	NonceSize  uint32
 
 	ArgonTime    uint32
-	ArgonMemory uint32
+	ArgonMemory  uint32
 	ArgonThreads uint8
 	_            [3]byte // padding
 
-	Salt        [saltSize]byte
-	Reserved    [headerReservedSize]byte
-	HeaderMAC   [headerMACSize]byte
+	Salt      [saltSize]byte
+	Reserved  [headerReservedSize]byte
+	HeaderMAC [headerMACSize]byte
 }
 
 const headerSize = 16 + 4*5 + 4 + saltSize + headerReservedSize + headerMACSize
