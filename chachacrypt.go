@@ -85,18 +85,18 @@ const (
 /*** Types ***/
 
 type fileHeader struct {
-	Magic        [magicLen]byte
-	Version      uint16
-	KeyVersion   uint32
 	Timestamp    int64
+	KeyVersion   uint32
 	ArgonTime    uint32
 	ArgonMemory  uint32
-	ArgonThreads uint8
-	Salt         [saltSize]byte
 	ChunkSize    uint32
+	Version      uint16
 	NonceSize    uint16
-	Reserved     [reservedLen]byte
+	Salt         [saltSize]byte
 	HeaderMAC    [headerMACSize]byte
+	Magic        [magicLen]byte
+	Reserved     [reservedLen]byte
+	ArgonThreads uint8
 }
 
 type cipherAEAD interface {
@@ -1086,15 +1086,19 @@ func parsePreset(preset string) (uint32, uint32, uint8, error) {
 }
 
 type runConfig struct {
-	enc, dec, rot   bool
-	in, out         string
-	force           bool
-	allowAbsolute   bool
-	chunkSize       uint32
-	argTime, argMem uint32
-	argThreads      uint8
-	keyVersion      uint32
-	verbose         bool
+	in            string
+	out           string
+	argMem        uint32
+	chunkSize     uint32
+	argTime       uint32
+	keyVersion    uint32
+	rot           bool
+	dec           bool
+	force         bool
+	allowAbsolute bool
+	enc           bool
+	argThreads    uint8
+	verbose       bool
 }
 
 func parseFlags() (runConfig, error) {
