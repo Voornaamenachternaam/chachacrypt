@@ -175,10 +175,18 @@ func validatePasswordStrength(pw []byte) error {
 
 	// Require at least 3 out of 4 character types
 	charTypeCount := 0
-	if hasUpper { charTypeCount++ }
-	if hasLower { charTypeCount++ }
-	if hasDigit { charTypeCount++ }
-	if hasSpecial { charTypeCount++ }
+	if hasUpper {
+		charTypeCount++
+	}
+	if hasLower {
+		charTypeCount++
+	}
+	if hasDigit {
+		charTypeCount++
+	}
+	if hasSpecial {
+		charTypeCount++
+	}
 
 	if charTypeCount < 3 {
 		return errors.New("password must contain a mix of at least three character types (uppercase, lowercase, digits, special characters)")
@@ -1103,7 +1111,7 @@ func rotateFile(
 	if err := validatePasswordStrength(pwNew1); err != nil {
 		return fmt.Errorf("weak new password: %w", err)
 	}
-	
+
 	newHdr, newEncKey, newMacKey, err := prepareRotationKeys(pwNew1, newArgonTime, newArgonMem, newArgonThreads)
 	if err != nil {
 		return err
