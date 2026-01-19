@@ -916,8 +916,8 @@ func encryptFile(
 	if err != nil {
 		return fmt.Errorf("stat input file: %w", err)
 	}
-	if info.Mode().Perm()&0o066 != 0 {
-		return errors.New("input file has overly permissive permissions (e.g., group/other writable or readable)")
+	if info.Mode().Perm()&0o022 != 0 {
+		return errors.New("input file is writable by group or other, which is a security risk")
 	}
 
 	pw1 := readPasswordPrompt("Password: ")
