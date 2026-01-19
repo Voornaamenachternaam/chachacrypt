@@ -64,12 +64,12 @@ const (
 
 	usageExit = 2
 
-	// Security constants
+	// Security constants.
 	minPasswordLength = 12
 	maxPasswordLength = 1024
 	zeroPassCount     = 3 // Number of times to overwrite sensitive memory
 
-	// Platform-specific secure permissions
+	// Platform-specific secure permissions.
 	secureFilePerms = 0o600 // Owner read/write only
 	secureDirPerms  = 0o700 // Owner rwx only
 )
@@ -96,9 +96,9 @@ const (
 	lowArgonMemory  = 64 * 1024 // Increased from 32*1024 for better security
 	lowArgonThreads = 2
 
-	// Validation bounds
+	// Validation bounds.
 	minArgonTime    = 2
-	minArgonMemory  = 64 * 1024  // 64 MiB minimum
+	minArgonMemory  = 64 * 1024   // 64 MiB minimum
 	maxArgonMemory  = 1024 * 1024 // 1 GiB maximum
 	minArgonThreads = 1
 )
@@ -139,13 +139,13 @@ func secureZero(b []byte) {
 		b[i] = 0
 	}
 	runtime.KeepAlive(b)
-	
+
 	// Second pass: all ones
 	for i := range b {
 		b[i] = 0xFF
 	}
 	runtime.KeepAlive(b)
-	
+
 	// Final pass: zeros again
 	for i := range b {
 		b[i] = 0
@@ -153,7 +153,7 @@ func secureZero(b []byte) {
 	runtime.KeepAlive(b)
 }
 
-// zero is a simpler version for non-critical cleanup
+// zero is a simpler version for non-critical cleanup.
 func zero(b []byte) {
 	if b == nil || len(b) == 0 {
 		return
@@ -223,7 +223,7 @@ func validatePasswordStrength(pw []byte) error {
 		if c == 0 {
 			return errors.New("password contains null byte")
 		}
-		
+
 		// Check character types
 		switch {
 		case 'A' <= c && c <= 'Z':
@@ -358,11 +358,11 @@ func deriveEncAndMacKeys(master []byte) ([]byte, []byte, error) {
 	if len(master) != derivedKeyBytes {
 		return nil, nil, errors.New("invalid master key length")
 	}
-	
+
 	r := hkdf.New(sha256.New, master, nil, []byte("chachacrypt-enc-mac-v1"))
 	enc := make([]byte, keySize)
 	mac := make([]byte, keySize)
-	
+
 	if _, err := io.ReadFull(r, enc); err != nil {
 		secureZero(enc)
 		secureZero(mac)
@@ -380,7 +380,7 @@ func computeHeaderHMAC(hdr *fileHeader, macKey []byte) ([]byte, error) {
 	if len(macKey) != keySize {
 		return nil, errors.New("invalid MAC key length")
 	}
-	
+
 	b, err := serializeHeaderForMAC(hdr)
 	if err != nil {
 		return nil, err
@@ -399,7 +399,7 @@ func validateArgon2Params(t, mem uint32, threads uint8) error {
 		return fmt.Errorf("Argon2 time too low (min %d)", minArgonTime)
 	}
 	if t > 100 {
-		return fmt.Errorf("Argon2 time too high (max 100)")
+		return errors.New("Argon2 time too high (max 100)")
 	}
 	if mem < minArgonMemory {
 		return fmt.Errorf("Argon2 memory too low (min %d KiB)", minArgonMemory)
@@ -423,16 +423,16 @@ func checkMinEntropy(data []byte) error {
 	if len(data) < 16 {
 		return errors.New("data too short for entropy check")
 	}
-	
+
 	freq := make([]int, 256)
 	for _, b := range data {
 		freq[int(b)]++
 	}
-	
+
 	var entropy float64
 	length := float64(len(data))
 	nonZeroCount := 0
-	
+
 	for _, c := range freq {
 		if c == 0 {
 			continue
@@ -441,29 +441,29 @@ func checkMinEntropy(data []byte) error {
 		p := float64(c) / length
 		entropy -= p * math.Log2(p)
 	}
-	
+
 	// Require good distribution of byte values
 	if nonZeroCount < 128 {
 		return fmt.Errorf("insufficient byte diversity: only %d/256 values present", nonZeroCount)
 	}
-	
+
 	// Heuristic threshold: 7.5 bits/byte (truly random is ~8)
 	const minEntropy = 7.5
 	if entropy < minEntropy {
 		return fmt.Errorf("insufficient entropy: %.2f bits/byte (min %.2f)", entropy, minEntropy)
 	}
-	
+
 	return nil
 }
 
-// validateRandomness ensures crypto/rand is working properly
+// validateRandomness ensures crypto/rand is working properly.
 func validateRandomness() error {
 	test := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, test); err != nil {
 		return fmt.Errorf("random number generator failure: %w", err)
 	}
 	defer zero(test)
-	
+
 	return checkMinEntropy(test)
 }
 
@@ -514,7 +514,7 @@ func safeOutputPath(out string, allowAbsolute bool) (string, error) {
 
 	// Clean the resolved path
 	clean := filepath.Clean(resolved)
-	
+
 	if !allowAbsolute {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -552,7 +552,7 @@ func safeOutputPath(out string, allowAbsolute bool) (string, error) {
 	return clean, nil
 }
 
-// setSecurePermissions sets platform-appropriate secure permissions
+// setSecurePermissions sets platform-appropriate secure permissions.
 func setSecurePermissions(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -594,7 +594,7 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 			useFallbackTemp = true
 		}
 	}
-	
+
 	if useFallbackTemp {
 		dir = os.TempDir()
 		fmt.Fprintln(os.Stderr, "Warning: using system temp directory for security")
@@ -656,7 +656,7 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 		if errors.As(err, &linkErr) {
 			// Cross-device, fallback to copy
 			fmt.Fprintf(os.Stderr, "Warning: cross-device move, using copy for %s\n", finalPath)
-			
+
 			src, rerr := os.Open(tmpPath)
 			if rerr != nil {
 				return fmt.Errorf("open temp for copy: %w", rerr)
@@ -675,7 +675,7 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 			if serr := dst.Sync(); serr != nil {
 				return fmt.Errorf("sync dest: %w", serr)
 			}
-			
+
 			// Remove temp file after successful copy
 			os.Remove(tmpPath)
 			return nil
@@ -696,7 +696,7 @@ func writeChunkFrame(w io.Writer, nonce, ct []byte) error {
 	if len(ct) > maxCTSize {
 		return fmt.Errorf("ciphertext too large: %d", len(ct))
 	}
-	
+
 	if err := binary.Write(w, binary.BigEndian, uint32(len(nonce))); err != nil {
 		return fmt.Errorf("write nonce len: %w", err)
 	}
@@ -720,12 +720,12 @@ func readChunkFrame(r io.Reader) ([]byte, []byte, error) {
 	if nNonce == 0 || nNonce > maxNonceLen {
 		return nil, nil, fmt.Errorf("invalid nonce length: %d", nNonce)
 	}
-	
+
 	nonce := make([]byte, nNonce)
 	if _, err := io.ReadFull(r, nonce); err != nil {
 		return nil, nil, fmt.Errorf("read nonce: %w", err)
 	}
-	
+
 	var nCT uint32
 	if err := binary.Read(r, binary.BigEndian, &nCT); err != nil {
 		return nil, nil, fmt.Errorf("read ct len: %w", err)
@@ -733,12 +733,12 @@ func readChunkFrame(r io.Reader) ([]byte, []byte, error) {
 	if nCT > maxCTSize {
 		return nil, nil, fmt.Errorf("ciphertext too large: %d", nCT)
 	}
-	
+
 	ct := make([]byte, nCT)
 	if _, err := io.ReadFull(r, ct); err != nil {
 		return nil, nil, fmt.Errorf("read ct: %w", err)
 	}
-	
+
 	return nonce, ct, nil
 }
 
@@ -759,7 +759,7 @@ func processOneEncrypt(
 		return true, ctx.Err()
 	default:
 	}
-	
+
 	n, rerr := io.ReadFull(in, buf)
 	if rerr != nil && rerr != io.ErrUnexpectedEOF && rerr != io.EOF {
 		return true, fmt.Errorf("read input: %w", rerr)
@@ -767,13 +767,13 @@ func processOneEncrypt(
 	if n == 0 && rerr == io.EOF {
 		return true, nil
 	}
-	
+
 	nonce := make([]byte, hdr.NonceSize)
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return true, fmt.Errorf("nonce gen: %w", err)
 	}
 	defer zero(nonce)
-	
+
 	if entErr := checkMinEntropy(nonce); entErr != nil {
 		return true, fmt.Errorf("nonce entropy failed: %w", entErr)
 	}
@@ -782,18 +782,18 @@ func processOneEncrypt(
 	if err != nil {
 		return true, err
 	}
-	
+
 	ct := aead.Seal(nil, nonce, buf[:n], aad)
 	if err = writeChunkFrame(out, nonce, ct); err != nil {
 		zero(ct)
 		return true, err
 	}
 	zero(ct)
-	
+
 	if verbose {
 		fmt.Fprintf(os.Stderr, "Encrypted chunk %d (pt=%d ct=%d)\n", idx, n, len(ct))
 	}
-	
+
 	if n < int(hdr.ChunkSize) {
 		return true, nil
 	}
@@ -810,7 +810,7 @@ func encryptChunks(
 ) error {
 	buf := make([]byte, hdr.ChunkSize)
 	defer zero(buf)
-	
+
 	var idx uint64
 	for {
 		done, err := processOneEncrypt(ctx, in, out, hdr, aead, buf, idx, verbose)
@@ -841,7 +841,7 @@ func processOneDecrypt(
 		return true, ctx.Err()
 	default:
 	}
-	
+
 	nonce, ct, rerr := readChunkFrame(in)
 	if rerr != nil {
 		if errors.Is(rerr, io.EOF) {
@@ -851,22 +851,22 @@ func processOneDecrypt(
 	}
 	defer zero(nonce)
 	defer zero(ct)
-	
+
 	aad, err := buildAAD(hdr, idx)
 	if err != nil {
 		return true, err
 	}
-	
+
 	pt, err := aead.Open(nil, nonce, ct, aad)
 	if err != nil {
 		return true, errors.New("authentication failed: wrong password or corrupted data")
 	}
 	defer zero(pt)
-	
+
 	if _, err := out.Write(pt); err != nil {
 		return true, fmt.Errorf("write plaintext: %w", err)
 	}
-	
+
 	if verbose {
 		fmt.Fprintf(os.Stderr, "Decrypted chunk %d (pt=%d)\n", idx, len(pt))
 	}
@@ -913,7 +913,7 @@ func processOneRotate(
 		return true, ctx.Err()
 	default:
 	}
-	
+
 	nonce, ct, rerr := readChunkFrame(in)
 	if rerr != nil {
 		if errors.Is(rerr, io.EOF) {
@@ -923,40 +923,40 @@ func processOneRotate(
 	}
 	defer zero(nonce)
 	defer zero(ct)
-	
+
 	aadOld, err := buildAAD(origHdr, idx)
 	if err != nil {
 		return true, err
 	}
-	
+
 	pt, err := oldAEAD.Open(nil, nonce, ct, aadOld)
 	if err != nil {
 		return true, fmt.Errorf("decrypt chunk %d failed: authentication error", idx)
 	}
 	defer secureZero(pt)
-	
+
 	newNonce := make([]byte, newHdr.NonceSize)
 	if _, err = io.ReadFull(rand.Reader, newNonce); err != nil {
 		return true, fmt.Errorf("new nonce gen: %w", err)
 	}
 	defer zero(newNonce)
-	
+
 	if entErr := checkMinEntropy(newNonce); entErr != nil {
 		return true, fmt.Errorf("new nonce entropy failed: %w", entErr)
 	}
-	
+
 	aadNew, err := buildAAD(newHdr, idx)
 	if err != nil {
 		return true, err
 	}
-	
+
 	newCt := newAEAD.Seal(nil, newNonce, pt, aadNew)
 	defer zero(newCt)
-	
+
 	if err := writeChunkFrame(out, newNonce, newCt); err != nil {
 		return true, err
 	}
-	
+
 	if verbose {
 		fmt.Fprintf(os.Stderr, "Rotated chunk %d\n", idx)
 	}
@@ -976,7 +976,7 @@ func rotateChunks(
 	if _, err := in.Seek(int64(headerTotalSize), io.SeekStart); err != nil {
 		return fmt.Errorf("seek input: %w", err)
 	}
-	
+
 	var idx uint64
 	for {
 		done, err := processOneRotate(ctx, in, out, origHdr, oldAEAD, newHdr, newAEAD, idx, verbose)
@@ -999,7 +999,7 @@ func parseHeaderFromBytes(data []byte, hdr *fileHeader) error {
 	if len(data) < headerTotalSize {
 		return errors.New("header too short")
 	}
-	
+
 	buf := bytes.NewReader(data)
 	if _, err := io.ReadFull(buf, hdr.Magic[:]); err != nil {
 		return err
@@ -1049,11 +1049,11 @@ func validateHeader(hdr *fileHeader) error {
 	if !secureCompare(hdr.Magic[:], magicCmp[:]) {
 		return errors.New("invalid file format")
 	}
-	
+
 	if hdr.Version != fileVersion {
 		return fmt.Errorf("unsupported version %d", hdr.Version)
 	}
-	
+
 	// Validate timestamp is reasonable (not in far future)
 	now := time.Now().Unix()
 	if hdr.Timestamp > now+86400 {
@@ -1062,26 +1062,26 @@ func validateHeader(hdr *fileHeader) error {
 	if hdr.Timestamp < 0 {
 		return errors.New("invalid timestamp: negative value")
 	}
-	
+
 	if err := validateArgon2Params(hdr.ArgonTime, hdr.ArgonMemory, hdr.ArgonThreads); err != nil {
 		return fmt.Errorf("invalid argon2 params: %w", err)
 	}
-	
+
 	if hdr.ChunkSize < minChunkSize || hdr.ChunkSize > maxChunkSize {
 		return fmt.Errorf("invalid chunk size: %d (must be %d-%d)", hdr.ChunkSize, minChunkSize, maxChunkSize)
 	}
-	
+
 	if hdr.NonceSize != nonceSize {
 		return fmt.Errorf("invalid nonce size: %d (expected %d)", hdr.NonceSize, nonceSize)
 	}
-	
+
 	// Reserved bytes must be zero
 	for i, b := range hdr.Reserved {
 		if b != 0 {
 			return fmt.Errorf("reserved byte %d is non-zero", i)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -1097,7 +1097,7 @@ func buildHeaderAndKeysForEncrypt(
 	if err := validateArgon2Params(argonTime, argonMem, argonThreads); err != nil {
 		return nil, nil, nil, fmt.Errorf("invalid Argon2 parameters: %w", err)
 	}
-	
+
 	var hdr fileHeader
 	copy(hdr.Magic[:], []byte(MagicString))
 	hdr.Version = fileVersion
@@ -1115,7 +1115,7 @@ func buildHeaderAndKeysForEncrypt(
 	if entErr := checkMinEntropy(hdr.Salt[:]); entErr != nil {
 		return nil, nil, nil, fmt.Errorf("salt entropy check failed: %w", entErr)
 	}
-	
+
 	master := deriveMasterKeyArgon(password, hdr.Salt[:], hdr.ArgonTime, hdr.ArgonMemory, hdr.ArgonThreads)
 	defer secureZero(master)
 
@@ -1125,7 +1125,7 @@ func buildHeaderAndKeysForEncrypt(
 		secureZero(macKey)
 		return nil, nil, nil, fmt.Errorf("key derivation failed: %w", err)
 	}
-	
+
 	mac, err := computeHeaderHMAC(&hdr, macKey)
 	if err != nil {
 		secureZero(encKey)
@@ -1133,7 +1133,7 @@ func buildHeaderAndKeysForEncrypt(
 		return nil, nil, nil, fmt.Errorf("compute header mac: %w", err)
 	}
 	copy(hdr.HeaderMAC[:], mac)
-	
+
 	return &hdr, encKey, macKey, nil
 }
 
@@ -1165,7 +1165,7 @@ func encryptFile(
 	if err != nil {
 		return fmt.Errorf("stat input: %w", err)
 	}
-	
+
 	// Security checks on input file
 	if runtime.GOOS != "windows" {
 		if info.Mode().Perm()&0o022 != 0 {
@@ -1181,13 +1181,13 @@ func encryptFile(
 		return err
 	}
 	defer secureZero(pw1)
-	
+
 	pw2, err := readPasswordPrompt("Confirm password: ")
 	if err != nil {
 		return err
 	}
 	defer secureZero(pw2)
-	
+
 	if !secureCompare(pw1, pw2) {
 		return errors.New("passwords do not match")
 	}
@@ -1240,7 +1240,7 @@ func decryptFile(ctx context.Context, inPath, outPath string, force bool, verbos
 	if _, err := io.ReadFull(in, hdrBytes); err != nil {
 		return fmt.Errorf("read header: %w", err)
 	}
-	
+
 	var hdr fileHeader
 	if err := parseHeaderFromBytes(hdrBytes, &hdr); err != nil {
 		return fmt.Errorf("parse header: %w", err)
@@ -1254,7 +1254,7 @@ func decryptFile(ctx context.Context, inPath, outPath string, force bool, verbos
 		return err
 	}
 	defer secureZero(pw)
-	
+
 	encKey, macKey, err := deriveKeysFromPassword(pw, &hdr)
 	if err != nil {
 		return fmt.Errorf("derive keys: %w", err)
@@ -1278,7 +1278,7 @@ func decryptFile(ctx context.Context, inPath, outPath string, force bool, verbos
 	writer := func(f *os.File) error {
 		return decryptChunks(ctx, in, f, &hdr, aead, verbose)
 	}
-	
+
 	dir := filepath.Dir(outPath)
 	return atomicWriteReplace(dir, outPath, writer, force)
 }
@@ -1291,7 +1291,7 @@ func prepareRotationKeys(
 	if err := validateArgon2Params(newArgonTime, newArgonMem, newArgonThreads); err != nil {
 		return nil, nil, nil, fmt.Errorf("invalid Argon2 params: %w", err)
 	}
-	
+
 	var hdr fileHeader
 	copy(hdr.Magic[:], []byte(MagicString))
 	hdr.Version = fileVersion
@@ -1306,7 +1306,7 @@ func prepareRotationKeys(
 	if entErr := checkMinEntropy(hdr.Salt[:]); entErr != nil {
 		return nil, nil, nil, fmt.Errorf("new salt entropy failed: %w", entErr)
 	}
-	
+
 	master := deriveMasterKeyArgon(pwNew, hdr.Salt[:], hdr.ArgonTime, hdr.ArgonMemory, hdr.ArgonThreads)
 	defer secureZero(master)
 
@@ -1316,7 +1316,7 @@ func prepareRotationKeys(
 		secureZero(macKey)
 		return nil, nil, nil, fmt.Errorf("derive keys: %w", err)
 	}
-	
+
 	mac, err := computeHeaderHMAC(&hdr, macKey)
 	if err != nil {
 		secureZero(encKey)
@@ -1324,7 +1324,7 @@ func prepareRotationKeys(
 		return nil, nil, nil, fmt.Errorf("compute header mac: %w", err)
 	}
 	copy(hdr.HeaderMAC[:], mac)
-	
+
 	return &hdr, encKey, macKey, nil
 }
 
@@ -1347,7 +1347,7 @@ func rotateFile(
 	if _, err := io.ReadFull(in, hdrBytes); err != nil {
 		return fmt.Errorf("read header: %w", err)
 	}
-	
+
 	var origHdr fileHeader
 	if err := parseHeaderFromBytes(hdrBytes, &origHdr); err != nil {
 		return fmt.Errorf("parse header: %w", err)
@@ -1361,7 +1361,7 @@ func rotateFile(
 		return err
 	}
 	defer secureZero(pwOld)
-	
+
 	oldEncKey, oldMacKey, err := deriveKeysFromPassword(pwOld, &origHdr)
 	if err != nil {
 		return fmt.Errorf("derive old keys: %w", err)
@@ -1382,13 +1382,13 @@ func rotateFile(
 		return err
 	}
 	defer secureZero(pwNew1)
-	
+
 	pwNew2, err := readPasswordPrompt("Confirm new password: ")
 	if err != nil {
 		return err
 	}
 	defer secureZero(pwNew2)
-	
+
 	if !secureCompare(pwNew1, pwNew2) {
 		return errors.New("new passwords do not match")
 	}
@@ -1505,7 +1505,7 @@ func parseFlags() (runConfig, error) {
 		printUsage()
 		return cfg, errors.New("invalid arguments")
 	}
-	
+
 	cfg.enc = *enc
 	cfg.dec = *dec
 	cfg.rot = *rot
@@ -1529,16 +1529,16 @@ func parseFlags() (runConfig, error) {
 	if *argonThreadsFlag != 0 {
 		argThreads = uint8(*argonThreadsFlag)
 	}
-	
+
 	if err := validateArgon2Params(argTime, argMem, argThreads); err != nil {
 		return cfg, fmt.Errorf("invalid Argon2 configuration: %w", err)
 	}
-	
+
 	cfg.argTime = argTime
 	cfg.argMem = argMem
 	cfg.argThreads = argThreads
 	cfg.keyVersion = uint32(*keyVersionFlag)
-	
+
 	return cfg, nil
 }
 
@@ -1552,12 +1552,12 @@ func runOperation(ctx context.Context, cfg runConfig) error {
 	if err != nil {
 		return fmt.Errorf("resolve input path: %w", err)
 	}
-	
+
 	absOut, err := safeOutputPath(cfg.out, cfg.allowAbsolute)
 	if err != nil {
 		return fmt.Errorf("invalid output path: %w", err)
 	}
-	
+
 	// Prevent same-file operations
 	inStat, err := os.Stat(absIn)
 	if err != nil {
@@ -1568,7 +1568,7 @@ func runOperation(ctx context.Context, cfg runConfig) error {
 			return errors.New("input and output are the same file")
 		}
 	}
-	
+
 	if cfg.chunkSize < minChunkSize || cfg.chunkSize > maxChunkSize {
 		return fmt.Errorf("invalid chunk size: %d (must be %d-%d)", cfg.chunkSize, minChunkSize, maxChunkSize)
 	}
@@ -1588,14 +1588,14 @@ func runOperation(ctx context.Context, cfg runConfig) error {
 			cfg.keyVersion, cfg.verbose,
 		)
 	}
-	
+
 	if cfg.dec {
 		if cfg.verbose {
 			fmt.Fprintf(os.Stderr, "Decrypting: %s -> %s\n", absIn, absOut)
 		}
 		return decryptFile(ctx, absIn, absOut, cfg.force, cfg.verbose)
 	}
-	
+
 	if cfg.rot {
 		if cfg.verbose {
 			fmt.Fprintf(os.Stderr, "Rotating: %s -> %s\n", absIn, absOut)
@@ -1611,7 +1611,7 @@ func runOperation(ctx context.Context, cfg runConfig) error {
 			cfg.keyVersion, cfg.verbose,
 		)
 	}
-	
+
 	return errors.New("no operation specified")
 }
 
@@ -1626,10 +1626,10 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	
+
 	var cancelled int32
 	go func() {
 		<-sigCh
