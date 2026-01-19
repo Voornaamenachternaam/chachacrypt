@@ -60,12 +60,18 @@ const (
 	reservedLen = 7
 
 	maxNonceLen = 1024
-	maxCTSize   = 1 << 30 // 1 GiB sanity cap
+	maxCTSize   = 16 << 20
 
 	usageExit = 2
 )
 
 const headerTotalSize = magicLen + 2 + 4 + 8 + 4 + 4 + 1 + saltSize + 4 + 2 + reservedLen + headerMACSize
+
+func init() {
+	if hb, _ := serializeHeaderCanonical(&fileHeader{}); len(hb) != headerTotalSize {
+		panic(fmt.Sprintf("headerTotalSize mismatch: got %d, want %d", len(hb), headerTotalSize))
+	}
+}
 
 // Argon2 presets (memory in KiB).
 const (
@@ -123,8 +129,7 @@ func die(err error) {
 	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
 		fmt.Fprintln(os.Stderr, "Error: file access issue — check paths/permissions.")
 	} else {
-		// Default to printing the error; it's still helpful for users.
-		fmt.Fprintln(os.Stderr, "Error:", err)
+		fmt.Fprintln(os.Stderr, "Error: An unexpected error occurred.")
 	}
 	os.Exit(1)
 }
@@ -144,6 +149,51 @@ func secureCompare(a, b []byte) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare(a, b) == 1
+}
+
+func validatePasswordStrength(pw []byte) error {
+	if len(pw) < 12 { // Minimum length of 12 characters
+		return errors.New("password too short (minimum 12 characters)")
+	}
+
+	hasUpper := false
+	hasLower := false
+	hasDigit := false
+	hasSpecial := false
+	for _, c := range string(pw) {
+		switch {
+		case 'A' <= c && c <= 'Z':
+			hasUpper = true
+		case 'a' <= c && c <= 'z':
+			hasLower = true
+		case '0' <= c && c <= '9':
+			hasDigit = true
+		case strings.ContainsRune("!@#$%^&*()_+-=[]{}|;:,.<>?", c):
+			hasSpecial = true
+		}
+	}
+
+	// Require at least 3 out of 4 character types
+	charTypeCount := 0
+	if hasUpper { charTypeCount++ }
+	if hasLower { charTypeCount++ }
+	if hasDigit { charTypeCount++ }
+	if hasSpecial { charTypeCount++ }
+
+	if charTypeCount < 3 {
+		return errors.New("password must contain a mix of at least three character types (uppercase, lowercase, digits, special characters)")
+	}
+
+	// Optional: Check against common weak patterns (can be expanded)
+	weakPatterns := []string{"password", "123456", "qwerty", "admin"}
+	lowerPw := strings.ToLower(string(pw))
+	for _, pattern := range weakPatterns {
+		if strings.Contains(lowerPw, pattern) {
+			return errors.New("password contains a common weak pattern")
+		}
+	}
+
+	return nil
 }
 
 /*** Header serialization & AAD ***/
@@ -298,21 +348,19 @@ func safeOutputPath(out string, allowAbsolute bool) (string, error) {
 	if out == "" {
 		return "", errors.New("empty output path")
 	}
-	// Resolve symlinks; if that fails, fallback to Abs+Clean.
-	abs, err := filepath.EvalSymlinks(out)
-	if err != nil {
-		abs2, aerr := filepath.Abs(out)
-		if aerr != nil {
-			return "", fmt.Errorf("resolve path: %w", aerr)
-		}
-		abs = filepath.Clean(abs2)
-	} else {
-		abs = filepath.Clean(abs)
-	}
-	if strings.Contains(abs, "\x00") {
+	if strings.IndexByte(out, 0) != -1 {
 		return "", errors.New("null byte in path")
 	}
-	// Reject any .. components in the cleaned, resolved path.
+	abs, err := filepath.Abs(out)
+	if err != nil {
+		return "", fmt.Errorf("failed to get absolute path: %w", err)
+	}
+
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve symlinks in path: %w", err)
+	}
+	abs = filepath.Clean(resolved)
 	parts := strings.Split(abs, string(os.PathSeparator))
 	for _, p := range parts {
 		if p == ".." {
@@ -397,8 +445,7 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 		return fmt.Errorf("close temp: %w", err)
 	}
 
-	// Attempt to fsync the directory (best effort)
-	dfd, dfdErr := os.Open(filepath.Dir(finalPath))
+	dfd, dfdErr := os.OpenFile(filepath.Dir(finalPath), os.O_RDONLY, 0)
 	if dfdErr == nil {
 		if syncErr := dfd.Sync(); syncErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: directory sync failed: %v\n", syncErr)
@@ -418,6 +465,25 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 
 	// Finally rename into place
 	if err = os.Rename(tmpPath, finalPath); err != nil {
+		if linkErr, ok := err.(*os.LinkError); ok && linkErr.Op == "rename" && strings.Contains(linkErr.Err.Error(), "cross-device link") {
+			fmt.Fprintf(os.Stderr, "Warning: cross-device move detected; falling back to non-atomic copy for %s -> %s\n", tmpPath, finalPath)
+			src, rerr := os.Open(tmpPath)
+			if rerr != nil {
+				return fmt.Errorf("open temp for copy: %w", rerr)
+			}
+			defer src.Close()
+
+			dst, werr := os.OpenFile(finalPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+			if werr != nil {
+				return fmt.Errorf("create dest for copy: %w", werr)
+			}
+			defer dst.Close()
+
+			if _, cerr := io.Copy(dst, src); cerr != nil {
+				return fmt.Errorf("copy temp to dest: %w", cerr)
+			}
+			return nil
+		}
 		return fmt.Errorf("rename temp: %w", err)
 	}
 	return nil
@@ -632,6 +698,7 @@ func processOneRotate(
 	if err != nil {
 		return true, fmt.Errorf("decrypt chunk failed idx=%d: %w", idx, err)
 	}
+	defer zero(pt)
 	newNonce := make([]byte, newHdr.NonceSize)
 	if _, err = io.ReadFull(rand.Reader, newNonce); err != nil {
 		return true, fmt.Errorf("new nonce gen: %w", err)
@@ -828,6 +895,14 @@ func encryptFile(
 	}
 	defer in.Close()
 
+	info, err := in.Stat()
+	if err != nil {
+		return fmt.Errorf("stat input file: %w", err)
+	}
+	if info.Mode().Perm()&0o066 != 0 {
+		return errors.New("input file has overly permissive permissions (e.g., group/other writable or readable)")
+	}
+
 	pw1 := readPasswordPrompt("Password: ")
 	defer zero(pw1)
 	if len(pw1) == 0 {
@@ -837,6 +912,9 @@ func encryptFile(
 	defer zero(pw2)
 	if !secureCompare(pw1, pw2) {
 		return errors.New("passwords do not match")
+	}
+	if err := validatePasswordStrength(pw1); err != nil {
+		return fmt.Errorf("weak password: %w", err)
 	}
 
 	hdr, encKey, macKey, err := buildHeaderAndKeysForEncrypt(
@@ -1022,7 +1100,10 @@ func rotateFile(
 	if !secureCompare(pwNew1, pwNew2) {
 		return errors.New("passwords do not match")
 	}
-
+	if err := validatePasswordStrength(pwNew1); err != nil {
+		return fmt.Errorf("weak new password: %w", err)
+	}
+	
 	newHdr, newEncKey, newMacKey, err := prepareRotationKeys(pwNew1, newArgonTime, newArgonMem, newArgonThreads)
 	if err != nil {
 		return err
@@ -1173,8 +1254,8 @@ func runOperation(ctx context.Context, cfg runConfig) error {
 		return fmt.Errorf("stat input: %w", err)
 	}
 	if outStat, err := os.Stat(absOut); err == nil {
-		if os.SameFile(inStat, outStat) && !cfg.force {
-			return errors.New("input and output are the same file; use --force")
+		if os.SameFile(inStat, outStat) {
+			return errors.New("input and output are the same file; this is not allowed to prevent data loss")
 		}
 	}
 	if cfg.chunkSize == 0 || cfg.chunkSize > maxChunkSize {
