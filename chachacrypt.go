@@ -356,53 +356,53 @@ func checkMinEntropy(data []byte) error {
 // safeOutputPath resolves symlinks, cleans, and ensures output is within CWD unless allowAbsolute.
 // It rejects null bytes and basic traversal after evaluation.
 func safeOutputPath(out string, allowAbsolute bool) (string, error) {
-    // Basic validation
-    if strings.IndexByte(out, 0) != -1 {
-        return "", errors.New("null byte in path")
-    }
+	// Basic validation
+	if strings.IndexByte(out, 0) != -1 {
+		return "", errors.New("null byte in path")
+	}
 
-    // Normalize path separators first
-    normalized := filepath.FromSlash(out)
+	// Normalize path separators first
+	normalized := filepath.FromSlash(out)
 
-    // Resolve symlinks before getting absolute path
-    resolved, err := filepath.EvalSymlinks(normalized)
-    if err != nil {
-        return "", fmt.Errorf("failed to resolve symlinks in path: %w", err)
-    }
+	// Resolve symlinks before getting absolute path
+	resolved, err := filepath.EvalSymlinks(normalized)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve symlinks in path: %w", err)
+	}
 
-    // Get absolute path
-    abs, err := filepath.Abs(resolved)
-    if err != nil {
-        // Corrected error message and usage of fmt.Errorf
-        return "", fmt.Errorf("failed to get absolute path after symlink resolution: %w", err)
-    }
+	// Get absolute path
+	abs, err := filepath.Abs(resolved)
+	if err != nil {
+		// Corrected error message and usage of fmt.Errorf
+		return "", fmt.Errorf("failed to get absolute path after symlink resolution: %w", err)
+	}
 
-    // Clean and validate path
-    clean := filepath.Clean(abs)
-    if !allowAbsolute && filepath.IsAbs(clean) {
-        return "", errors.New("absolute paths not allowed")
-    }
+	// Clean and validate path
+	clean := filepath.Clean(abs)
+	if !allowAbsolute && filepath.IsAbs(clean) {
+		return "", errors.New("absolute paths not allowed")
+	}
 
-    // Validate path components
-    parts := strings.Split(clean, string(os.PathSeparator))
-    for _, p := range parts {
-        if p == ".." {
-            return "", errors.New("path contains parent directory reference")
-        }
-        if len(p) == 0 || p == "." {
-            continue // Skip empty or current directory
-        }
-        // Additional validation for path component length
-        if len(p) > 255 {
-            return "", errors.New("path component too long")
-        }
-    }
+	// Validate path components
+	parts := strings.Split(clean, string(os.PathSeparator))
+	for _, p := range parts {
+		if p == ".." {
+			return "", errors.New("path contains parent directory reference")
+		}
+		if len(p) == 0 || p == "." {
+			continue // Skip empty or current directory
+		}
+		// Additional validation for path component length
+		if len(p) > 255 {
+			return "", errors.New("path component too long")
+		}
+	}
 
-    if !strings.HasPrefix(clean, filepath.Dir(clean)) {
-        return "", errors.New("invalid path resolution")
-    }
+	if !strings.HasPrefix(clean, filepath.Dir(clean)) {
+		return "", errors.New("invalid path resolution")
+	}
 
-    return clean, nil
+	return clean, nil
 }
 
 // atomicWriteReplace writes to a secure temporary file (0600) and renames into place.
