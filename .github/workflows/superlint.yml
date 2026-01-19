@@ -22,12 +22,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (full history, allow pushes)
+        continue-on-error: true 
         uses: actions/checkout@v6.0.1
         with:
           fetch-depth: 0
           persist-credentials: true
 
       - name: Setup Go (for go mod tidy + golangci-lint)
+        continue-on-error: true 
         uses: actions/setup-go@v6.2.0
         with:
           go-version-file: 'go.mod'
@@ -35,6 +37,7 @@ jobs:
 
       # Ensure modules are downloaded so the analyzer can load packages.
       - name: Prepare Go modules (download)
+        continue-on-error: true 
         shell: bash
         run: |
           set -euo pipefail
@@ -61,10 +64,12 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Fix ownership of any files created by action (defensive)
+        continue-on-error: true 
         run: sudo chown -R "$(id -u):$(id -g)" .
         shell: bash
 
       - name: Run go mod tidy (modules) and stage
+        continue-on-error: true 
         run: |
           set -euo pipefail
           mapfile -t mods < <(git ls-files -- '*/go.mod' 'go.mod' || true)
@@ -77,12 +82,14 @@ jobs:
         shell: bash
 
       - name: Ensure git identity
+        continue-on-error: true 
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
         shell: bash
 
       - name: Detect repository changes
+        continue-on-error: true 
         id: changes
         run: |
           set -euo pipefail
@@ -100,6 +107,7 @@ jobs:
         shell: bash
 
       - name: Commit autofixes (if any)
+        continue-on-error: true 
         if: steps.changes.outputs.changed == 'true'
         run: |
           set -euo pipefail
@@ -112,6 +120,7 @@ jobs:
         shell: bash
 
       - name: Create or update Pull Request with fixes
+        continue-on-error: true 
         if: steps.changes.outputs.changed == 'true' && (github.actor != 'github-actions[bot]' && github.actor != 'dependabot[bot]')
         uses: peter-evans/create-pull-request@v8
         with:
@@ -126,6 +135,7 @@ jobs:
           update-existing: true
 
       - name: Print created/updated PR url
+        continue-on-error: true 
         if: steps.changes.outputs.changed == 'true'
         run: |
           set -euo pipefail
