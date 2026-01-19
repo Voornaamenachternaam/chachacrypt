@@ -362,16 +362,15 @@ func safeOutputPath(out string, allowAbsolute bool) (string, error) {
 	if strings.IndexByte(out, 0) != -1 {
 		return "", errors.New("null byte in path")
 	}
-	abs, err := filepath.Abs(out)
-	if err != nil {
-		return "", fmt.Errorf("failed to get absolute path: %w", err)
-	}
-
-	resolved, err := filepath.EvalSymlinks(abs)
+	resolved, err := filepath.EvalSymlinks(out)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve symlinks in path: %w", err)
 	}
-	abs = filepath.Clean(resolved)
+	abs, err := filepath.Abs(resolved)
+	if err != nil {
+		return "", fmt.Errorf("failed to get absolute path after symlink resolution: %w", err)
+	}
+	abs = filepath.Clean(abs)
 	parts := strings.Split(abs, string(os.PathSeparator))
 	for _, p := range parts {
 		if p == ".." {
