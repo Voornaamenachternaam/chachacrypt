@@ -344,7 +344,8 @@ func checkMinEntropy(data []byte) error {
 		entropy -= p * math.Log2(p)
 	}
 	// Heuristic threshold: 3 bits/byte (very conservative)
-	if entropy < 3.0 {
+	// Heuristic threshold: 7.0 bits/byte. Truly random data is ~8.
+	if entropy < 7.0 {
 		return fmt.Errorf("insufficient entropy: %.2f bits/byte", entropy)
 	}
 	return nil
