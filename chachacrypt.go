@@ -175,13 +175,23 @@ func validatePasswordStrength(pw []byte) error {
 
 	// Require at least 3 out of 4 character types
 	charTypeCount := 0
-	if hasUpper { charTypeCount++ }
-	if hasLower { charTypeCount++ }
-	if hasDigit { charTypeCount++ }
-	if hasSpecial { charTypeCount++ }
+	if hasUpper {
+		charTypeCount++
+	}
+	if hasLower {
+		charTypeCount++
+	}
+	if hasDigit {
+		charTypeCount++
+	}
+	if hasSpecial {
+		charTypeCount++
+	}
 
 	if charTypeCount < 3 {
-		return errors.New("password must contain a mix of at least three character types (uppercase, lowercase, digits, special characters)")
+		return errors.New(
+			"password must contain a mix of at least three character types (uppercase, lowercase, digits, special characters)",
+		)
 	}
 
 	// Optional: Check against common weak patterns (can be expanded)
@@ -465,8 +475,14 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 
 	// Finally rename into place
 	if err = os.Rename(tmpPath, finalPath); err != nil {
-		if linkErr, ok := err.(*os.LinkError); ok && linkErr.Op == "rename" && strings.Contains(linkErr.Err.Error(), "cross-device link") {
-			fmt.Fprintf(os.Stderr, "Warning: cross-device move detected; falling back to non-atomic copy for %s -> %s\n", tmpPath, finalPath)
+		linkErr := &os.LinkError{}
+		if errors.As(err, &linkErr) {
+			fmt.Fprintf(
+				os.Stderr,
+				"Warning: cross-device move detected; falling back to non-atomic copy for %s -> %s\n",
+				tmpPath,
+				finalPath,
+			)
 			src, rerr := os.Open(tmpPath)
 			if rerr != nil {
 				return fmt.Errorf("open temp for copy: %w", rerr)
@@ -1103,7 +1119,7 @@ func rotateFile(
 	if err := validatePasswordStrength(pwNew1); err != nil {
 		return fmt.Errorf("weak new password: %w", err)
 	}
-	
+
 	newHdr, newEncKey, newMacKey, err := prepareRotationKeys(pwNew1, newArgonTime, newArgonMem, newArgonThreads)
 	if err != nil {
 		return err
