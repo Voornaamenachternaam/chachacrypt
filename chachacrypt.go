@@ -371,19 +371,14 @@ func safeOutputPath(out string, allowAbsolute bool) (string, error) {
 		return "", fmt.Errorf("failed to get absolute path after symlink resolution: %w", err)
 	}
 	// This should be moved to before `EvalSymlinks` and operate on `out`
-	// to be effective. For example:
-	// for _, p := range strings.Split(filepath.Clean(out), string(os.PathSeparator)) {
-	// 	if p == ".." {
-	// 		return "", errors.New("directory traversal detected in path")
-	// 	}
-	// }
-	// This should be moved to before `EvalSymlinks` and operate on `out`
-	// to be effective. For example:
-	// for _, p := range strings.Split(filepath.Clean(out), string(os.PathSeparator)) {
-	// 	if p == ".." {
-	// 		return "", errors.New("directory traversal detected in path")
-	// 	}
-	// }
+	resolved, err := filepath.EvalSymlinks(out)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve symlinks in path: %w", err)
+	}
+	abs, err := filepath.Abs(resolved)
+	if err != nil {
+		return "", fmt.Errorf("failed to get absolute path after symlink resolution: %w", err)
+	}
 	abs = filepath.Clean(abs)
 	parts := strings.Split(abs, string(os.PathSeparator))
 	for _, p := range parts {
