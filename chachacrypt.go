@@ -317,7 +317,7 @@ func validateArgon2Params(t, mem uint32, threads uint8) error {
 	if mem < minMemory {
 		return fmt.Errorf("Argon2 memory too low (min %d KiB)", minMemory)
 	}
-	maxThreads := uint8(runtime.NumCPU() * 2)
+	maxThreads := uint8(runtime.NumCPU())
 	if threads < minThreads || threads > maxThreads {
 		return fmt.Errorf("Argon2 threads out of bounds (min %d max %d)", minThreads, maxThreads)
 	}
