@@ -64,12 +64,12 @@ const (
 
 	usageExit = 2
 
-	// Security constants
+	// Security constants.
 	minPasswordLength = 12
 	maxPasswordLength = 1024
 	zeroPassCount     = 3 // Number of times to overwrite sensitive memory
 
-	// Platform-specific secure permissions
+	// Platform-specific secure permissions.
 	secureFilePerms = 0o600 // Owner read/write only
 	secureDirPerms  = 0o700 // Owner rwx only
 )
@@ -96,7 +96,7 @@ const (
 	lowArgonMemory  = 64 * 1024 // Increased from 32*1024 for better security
 	lowArgonThreads = 2
 
-	// Validation bounds
+	// Validation bounds.
 	minArgonTime    = 2
 	minArgonMemory  = 64 * 1024   // 64 MiB minimum
 	maxArgonMemory  = 1024 * 1024 // 1 GiB maximum
@@ -153,7 +153,7 @@ func secureZero(b []byte) {
 	runtime.KeepAlive(b)
 }
 
-// zero is a simpler version for non-critical cleanup
+// zero is a simpler version for non-critical cleanup.
 func zero(b []byte) {
 	if b == nil || len(b) == 0 {
 		return
@@ -399,7 +399,7 @@ func validateArgon2Params(t, mem uint32, threads uint8) error {
 		return fmt.Errorf("Argon2 time too low (min %d)", minArgonTime)
 	}
 	if t > 100 {
-		return fmt.Errorf("Argon2 time too high (max 100)")
+		return errors.New("Argon2 time too high (max 100)")
 	}
 	if mem < minArgonMemory {
 		return fmt.Errorf("Argon2 memory too low (min %d KiB)", minArgonMemory)
@@ -456,7 +456,7 @@ func checkMinEntropy(data []byte) error {
 	return nil
 }
 
-// validateRandomness ensures crypto/rand is working properly
+// validateRandomness ensures crypto/rand is working properly.
 func validateRandomness() error {
 	test := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, test); err != nil {
@@ -552,7 +552,7 @@ func safeOutputPath(out string, allowAbsolute bool) (string, error) {
 	return clean, nil
 }
 
-// setSecurePermissions sets platform-appropriate secure permissions
+// setSecurePermissions sets platform-appropriate secure permissions.
 func setSecurePermissions(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
