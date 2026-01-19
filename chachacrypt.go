@@ -91,18 +91,18 @@ const (
 /*** Types ***/
 
 type fileHeader struct {
-	Magic        [magicLen]byte
-	Version      uint16
-	KeyVersion   uint32
 	Timestamp    int64
+	KeyVersion   uint32
 	ArgonTime    uint32
 	ArgonMemory  uint32
-	ArgonThreads uint8
-	Salt         [saltSize]byte
 	ChunkSize    uint32
+	Version      uint16
 	NonceSize    uint16
-	Reserved     [reservedLen]byte
+	Salt         [saltSize]byte
 	HeaderMAC    [headerMACSize]byte
+	Magic        [magicLen]byte
+	Reserved     [reservedLen]byte
+	ArgonThreads uint8
 }
 
 type cipherAEAD interface {
