@@ -781,8 +781,17 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 	if writeErr = tmpFile.Sync(); writeErr != nil {
 		return fmt.Errorf("sync temp: %w", writeErr)
 	}
-	if writeErr = tmpFile.Close(); writeErr != nil {
+if writeErr = tmpFile.Close(); writeErr != nil {
 		return fmt.Errorf("close temp: %w", writeErr)
+	}
+
+	// Sync parent directory on Unix systems to ensure rename is durable.
+	if runtime.GOOS != "windows" {
+		if dfd, err := os.Open(filepath.Dir(finalPath), os.O_RDONLY, 0); err == nil {
+			// Best-effort sync, ignore error as not all filesystems support it.
+			_ = dfd.Sync()
+			_ = dfd.Close()
+		}
 	}
 
 	// If destination exists, handle
