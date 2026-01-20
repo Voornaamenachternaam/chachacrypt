@@ -398,9 +398,9 @@ func validateArgon2Params(t, mem uint32, threads uint8) error {
 	if t < minArgonTime {
 		return fmt.Errorf("Argon2 time too low (min %d)", minArgonTime)
 	}
-    if t > 1024 {
-        return fmt.Errorf("Argon2 time too high (max %d)", 1024)
-    }
+	if t > 1024 {
+		return fmt.Errorf("Argon2 time too high (max %d)", 1024)
+	}
 	if mem < minArgonMemory {
 		return fmt.Errorf("Argon2 memory too low (min %d KiB)", minArgonMemory)
 	}
