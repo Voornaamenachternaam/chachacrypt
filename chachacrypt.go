@@ -331,12 +331,12 @@ func bytesContains(haystack, needle []byte) bool {
 	if len(needle) > len(haystack) {
 		return false
 	}
+	var found int
 	for i := 0; i <= len(haystack)-len(needle); i++ {
-		if subtle.ConstantTimeCompare(haystack[i:i+len(needle)], needle) == 1 {
-			return true
-		}
+		match := subtle.ConstantTimeCompare(haystack[i:i+len(needle)], needle)
+		found |= match
 	}
-	return false
+	return found == 1
 }
 
 /*** Header serialization & AAD ***/
