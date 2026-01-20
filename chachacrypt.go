@@ -700,7 +700,15 @@ func setSecurePermissions(path string) error {
   ); err != nil {
   	return fmt.Errorf("failed to apply secure DACL: %w", err)
   }
-			return fmt.Errorf("failed to protect file DACL: %w", err)
+  if err := windows.SetNamedSecurityInfo(
+  	path,
+  	windows.SE_FILE_OBJECT,
+  	windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+  	nil, nil,
+  	dacl, nil,
+  ); err != nil {
+  	return fmt.Errorf("failed to apply secure DACL: %w", err)
+  }
 		}
 		return nil
 	}
