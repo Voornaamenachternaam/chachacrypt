@@ -107,17 +107,17 @@ const (
 
 type fileHeader struct {
 	Timestamp    int64
+	Salt         [saltSize]byte
+	HeaderMAC    [headerMACSize]byte
+	Magic        [magicLen]byte
 	KeyVersion   uint32
 	ArgonTime    uint32
 	ArgonMemory  uint32
 	ChunkSize    uint32
 	Version      uint16
 	NonceSize    uint16
-	Salt         [saltSize]byte
-	HeaderMAC    [headerMACSize]byte
-	Magic        [magicLen]byte
-	Reserved     [reservedLen]byte
 	ArgonThreads uint8
+	Reserved     [reservedLen]byte
 }
 
 type cipherAEAD interface {
