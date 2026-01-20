@@ -442,9 +442,10 @@ func checkMinEntropy(data []byte) error {
 		entropy -= p * math.Log2(p)
 	}
 
-	// Require good distribution of byte values
-	if nonZeroCount < 128 {
-		return fmt.Errorf("insufficient byte diversity: only %d/256 values present", nonZeroCount)
+	// Heuristic threshold: 7.5 bits/byte (truly random is ~8)
+	const minEntropy = 7.5
+	if entropy < minEntropy {
+		return fmt.Errorf("insufficient entropy: %.2f bits/byte (min %.2f)", entropy, minEntropy)
 	}
 
 	// Heuristic threshold: 7.5 bits/byte (truly random is ~8)
