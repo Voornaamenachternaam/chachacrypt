@@ -304,7 +304,7 @@ func validatePasswordStrength(pw []byte) error {
 	}
 
 	lowerPw := make([]byte, len(pw))
-	for i := 0; i < len(pw); i++ {
+	for i := range len(pw) {
 		b := pw[i]
 		if 'A' <= b && b <= 'Z' {
 			lowerPw[i] = b + ('a' - 'A')
@@ -733,7 +733,7 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 	var err error
 	const maxAttempts = 8
 	created := false
-	for i := 0; i < maxAttempts; i++ {
+	for range maxAttempts {
 		tmpFile, tmpPath, err = createSecureTempFile(dir)
 		if err == nil {
 			created = true
@@ -833,7 +833,7 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 		srcInfo, _ := os.Stat(tmpPath)
 		dstInfo, _ := os.Stat(finalPath)
 		if srcInfo.Size() != dstInfo.Size() {
-			return fmt.Errorf("verification failed: size mismatch after copy")
+			return errors.New("verification failed: size mismatch after copy")
 		}
 
 		// Verify checksum
@@ -844,7 +844,7 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 			return fmt.Errorf("verification failed: could not checksum dest: %w", rerr)
 		}
 		if !bytesEqual(hsrc.Sum(nil), hdst.Sum(nil)) {
-			return fmt.Errorf("verification failed: checksum mismatch after copy")
+			return errors.New("verification failed: checksum mismatch after copy")
 		}
 
 		// Remove temp after success
@@ -1322,7 +1322,7 @@ func secureOpenReadOnly(path string) (*os.File, error) {
 		return nil, fmt.Errorf("open input lstat: %w", lerr)
 	}
 	if linfo.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("refuse to open input: path is a symlink")
+		return nil, errors.New("refuse to open input: path is a symlink")
 	}
 
 	if runtime.GOOS != "windows" {
