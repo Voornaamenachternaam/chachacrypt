@@ -781,7 +781,7 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 	if writeErr = tmpFile.Sync(); writeErr != nil {
 		return fmt.Errorf("sync temp: %w", writeErr)
 	}
-if writeErr = tmpFile.Close(); writeErr != nil {
+	if writeErr = tmpFile.Close(); writeErr != nil {
 		return fmt.Errorf("close temp: %w", writeErr)
 	}
 
