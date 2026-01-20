@@ -1,3 +1,4 @@
+// chachacrypt.go
 // Package main implements a secure file-encryption CLI.
 // - Argon2id for KDF (golang.org/x/crypto/argon2.IDKey)
 // - HKDF-SHA256 for key derivation (golang.org/x/crypto/hkdf)
@@ -16,6 +17,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -29,6 +31,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
@@ -164,6 +167,17 @@ func zero(b []byte) {
 	runtime.KeepAlive(b)
 }
 
+// clear is a lightweight zero for small fixed buffers (no multiple passes).
+func clear(b []byte) {
+	if b == nil || len(b) == 0 {
+		return
+	}
+	for i := range b {
+		b[i] = 0
+	}
+	runtime.KeepAlive(b)
+}
+
 func die(err error) {
 	if err == nil {
 		return
@@ -180,6 +194,10 @@ func die(err error) {
 }
 
 func readPasswordPrompt(prompt string) ([]byte, error) {
+	// Ensure interactive terminal to avoid accidental logging in non-interactive contexts.
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return nil, errors.New("password prompt requires an interactive terminal")
+	}
 	fmt.Fprint(os.Stderr, prompt)
 	pw, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Fprintln(os.Stderr)
@@ -203,6 +221,7 @@ func secureCompare(a, b []byte) bool {
 	return subtle.ConstantTimeCompare(a, b) == 1
 }
 
+// validatePasswordStrength checks password strength without making string copies of the password.
 func validatePasswordStrength(pw []byte) error {
 	if len(pw) < minPasswordLength {
 		return fmt.Errorf("password too short (minimum %d characters)", minPasswordLength)
@@ -216,36 +235,44 @@ func validatePasswordStrength(pw []byte) error {
 	hasDigit := false
 	hasSpecial := false
 	consecutiveCount := 0
-	var lastChar rune
+	var lastRune rune
 
-	for _, c := range string(pw) {
-		// Check for null bytes
-		if c == 0 {
+	// Iterate over runes without converting to string
+	for i := 0; i < len(pw); {
+		r, size := utf8.DecodeRune(pw[i:])
+		if r == utf8.RuneError && size == 1 {
+			// treat as byte
+			r = rune(pw[i])
+			size = 1
+		}
+		if r == 0 {
 			return errors.New("password contains null byte")
 		}
-
-		// Check character types
 		switch {
-		case 'A' <= c && c <= 'Z':
+		case 'A' <= r && r <= 'Z':
 			hasUpper = true
-		case 'a' <= c && c <= 'z':
+		case 'a' <= r && r <= 'z':
 			hasLower = true
-		case '0' <= c && c <= '9':
+		case '0' <= r && r <= '9':
 			hasDigit = true
-		case strings.ContainsRune("!@#$%^&*()_+-=[]{}|;:,.<>?/~`'\"\\", c):
+		case strings.ContainsRune("!@#$%^&*()_+-=[]{}|;:,.<>?/~`'\"\\", r):
 			hasSpecial = true
+		default:
+			// other unicode categories count as "special"
+			if r > 127 {
+				hasSpecial = true
+			}
 		}
-
-		// Check for excessive repetition
-		if c == lastChar {
+		if r == lastRune {
 			consecutiveCount++
 			if consecutiveCount >= 4 {
 				return errors.New("password contains too many consecutive identical characters")
 			}
 		} else {
 			consecutiveCount = 1
-			lastChar = c
+			lastRune = r
 		}
+		i += size
 	}
 
 	// Require at least 3 out of 4 character types
@@ -269,20 +296,47 @@ func validatePasswordStrength(pw []byte) error {
 		)
 	}
 
-	// Check against common weak patterns
-	weakPatterns := []string{
-		"password", "123456", "qwerty", "admin", "letmein",
-		"welcome", "monkey", "dragon", "master", "sunshine",
-		"princess", "abc123", "111111", "000000",
+	// Check against common weak patterns using a lower-cased byte copy (ASCII-only).
+	weakPatterns := [][]byte{
+		[]byte("password"), []byte("123456"), []byte("qwerty"), []byte("admin"), []byte("letmein"),
+		[]byte("welcome"), []byte("monkey"), []byte("dragon"), []byte("master"), []byte("sunshine"),
+		[]byte("princess"), []byte("abc123"), []byte("111111"), []byte("000000"),
 	}
-	lowerPw := strings.ToLower(string(pw))
-	for _, pattern := range weakPatterns {
-		if strings.Contains(lowerPw, pattern) {
+
+	lowerPw := make([]byte, len(pw))
+	for i := 0; i < len(pw); i++ {
+		b := pw[i]
+		if 'A' <= b && b <= 'Z' {
+			lowerPw[i] = b + ('a' - 'A')
+		} else {
+			lowerPw[i] = b
+		}
+	}
+	defer secureZero(lowerPw)
+
+	for _, pat := range weakPatterns {
+		if bytesContains(lowerPw, pat) {
 			return errors.New("password contains a common weak pattern")
 		}
 	}
 
 	return nil
+}
+
+// bytesContains is a tiny helper to avoid importing bytes package directly in multiple places.
+func bytesContains(haystack, needle []byte) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	if len(needle) > len(haystack) {
+		return false
+	}
+	for i := 0; i <= len(haystack)-len(needle); i++ {
+		if subtle.ConstantTimeCompare(haystack[i:i+len(needle)], needle) == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 /*** Header serialization & AAD ***/
@@ -419,9 +473,29 @@ func validateArgon2Params(t, mem uint32, threads uint8) error {
 
 /*** Entropy check (best-effort) ***/
 
+// checkMinEntropy performs a conservative entropy check.
+// For small buffers (<64 bytes) it only checks for obvious constant data.
+// For larger buffers it computes a Shannon-entropy heuristic.
 func checkMinEntropy(data []byte) error {
-	if len(data) < 16 {
+	if len(data) == 0 {
 		return errors.New("data too short for entropy check")
+	}
+
+	if len(data) < 64 {
+		// Lightweight sanity: ensure data is not all the same byte
+		first := data[0]
+		allSame := true
+		for _, b := range data {
+			if b != first {
+				allSame = false
+				break
+			}
+		}
+		if allSame {
+			return errors.New("insufficient entropy: data appears constant")
+		}
+		// accept otherwise
+		return nil
 	}
 
 	freq := make([]int, 256)
@@ -431,40 +505,29 @@ func checkMinEntropy(data []byte) error {
 
 	var entropy float64
 	length := float64(len(data))
-	nonZeroCount := 0
 
 	for _, c := range freq {
 		if c == 0 {
 			continue
 		}
-		nonZeroCount++
 		p := float64(c) / length
 		entropy -= p * math.Log2(p)
 	}
 
-	// Heuristic threshold: 7.5 bits/byte (truly random is ~8)
 	const minEntropy = 7.5
 	if entropy < minEntropy {
 		return fmt.Errorf("insufficient entropy: %.2f bits/byte (min %.2f)", entropy, minEntropy)
 	}
-
-	// Heuristic threshold: 7.5 bits/byte (truly random is ~8)
-	const minEntropy = 7.5
-	if entropy < minEntropy {
-		return fmt.Errorf("insufficient entropy: %.2f bits/byte (min %.2f)", entropy, minEntropy)
-	}
-
 	return nil
 }
 
 // validateRandomness ensures crypto/rand is working properly.
 func validateRandomness() error {
-	test := make([]byte, 32)
+	test := make([]byte, 64)
 	if _, err := io.ReadFull(rand.Reader, test); err != nil {
 		return fmt.Errorf("random number generator failure: %w", err)
 	}
 	defer zero(test)
-
 	return checkMinEntropy(test)
 }
 
@@ -483,12 +546,18 @@ func safeOutputPath(out string, allowAbsolute bool) (string, error) {
 		return "", errors.New("null byte in path")
 	}
 
-	// Check for suspicious patterns
-	suspicious := []string{"//", "\\\\", "/../", "\\..\\"}
-	for _, pattern := range suspicious {
-		if strings.Contains(out, pattern) {
-			return "", errors.New("suspicious path pattern detected")
+	// Reject percent-encoded traversal patterns
+	if decoded, err := urlPathUnescape(out); err == nil {
+		if decoded != out {
+			// if unescaping reveals traversal or backslashes, reject
+			if strings.Contains(decoded, "..") || strings.ContainsAny(decoded, `\`) {
+				return "", errors.New("path contains suspicious encoded content")
+			}
+			out = decoded
 		}
+	} else {
+		// malformed encoding
+		return "", fmt.Errorf("malformed path encoding: %w", err)
 	}
 
 	// Normalize path separators
@@ -500,57 +569,95 @@ func safeOutputPath(out string, allowAbsolute bool) (string, error) {
 		return "", fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
-	// Resolve symlinks after getting absolute path
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		// If the file doesn't exist yet, EvalSymlinks will fail
-		// In this case, resolve the parent directory
-		parent := filepath.Dir(abs)
-		resolvedParent, pErr := filepath.EvalSymlinks(parent)
-		if pErr != nil {
-			return "", fmt.Errorf("failed to resolve parent directory: %w", pErr)
-		}
-		resolved = filepath.Join(resolvedParent, filepath.Base(abs))
-	}
+	// Clean the path
+	clean := filepath.Clean(abs)
 
-	// Clean the resolved path
-	clean := filepath.Clean(resolved)
-
+	// If not allowed, refuse absolute paths outside cwd
 	if !allowAbsolute {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return "", fmt.Errorf("failed to get working directory: %w", err)
-		}
-		rel, err := filepath.Rel(cwd, clean)
-		if err != nil {
-			return "", fmt.Errorf("failed to compute relative path: %w", err)
-		}
-		if strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == ".." {
-			return "", errors.New("output path is outside working directory")
+		if filepath.IsAbs(clean) {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return "", fmt.Errorf("failed to get working directory: %w", err)
+			}
+			rel, err := filepath.Rel(cwd, clean)
+			if err != nil {
+				return "", fmt.Errorf("failed to compute relative path: %w", err)
+			}
+			if strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == ".." {
+				return "", errors.New("output path is outside working directory")
+			}
 		}
 	}
 
-	// Validate path components
+	// Ensure parent exists and is not a symlink
+	parent := filepath.Dir(clean)
+	parentInfo, perr := os.Lstat(parent)
+	if perr != nil {
+		return "", fmt.Errorf("parent directory does not exist or cannot be lstat'd: %w", perr)
+	}
+	if parentInfo.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("parent directory is a symlink (refuse to write into symlinked dir)")
+	}
+
+	// Validate components for control chars and lengths
 	parts := strings.Split(clean, string(os.PathSeparator))
 	for _, p := range parts {
 		if p == ".." {
 			return "", errors.New("path contains parent directory reference")
 		}
-		if len(p) == 0 || p == "." {
+		if p == "." || len(p) == 0 {
 			continue
 		}
 		if len(p) > 255 {
 			return "", errors.New("path component too long")
 		}
-		// Check for control characters
-		for _, c := range p {
-			if c < 32 || c == 127 {
+		for _, rc := range p {
+			if rc < 32 || rc == 127 {
 				return "", errors.New("path contains control characters")
 			}
 		}
 	}
 
 	return clean, nil
+}
+
+// Helper to safely unescape URL-like percent encoding for paths.
+func urlPathUnescape(s string) (string, error) {
+	// Replace '+' with percent-encoding not desired for paths, use QueryUnescape is not appropriate.
+	// Use a conservative approach: run path unescape.
+	// Implement simple percent decoding for ASCII hex sequences.
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '%' {
+			if i+2 >= len(s) {
+				return "", errors.New("invalid percent-encoding")
+			}
+			hi := fromHexChar(s[i+1])
+			lo := fromHexChar(s[i+2])
+			if hi < 0 || lo < 0 {
+				return "", errors.New("invalid percent-encoding")
+			}
+			out = append(out, byte((hi<<4)|lo))
+			i += 2
+		} else {
+			out = append(out, c)
+		}
+	}
+	return string(out), nil
+}
+
+func fromHexChar(c byte) int {
+	switch {
+	case '0' <= c && c <= '9':
+		return int(c - '0')
+	case 'a' <= c && c <= 'f':
+		return int(c - 'a' + 10)
+	case 'A' <= c && c <= 'F':
+		return int(c - 'A' + 10)
+	default:
+		return -1
+	}
 }
 
 // setSecurePermissions sets platform-appropriate secure permissions.
@@ -561,7 +668,7 @@ func setSecurePermissions(path string) error {
 	}
 
 	if runtime.GOOS == "windows" {
-		// On Windows, rely on NTFS permissions set during CreateTemp
+		// On Windows, rely on NTFS permissions set during CreateTemp/OpenFile calls
 		return nil
 	}
 
@@ -574,6 +681,25 @@ func setSecurePermissions(path string) error {
 	return nil
 }
 
+/*** Secure temp creation and atomic write ***/
+
+// createSecureTempFile creates a temp file name and opens it atomically with O_CREATE|O_EXCL and secure mode.
+func createSecureTempFile(dir string) (*os.File, string, error) {
+	// random suffix
+	r := make([]byte, 8)
+	if _, err := io.ReadFull(rand.Reader, r); err != nil {
+		return nil, "", err
+	}
+	name := ".chachacrypt-" + hex.EncodeToString(r)
+	path := filepath.Join(dir, name)
+	// Use OpenFile with O_CREATE|O_EXCL to avoid races and set the desired mode directly.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, os.FileMode(secureFilePerms))
+	if err != nil {
+		return nil, "", err
+	}
+	return f, path, nil
+}
+
 // atomicWriteReplace writes to a secure temporary file and renames into place.
 func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, force bool) error {
 	dir := tempDir
@@ -581,33 +707,58 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 		dir = filepath.Dir(finalPath)
 	}
 
-	// Check dir security
-	useFallbackTemp := false
-	info, serr := os.Lstat(dir)
+	// Ensure parent dir identity before creation
+	dirStatBefore, serr := os.Lstat(dir)
 	if serr != nil {
-		useFallbackTemp = true
-	} else {
-		if info.Mode()&os.ModeSymlink != 0 {
-			useFallbackTemp = true
-		}
-		// On Unix systems, check for group/other writable
-		if runtime.GOOS != "windows" && info.Mode().Perm()&0o022 != 0 {
-			useFallbackTemp = true
-		}
-	}
-
-	if useFallbackTemp {
+		// fallback to system temp dir if target dir not available
+		fmt.Fprintln(os.Stderr, "Warning: target directory not available; using system temp dir for safety")
 		dir = os.TempDir()
-		fmt.Fprintln(os.Stderr, "Warning: using system temp directory for security")
+		dirStatBefore, serr = os.Lstat(dir)
+		if serr != nil {
+			return fmt.Errorf("failed to stat temp dir: %w", serr)
+		}
 	}
 
-	tmpFile, err := os.CreateTemp(dir, ".chachacrypt-*")
-	if err != nil {
-		return fmt.Errorf("create temp: %w", err)
+	// Reject symlinked directories
+	if dirStatBefore.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("target directory is a symlink: %s", dir)
 	}
-	tmpPath := tmpFile.Name()
+	if runtime.GOOS != "windows" && dirStatBefore.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("target directory is group/other writable: %s", dir)
+	}
 
-	// Set restrictive permissions immediately
+	// Create temp file securely
+	var tmpFile *os.File
+	var tmpPath string
+	var err error
+	const maxAttempts = 8
+	created := false
+	for i := 0; i < maxAttempts; i++ {
+		tmpFile, tmpPath, err = createSecureTempFile(dir)
+		if err == nil {
+			created = true
+			break
+		}
+		// if name collision or similar, retry
+	}
+	if !created {
+		return fmt.Errorf("create temp failed: %w", err)
+	}
+
+	// Verify directory identity didn't change
+	dirStatAfter, dserr := os.Lstat(dir)
+	if dserr != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("lstat temp dir after create failed: %w", dserr)
+	}
+	if !os.SameFile(dirStatBefore, dirStatAfter) {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return errors.New("directory changed during temp file creation (possible race)")
+	}
+
+	// Ensure secure permissions on temp
 	if err := setSecurePermissions(tmpPath); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpPath)
@@ -622,9 +773,11 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 		}
 	}()
 
+	// Let writer do work
 	if writeErr = writer(tmpFile); writeErr != nil {
 		return fmt.Errorf("write temp: %w", writeErr)
 	}
+
 	if writeErr = tmpFile.Sync(); writeErr != nil {
 		return fmt.Errorf("sync temp: %w", writeErr)
 	}
@@ -632,60 +785,80 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 		return fmt.Errorf("close temp: %w", writeErr)
 	}
 
-	// Sync parent directory on Unix systems
-	if runtime.GOOS != "windows" {
-		if dfd, dfdErr := os.OpenFile(filepath.Dir(finalPath), os.O_RDONLY, 0); dfdErr == nil {
-			dfd.Sync()
-			dfd.Close()
-		}
-	}
-
-	// Check if destination exists
+	// If destination exists, handle
 	if _, statErr := os.Stat(finalPath); statErr == nil {
 		if !force {
 			return fmt.Errorf("destination exists: %s (use --force)", finalPath)
 		}
-		// Securely remove existing file
 		if remErr := os.Remove(finalPath); remErr != nil {
 			return fmt.Errorf("remove existing dest: %w", remErr)
 		}
 	}
 
-	// Attempt atomic rename
-	if err = os.Rename(tmpPath, finalPath); err != nil {
-		linkErr := &os.LinkError{}
-		if errors.As(err, &linkErr) {
-			// Cross-device, fallback to copy
-			fmt.Fprintf(os.Stderr, "Warning: cross-device move, using copy for %s\n", finalPath)
-
-			src, rerr := os.Open(tmpPath)
-			if rerr != nil {
-				return fmt.Errorf("open temp for copy: %w", rerr)
-			}
-			defer src.Close()
-
-			dst, werr := os.OpenFile(finalPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, secureFilePerms)
-			if werr != nil {
-				return fmt.Errorf("create dest for copy: %w", werr)
-			}
-			defer dst.Close()
-
-			if _, cerr := io.Copy(dst, src); cerr != nil {
-				return fmt.Errorf("copy temp to dest: %w", cerr)
-			}
-			if serr := dst.Sync(); serr != nil {
-				return fmt.Errorf("sync dest: %w", serr)
-			}
-
-			// Remove temp file after successful copy
-			os.Remove(tmpPath)
-			return nil
-		}
-		return fmt.Errorf("rename temp: %w", err)
+	// Try atomic rename
+	if err = os.Rename(tmpPath, finalPath); err == nil {
+		return setSecurePermissions(finalPath)
 	}
 
-	// Final permission check
-	return setSecurePermissions(finalPath)
+	// If rename failed due to cross-device, fallback to verified copy
+	var linkErr *os.LinkError
+	if errors.As(err, &linkErr) {
+		fmt.Fprintf(os.Stderr, "Warning: cross-device move, using verified copy for %s\n", finalPath)
+		src, rerr := os.Open(tmpPath)
+		if rerr != nil {
+			return fmt.Errorf("open temp for copy: %w", rerr)
+		}
+		defer src.Close()
+
+		dst, werr := os.OpenFile(finalPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(secureFilePerms))
+		if werr != nil {
+			return fmt.Errorf("create dest for copy: %w", werr)
+		}
+
+		hsrc := sha256.New()
+		mw := io.MultiWriter(dst, hsrc)
+		if _, cerr := io.Copy(mw, src); cerr != nil {
+			dst.Close()
+			return fmt.Errorf("copy temp to dest: %w", cerr)
+		}
+		if serr := dst.Sync(); serr != nil {
+			dst.Close()
+			return fmt.Errorf("sync dest: %w", serr)
+		}
+		if err := dst.Close(); err != nil {
+			return fmt.Errorf("close dest after copy: %w", err)
+		}
+
+		// Verify sizes match
+		srcInfo, _ := os.Stat(tmpPath)
+		dstInfo, _ := os.Stat(finalPath)
+		if srcInfo.Size() != dstInfo.Size() {
+			return fmt.Errorf("verification failed: size mismatch after copy")
+		}
+
+		// Verify checksum
+		dstR, _ := os.Open(finalPath)
+		defer dstR.Close()
+		hdst := sha256.New()
+		if _, rerr := io.Copy(hdst, dstR); rerr != nil {
+			return fmt.Errorf("verification failed: could not checksum dest: %w", rerr)
+		}
+		if !bytesEqual(hsrc.Sum(nil), hdst.Sum(nil)) {
+			return fmt.Errorf("verification failed: checksum mismatch after copy")
+		}
+
+		// Remove temp after success
+		if rerr := os.Remove(tmpPath); rerr != nil {
+			return fmt.Errorf("remove temp after copy: %w", rerr)
+		}
+		return nil
+	}
+
+	return fmt.Errorf("rename temp: %w", err)
+}
+
+func bytesEqual(a, b []byte) bool {
+	return subtle.ConstantTimeCompare(a, b) == 1
 }
 
 /*** Chunk framing helpers ***/
@@ -775,9 +948,7 @@ func processOneEncrypt(
 	}
 	defer zero(nonce)
 
-	if entErr := checkMinEntropy(nonce); entErr != nil {
-		return true, fmt.Errorf("nonce entropy failed: %w", entErr)
-	}
+	// No strict entropy check for nonces; rely on crypto/rand and validateRandomness on startup.
 
 	aad, err := buildAAD(hdr, idx)
 	if err != nil {
@@ -942,9 +1113,7 @@ func processOneRotate(
 	}
 	defer zero(newNonce)
 
-	if entErr := checkMinEntropy(newNonce); entErr != nil {
-		return true, fmt.Errorf("new nonce entropy failed: %w", entErr)
-	}
+	// No strict entropy check for nonces.
 
 	aadNew, err := buildAAD(newHdr, idx)
 	if err != nil {
@@ -1144,6 +1313,36 @@ func deriveKeysFromPassword(password []byte, hdr *fileHeader) (encKey, macKey []
 	return deriveEncAndMacKeys(master)
 }
 
+/*** Securely open input files to prevent symlink TOCTOU bypass ***/
+
+func secureOpenReadOnly(path string) (*os.File, error) {
+	// Lstat first to detect symlink
+	linfo, lerr := os.Lstat(path)
+	if lerr != nil {
+		return nil, fmt.Errorf("open input lstat: %w", lerr)
+	}
+	if linfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("refuse to open input: path is a symlink")
+	}
+
+	if runtime.GOOS != "windows" {
+		// Attempt to use O_NOFOLLOW at open time to prevent races
+		flags := syscall.O_RDONLY | syscall.O_CLOEXEC
+		// O_NOFOLLOW may not be defined on some platforms; try to add it if available
+		flags |= syscall.O_NOFOLLOW
+		fd, err := syscall.Open(path, flags, 0)
+		if err == nil {
+			return os.NewFile(uintptr(fd), path), nil
+		}
+		// If it fails, fall back to os.Open but we already checked Lstat
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open input: %w", err)
+	}
+	return f, nil
+}
+
 /*** Encrypt / Decrypt / Rotate high-level operations ***/
 
 func encryptFile(
@@ -1156,7 +1355,7 @@ func encryptFile(
 	keyVersion uint32,
 	verbose bool,
 ) error {
-	in, err := os.Open(inPath)
+	in, err := secureOpenReadOnly(inPath)
 	if err != nil {
 		return fmt.Errorf("open input: %w", err)
 	}
@@ -1231,7 +1430,7 @@ func encryptFile(
 }
 
 func decryptFile(ctx context.Context, inPath, outPath string, force bool, verbose bool) error {
-	in, err := os.Open(inPath)
+	in, err := secureOpenReadOnly(inPath)
 	if err != nil {
 		return fmt.Errorf("open input: %w", err)
 	}
@@ -1338,7 +1537,7 @@ func rotateFile(
 	newKeyVersion uint32,
 	verbose bool,
 ) error {
-	in, err := os.Open(inPath)
+	in, err := secureOpenReadOnly(inPath)
 	if err != nil {
 		return fmt.Errorf("open input: %w", err)
 	}
