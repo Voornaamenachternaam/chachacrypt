@@ -1,12 +1,3 @@
-// chachacrypt.go
-// Package main implements a secure file-encryption CLI.
-// - Argon2id for KDF (golang.org/x/crypto/argon2.IDKey)
-// - HKDF-SHA256 for key derivation (golang.org/x/crypto/hkdf)
-// - XChaCha20-Poly1305 AEAD per-chunk (golang.org/x/crypto/chacha20poly1305)
-// - Canonical header authenticated with HMAC-SHA256
-// - Chunk framing with 4-byte BE length fields
-//
-// Targets Go 1.25.6 and uses only the modules pinned in go.mod.
 package main
 
 import (
@@ -32,10 +23,12 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
+	"golang.org/x/sys/windows"
 	"golang.org/x/term"
 )
 
@@ -72,9 +65,9 @@ const (
 	maxPasswordLength = 1024
 	zeroPassCount     = 3 // Number of times to overwrite sensitive memory
 
-	// Platform-specific secure permissions.
-	secureFilePerms = 0o600 // Owner read/write only
-	secureDirPerms  = 0o700 // Owner rwx only
+	// Platform-specific secure permissions (not directly used on Windows).
+	secureFilePerms = 0o600 // Owner read/write only on Unix
+	secureDirPerms  = 0o700 // Owner rwx only on Unix
 )
 
 const headerTotalSize = magicLen + 2 + 4 + 8 + 4 + 4 + 1 + saltSize + 4 + 2 + reservedLen + headerMACSize
@@ -304,7 +297,7 @@ func validatePasswordStrength(pw []byte) error {
 	}
 
 	lowerPw := make([]byte, len(pw))
-	for i := range len(pw) {
+	for i := range pw {
 		b := pw[i]
 		if 'A' <= b && b <= 'Z' {
 			lowerPw[i] = b + ('a' - 'A')
@@ -315,6 +308,7 @@ func validatePasswordStrength(pw []byte) error {
 	defer secureZero(lowerPw)
 
 	for _, pat := range weakPatterns {
+		// Constant-time contains check
 		if bytesContains(lowerPw, pat) {
 			return errors.New("password contains a common weak pattern")
 		}
@@ -662,17 +656,20 @@ func fromHexChar(c byte) int {
 
 // setSecurePermissions sets platform-appropriate secure permissions.
 func setSecurePermissions(path string) error {
+	if runtime.GOOS == "windows" {
+		// On Windows, remove inherited ACEs from the DACL to ensure only explicit permissions.
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			nil, nil, nil, nil); err != nil {
+			return fmt.Errorf("failed to protect file DACL: %w", err)
+		}
+		return nil
+	}
+	// On Unix-like systems, ensure 0600.
 	info, err := os.Stat(path)
 	if err != nil {
 		return err
 	}
-
-	if runtime.GOOS == "windows" {
-		// On Windows, rely on NTFS permissions set during CreateTemp/OpenFile calls
-		return nil
-	}
-
-	// On Unix-like systems, ensure 0600
 	if info.Mode().Perm() != secureFilePerms {
 		if err := os.Chmod(path, secureFilePerms); err != nil {
 			return fmt.Errorf("failed to set secure permissions: %w", err)
@@ -733,13 +730,12 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 	var err error
 	const maxAttempts = 8
 	created := false
-	for range maxAttempts {
+	for i := 0; i < maxAttempts; i++ {
 		tmpFile, tmpPath, err = createSecureTempFile(dir)
 		if err == nil {
 			created = true
 			break
 		}
-		// if name collision or similar, retry
 	}
 	if !created {
 		return fmt.Errorf("create temp failed: %w", err)
@@ -1334,7 +1330,33 @@ func deriveKeysFromPassword(password []byte, hdr *fileHeader) (encKey, macKey []
 /*** Securely open input files to prevent symlink TOCTOU bypass ***/
 
 func secureOpenReadOnly(path string) (*os.File, error) {
-	// Lstat first to detect symlink
+	// Prevent symlink traversal and TOCTOU by using OS-specific calls.
+	if runtime.GOOS == "windows" {
+		// On Windows, use CreateFile with FILE_FLAG_OPEN_REPARSE_POINT to open without following symlinks/junctions.
+		p, err := windows.UTF16PtrFromString(path)
+		if err != nil {
+			return nil, fmt.Errorf("windows path conversion: %w", err)
+		}
+		// OPEN_EXISTING: Only open if it exists; READ access; share mode READ.
+		handle, err := windows.CreateFile(p, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil,
+			windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+		if err != nil {
+			return nil, fmt.Errorf("open input (CreateFile): %w", err)
+		}
+		// Check if opened file is actually a reparse point (symlink/junction).
+		var fi windows.FileAttributeTagInfo
+		err = windows.GetFileInformationByHandleEx(handle, windows.FileAttributeTagInfo, (*byte)(unsafe.Pointer(&fi)), uint32(unsafe.Sizeof(fi)))
+		if err == nil {
+			if fi.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || fi.ReparseTag != 0 {
+				windows.CloseHandle(handle)
+				return nil, errors.New("refuse to open input: path is a reparse point (symlink or junction)")
+			}
+		}
+		// Wrap Windows handle in *os.File (will take ownership).
+		return os.NewFile(uintptr(handle), path), nil
+	}
+
+	// Non-Windows: use Lstat to detect symlinks then open with O_NOFOLLOW.
 	linfo, lerr := os.Lstat(path)
 	if lerr != nil {
 		return nil, fmt.Errorf("open input lstat: %w", lerr)
@@ -1343,17 +1365,14 @@ func secureOpenReadOnly(path string) (*os.File, error) {
 		return nil, errors.New("refuse to open input: path is a symlink")
 	}
 
-	if runtime.GOOS != "windows" {
-		// Attempt to use O_NOFOLLOW at open time to prevent races
-		flags := syscall.O_RDONLY | syscall.O_CLOEXEC
-		// O_NOFOLLOW may not be defined on some platforms; try to add it if available
-		flags |= syscall.O_NOFOLLOW
-		fd, err := syscall.Open(path, flags, 0)
-		if err == nil {
-			return os.NewFile(uintptr(fd), path), nil
-		}
-		// If it fails, fall back to os.Open but we already checked Lstat
+	// On Unix-like, attempt to use O_NOFOLLOW for atomic open.
+	flags := syscall.O_RDONLY | syscall.O_CLOEXEC
+	flags |= syscall.O_NOFOLLOW
+	fd, err := syscall.Open(path, flags, 0)
+	if err == nil {
+		return os.NewFile(uintptr(fd), path), nil
 	}
+	// Fallback to os.Open (we already checked symlink).
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open input: %w", err)
