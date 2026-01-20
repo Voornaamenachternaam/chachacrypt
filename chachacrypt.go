@@ -830,14 +830,23 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 		}
 
 		// Verify sizes match
-		srcInfo, _ := os.Stat(tmpPath)
-		dstInfo, _ := os.Stat(finalPath)
+		srcInfo, err := os.Stat(tmpPath)
+		if err != nil {
+			return fmt.Errorf("verification failed: could not stat temp file: %w", err)
+		}
+		dstInfo, err := os.Stat(finalPath)
+		if err != nil {
+			return fmt.Errorf("verification failed: could not stat dest file: %w", err)
+		}
 		if srcInfo.Size() != dstInfo.Size() {
-			return errors.New("verification failed: size mismatch after copy")
+			return fmt.Errorf("verification failed: size mismatch after copy")
 		}
 
 		// Verify checksum
-		dstR, _ := os.Open(finalPath)
+		dstR, err := os.Open(finalPath)
+		if err != nil {
+			return fmt.Errorf("verification failed: could not open dest for checksum: %w", err)
+		}
 		defer dstR.Close()
 		hdst := sha256.New()
 		if _, rerr := io.Copy(hdst, dstR); rerr != nil {
