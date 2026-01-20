@@ -174,7 +174,7 @@ func die(err error) {
 	} else if errors.Is(err, context.Canceled) {
 		fmt.Fprintln(os.Stderr, "Error: operation cancelled.")
 	} else {
-		fmt.Fprintln(os.Stderr, "Error: An unexpected error occurred.")
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 	}
 	os.Exit(1)
 }
