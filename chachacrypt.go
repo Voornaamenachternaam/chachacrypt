@@ -658,9 +658,48 @@ func fromHexChar(c byte) int {
 func setSecurePermissions(path string) error {
 	if runtime.GOOS == "windows" {
 		// On Windows, remove inherited ACEs from the DACL to ensure only explicit permissions.
-		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
-			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-			nil, nil, nil, nil); err != nil {
+  // On Windows, remove inherited ACEs from the DACL and set an explicit DACL for the current user only.
+  var tok windows.Token
+  if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &tok); err != nil {
+  	return fmt.Errorf("failed to open process token: %w", err)
+  }
+  defer tok.Close()
+
+  tu, err := tok.GetTokenUser()
+  if err != nil {
+  	return fmt.Errorf("failed to get token user: %w", err)
+  }
+  if tu == nil || tu.User == nil || tu.User.Sid == nil {
+  	return errors.New("failed to get current user SID")
+  }
+  sid := tu.User.Sid
+
+  ea := windows.EXPLICIT_ACCESS{
+  	AccessPermissions: windows.GENERIC_ALL,
+  	AccessMode:        windows.SET_ACCESS,
+  	Inheritance:       windows.NO_INHERITANCE,
+  	Trustee: windows.TRUSTEE{
+  		TrusteeForm:  windows.TRUSTEE_IS_SID,
+  		TrusteeType:  windows.TRUSTEE_IS_USER,
+  		TrusteeValue: windows.TrusteeValueFromSID(sid),
+  	},
+  }
+
+  var dacl *windows.ACL
+  if err := windows.SetEntriesInAcl(1, &ea, nil, &dacl); err != nil {
+  	return fmt.Errorf("failed to build DACL: %w", err)
+  }
+  defer windows.LocalFree(windows.Handle(unsafe.Pointer(dacl)))
+
+  if err := windows.SetNamedSecurityInfo(
+  	path,
+  	windows.SE_FILE_OBJECT,
+  	windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+  	nil, nil,
+  	dacl, nil,
+  ); err != nil {
+  	return fmt.Errorf("failed to apply secure DACL: %w", err)
+  }
 			return fmt.Errorf("failed to protect file DACL: %w", err)
 		}
 		return nil
