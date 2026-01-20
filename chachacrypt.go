@@ -304,7 +304,7 @@ func validatePasswordStrength(pw []byte) error {
 	}
 
 	lowerPw := make([]byte, len(pw))
-	for i := range len(pw) {
+	for i := range pw {
 		b := pw[i]
 		if 'A' <= b && b <= 'Z' {
 			lowerPw[i] = b + ('a' - 'A')
@@ -839,7 +839,7 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 			return fmt.Errorf("verification failed: could not stat dest file: %w", err)
 		}
 		if srcInfo.Size() != dstInfo.Size() {
-			return fmt.Errorf("verification failed: size mismatch after copy")
+			return errors.New("verification failed: size mismatch after copy")
 		}
 
 		// Verify checksum
