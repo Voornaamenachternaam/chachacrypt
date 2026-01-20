@@ -1385,14 +1385,16 @@ func secureOpenReadOnly(path string) (*os.File, error) {
 		// Check if opened file is actually a reparse point (symlink/junction).
 		var fi windows.FileAttributeTagInfo
 		err = windows.GetFileInformationByHandleEx(handle, windows.FileAttributeTagInfo, (*byte)(unsafe.Pointer(&fi)), uint32(unsafe.Sizeof(fi)))
-		if err == nil {
-			if fi.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || fi.ReparseTag != 0 {
-				windows.CloseHandle(handle)
-				return nil, errors.New("refuse to open input: path is a reparse point (symlink or junction)")
-			}
-		}
-		// Wrap Windows handle in *os.File (will take ownership).
-		return os.NewFile(uintptr(handle), path), nil
+  if err != nil {
+  	windows.CloseHandle(handle)
+  	return nil, fmt.Errorf("could not get file information to check for reparse point: %w", err)
+  }
+  if fi.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || fi.ReparseTag != 0 {
+  	windows.CloseHandle(handle)
+  	return nil, errors.New("refuse to open input: path is a reparse point (symlink or junction)")
+  }
+  // Wrap Windows handle in *os.File (will take ownership).
+  return os.NewFile(uintptr(handle), path), nil
 	}
 
 	// Non-Windows: use Lstat to detect symlinks then open with O_NOFOLLOW.
