@@ -1790,12 +1790,12 @@ func parseFlags() (runConfig, error) {
 		return cfg, ErrInvalidArguments
 	}
 
+	inPath := flag.Arg(0)
+	outPath := flag.Arg(1)
+
 	if strings.ContainsRune(inPath, '\x00') || strings.ContainsRune(outPath, '\x00') {
 		return cfg, errors.New("invalid path configuration")
 	}
-
-	inPath := flag.Arg(0)
-	outPath := flag.Arg(1)
 
 	if inPath == "" || outPath == "" {
 		return cfg, errors.New("input and output paths cannot be empty")
