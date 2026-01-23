@@ -1941,7 +1941,7 @@ func parseFlags() (runConfig, error) {
 
 	// Path validation: absolute paths not allowed unless --allow-absolute is set
 	if !*allowAbs && (filepath.IsAbs(inPath) || filepath.IsAbs(outPath)) {
-		return cfg, errors.New("absolute paths not allowed unless --allow-absolute is set")
+		return cfg, errors.New("invalid path configuration")
 	}
 
 	// Normalize paths to prevent directory traversal
