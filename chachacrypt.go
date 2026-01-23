@@ -677,7 +677,6 @@ func setSecurePermissions(path string) error {
 			AccessPermissions: windows.FILE_GENERIC_READ | windows.FILE_GENERIC_WRITE |
 				windows.DELETE | windows.READ_CONTROL,
 			AccessMode:  windows.SET_ACCESS,
-			AccessMode:  windows.SET_ACCESS,
 			Inheritance: windows.NO_INHERITANCE,
 			Trustee: windows.TRUSTEE{
 				TrusteeForm:  windows.TRUSTEE_IS_SID,
