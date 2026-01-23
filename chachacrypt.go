@@ -1399,7 +1399,7 @@ func secureOpenReadOnly(path string) (*os.File, error) {
   }
   if fi.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || fi.ReparseTag != 0 || fi.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
   	windows.CloseHandle(handle)
-  	return nil, errors.New("refuse to open input: path is a reparse point (symlink or junction)")
+  	return nil, errors.New("refuse to open input: path is a directory, symlink, or junction")
   }
   // Wrap Windows handle in *os.File (will take ownership).
   return os.NewFile(uintptr(handle), path), nil
