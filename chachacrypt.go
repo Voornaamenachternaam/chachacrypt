@@ -830,7 +830,7 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 
 	// Sync parent directory on Unix systems to ensure rename is durable.
 	if runtime.GOOS != "windows" {
-		if dfd, err := os.Open(filepath.Dir(finalPath), os.O_RDONLY, 0); err == nil {
+		if dfd, err := os.Open(filepath.Dir(finalPath)); err == nil {
 			// Best-effort sync, ignore error as not all filesystems support it.
 			_ = dfd.Sync()
 			_ = dfd.Close()
@@ -1397,7 +1397,7 @@ func secureOpenReadOnly(path string) (*os.File, error) {
   	windows.CloseHandle(handle)
   	return nil, fmt.Errorf("could not get file information to check for reparse point: %w", err)
   }
-  if fi.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || fi.ReparseTag != 0 {
+  if fi.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
   	windows.CloseHandle(handle)
   	return nil, errors.New("refuse to open input: path is a reparse point (symlink or junction)")
   }
@@ -1905,7 +1905,70 @@ func main() {
 	cfg, err := parseFlags()
 	if err != nil {
 		if err.Error() != "invalid arguments" {
+var ErrInvalidArguments = errors.New("invalid arguments")
+
+func parseFlags() (runConfig, error) {
+	var cfg runConfig
+	enc := flag.Bool("e", false, "encrypt mode")
+	dec := flag.Bool("d", false, "decrypt mode")
+	rot := flag.Bool("r", false, "rotate mode (re-encrypt with new password/params)")
+	force := flag.Bool("force", false, "overwrite output if exists")
+	allowAbs := flag.Bool("allow-absolute", false, "allow writing output outside current directory")
+	chunkSizeFlag := flag.Uint(
+		"chunk-size",
+		defaultChunkSize,
+		fmt.Sprintf("chunk size in bytes (%d-%d)", minChunkSize, maxChunkSize),
+	)
+	preset := flag.String("preset", "default", "argon preset: default | high | low")
+	argonTimeFlag := flag.Uint("argon-time", 0, "override argon time iterations")
+	argonMemFlag := flag.Uint("argon-memory", 0, "override argon memory (KiB)")
+	argonThreadsFlag := flag.Uint("argon-threads", 0, "override argon threads")
+	keyVersionFlag := flag.Uint("key-version", 1, "key version (for key rotation)")
+	verbose := flag.Bool("v", false, "verbose output")
+	flag.Parse()
+	if (*enc && *dec) || (*dec && *rot) || (*enc && *rot) || (!*enc && !*dec && !*rot) || flag.NArg() != 2 {
+		printUsage()
+		return cfg, ErrInvalidArguments
+	}
+	cfg.enc = *enc
+	cfg.dec = *dec
+	cfg.rot = *rot
+	cfg.force = *force
+	cfg.allowAbsolute = *allowAbs
+	cfg.chunkSize = uint32(*chunkSizeFlag)
+	cfg.verbose = *verbose
+	cfg.in = flag.Arg(0)
+	cfg.out = flag.Arg(1)
+	argTime, argMem, argThreads, err := parsePreset(*preset)
+	if err != nil {
+		return cfg, err
+	}
+	if *argonTimeFlag != 0 {
+		argTime = uint32(*argonTimeFlag)
+	}
+	if *argonMemFlag != 0 {
+		argMem = uint32(*argonMemFlag)
+	}
+	if *argonThreadsFlag != 0 {
+		argThreads = uint8(*argonThreadsFlag)
+	}
+	if err := validateArgon2Params(argTime, argMem, argThreads); err != nil {
+		return cfg, fmt.Errorf("invalid Argon2 configuration: %w", err)
+	}
+	cfg.argTime = argTime
+	cfg.argMem = argMem
+	cfg.argThreads = argThreads
+	cfg.keyVersion = uint32(*keyVersionFlag)
+	return cfg, nil
+}
+func main() {
+	cfg, err := parseFlags()
+	if err != nil {
+		if !errors.Is(err, ErrInvalidArguments) {
 			die(err)
+		}
+		os.Exit(usageExit)
+	}
 		}
 		os.Exit(usageExit)
 	}
