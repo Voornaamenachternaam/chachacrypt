@@ -60,4 +60,5 @@ func setSecurePermissions(path string) error {
 	return nil
 }
 
-// [Remaining code remains identical]
+// [Remaining code must be properly enclosed in their respective functions]
+// Ensure all code blocks have proper closing braces and no statements exist outside functions
