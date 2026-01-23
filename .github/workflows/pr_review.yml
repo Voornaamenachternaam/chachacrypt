@@ -4,8 +4,19 @@ on:
     types: [opened, synchronize, labeled, unlabeled]
 
 permissions:
-  contents: read
+  actions: write
+  checks: write
+  contents: write
+  deployments: write
+  id-token: write
+  issues: write
+  discussions: write
+  packages: write
+  pages: write
   pull-requests: write
+  repository-projects: write
+  security-events: write
+  statuses: write
 
 jobs:
   review:
@@ -33,4 +44,4 @@ jobs:
             4. Input sanitization
             5. Best-practices
 
-            Provide a 1-5 star rating for the overall quality, and offer code improvement. 
+            Provide a 1-5 star rating for the overall quality, and offer code improvement to comply with points 1-5. Prefer to give your code improvement in the form of a (number of) commit suggestions as this particular chat is part of a github action, running as part of a PR. This github action has all required permissions.
