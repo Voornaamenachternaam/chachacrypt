@@ -1840,10 +1840,12 @@ func parseFlags() (runConfig, error) {
 		}
 	}
 
-	// Validate output directory is writable
+	// Validate output directory exists and is usable (avoid creating paths during flag parsing).
 	outDir := filepath.Dir(cfg.out)
-	if err := os.MkdirAll(outDir, 0700); err != nil {
+	if st, err := os.Stat(outDir); err != nil {
 		return cfg, fmt.Errorf("cannot access output directory: %w", err)
+	} else if !st.IsDir() {
+		return cfg, errors.New("invalid output directory: not a directory")
 	}
 
 	cfg.enc = *enc
