@@ -1939,14 +1939,24 @@ func parseFlags() (runConfig, error) {
 		return cfg, errors.New("input and output paths cannot be empty")
 	}
 
-	// Path validation: absolute paths not allowed unless --allow-absolute is set
-	if !*allowAbs && (filepath.IsAbs(inPath) || filepath.IsAbs(outPath)) {
-		return cfg, errors.New("invalid path configuration")
+	// Path validation: absolute paths not allowed unless --allow-absolute is set.
+	// Also disallow volume/UNC-qualified Windows paths unless explicitly allowed.
+	if !*allowAbs {
+		if filepath.IsAbs(inPath) || filepath.IsAbs(outPath) {
+			return cfg, errors.New("invalid path configuration")
+		}
+		if runtime.GOOS == "windows" && (filepath.VolumeName(inPath) != "" || filepath.VolumeName(outPath) != "") {
+			return cfg, errors.New("invalid path configuration")
+		}
 	}
 
-	// Normalize paths to prevent directory traversal
+	// Normalize and reject traversal attempts (e.g., leading "../" after cleaning).
 	cfg.in = filepath.Clean(inPath)
 	cfg.out = filepath.Clean(outPath)
+	if cfg.in == ".." || strings.HasPrefix(cfg.in, ".."+string(os.PathSeparator)) ||
+		cfg.out == ".." || strings.HasPrefix(cfg.out, ".."+string(os.PathSeparator)) {
+		return cfg, errors.New("invalid path configuration")
+	}
 
 	// Validate output directory is writable
 	outDir := filepath.Dir(cfg.out)
