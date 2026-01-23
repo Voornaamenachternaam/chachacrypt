@@ -823,7 +823,7 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 			if fi, err := dfd.Stat(); err != nil || !fi.IsDir() {
 				dfd.Close()
 				return fmt.Errorf("invalid parent directory: %w", err)
-			}			
+			}
 			// Best-effort sync, ignore error as not all filesystems support it.
 			_ = dfd.Sync()
 			_ = dfd.Close()
@@ -1389,7 +1389,7 @@ func secureOpenReadOnly(path string) (*os.File, error) {
 		if err != nil {
 			windows.CloseHandle(handle)
 			return nil, fmt.Errorf("could not get file information to check for reparse point: %w", err)
-		}		
+		}
 		if err != nil {
 			windows.CloseHandle(handle)
 			return nil, fmt.Errorf("could not get file information to check for reparse point: %w", err)
@@ -1791,7 +1791,7 @@ func parseFlags() (runConfig, error) {
 	}
 
 	if strings.ContainsRune(inPath, '\x00') || strings.ContainsRune(outPath, '\x00') {
-		return cfg, errors.New("invalid path configuration")		
+		return cfg, errors.New("invalid path configuration")
 	}
 
 	inPath := flag.Arg(0)
