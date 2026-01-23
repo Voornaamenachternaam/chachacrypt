@@ -1935,6 +1935,10 @@ func parseFlags() (runConfig, error) {
 	inPath := flag.Arg(0)
 	outPath := flag.Arg(1)
 
+	if inPath == "" || outPath == "" {
+		return cfg, errors.New("input and output paths cannot be empty")
+	}
+
 	// Path validation: absolute paths not allowed unless --allow-absolute is set
 	if !*allowAbs && (filepath.IsAbs(inPath) || filepath.IsAbs(outPath)) {
 		return cfg, errors.New("absolute paths not allowed unless --allow-absolute is set")
