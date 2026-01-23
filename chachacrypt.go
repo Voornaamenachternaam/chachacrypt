@@ -674,7 +674,9 @@ func setSecurePermissions(path string) error {
 		sid := tu.User.Sid
 
 		ea := windows.EXPLICIT_ACCESS{
-			AccessPermissions: windows.GENERIC_ALL,
+			AccessPermissions: windows.FILE_GENERIC_READ | windows.FILE_GENERIC_WRITE |
+			                   windows.DELETE | windows.READ_CONTROL,
+			AccessMode:        windows.SET_ACCESS,
 			AccessMode:        windows.SET_ACCESS,
 			Inheritance:       windows.NO_INHERITANCE,
 			Trustee: windows.TRUSTEE{
@@ -1850,6 +1852,15 @@ func parseFlags() (runConfig, error) {
 		return cfg, errors.New("invalid output directory: symlink not allowed")
 	}
 
+	if inFi, err := os.Stat(absIn); err == nil {
+		if inFi.Size() > 1<<31 { // 2GB limit as conservative measure
+			return cfg, errors.New("input file too large")
+		}
+		if inFi.Size() == 0 {
+			return cfg, errors.New("input file cannot be empty")
+		}
+	}
+
 	cfg.enc = *enc
 	cfg.dec = *dec
 	cfg.rot = *rot
@@ -1962,6 +1973,10 @@ func main() {
 			os.Exit(usageExit)
 		case errors.Is(err, os.ErrPermission):
 			die(fmt.Errorf("permission denied: %w", err))
+		case strings.Contains(err.Error(), "symlink") ||
+		     strings.Contains(err.Error(), "reparse point") ||
+		     strings.Contains(err.Error(), "directory traversal"):
+			die(fmt.Errorf("security violation: %w", err))
 		default:
 			die(err)
 		}
