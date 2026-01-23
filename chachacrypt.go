@@ -1957,6 +1957,9 @@ func parseFlags() (runConfig, error) {
 		cfg.out == ".." || strings.HasPrefix(cfg.out, ".."+string(os.PathSeparator)) {
 		return cfg, errors.New("invalid path configuration")
 	}
+	if cfg.in == cfg.out {
+		return cfg, errors.New("input and output paths must differ")
+	}
 
 	// Validate output directory is writable
 	outDir := filepath.Dir(cfg.out)
