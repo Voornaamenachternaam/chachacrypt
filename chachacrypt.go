@@ -820,6 +820,10 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 	// Sync parent directory on Unix systems to ensure rename is durable.
 	if runtime.GOOS != "windows" {
 		if dfd, err := os.Open(filepath.Dir(finalPath)); err == nil {
+			if fi, err := dfd.Stat(); err != nil || !fi.IsDir() {
+				dfd.Close()
+				return fmt.Errorf("invalid parent directory: %w", err)
+			}			
 			// Best-effort sync, ignore error as not all filesystems support it.
 			_ = dfd.Sync()
 			_ = dfd.Close()
@@ -1385,6 +1389,10 @@ func secureOpenReadOnly(path string) (*os.File, error) {
 		if err != nil {
 			windows.CloseHandle(handle)
 			return nil, fmt.Errorf("could not get file information to check for reparse point: %w", err)
+		}		
+		if err != nil {
+			windows.CloseHandle(handle)
+			return nil, fmt.Errorf("could not get file information to check for reparse point: %w", err)
 		}
 		if fi.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || fi.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
 			windows.CloseHandle(handle)
@@ -1782,6 +1790,10 @@ func parseFlags() (runConfig, error) {
 		return cfg, ErrInvalidArguments
 	}
 
+	if strings.ContainsRune(inPath, '\x00') || strings.ContainsRune(outPath, '\x00') {
+		return cfg, errors.New("invalid path configuration")		
+	}
+
 	inPath := flag.Arg(0)
 	outPath := flag.Arg(1)
 
@@ -1943,10 +1955,13 @@ func runOperation(ctx context.Context, cfg runConfig) error {
 func main() {
 	cfg, err := parseFlags()
 	if err != nil {
-		if !errors.Is(err, ErrInvalidArguments) {
-			die(err)
-		} else {
+		switch {
+		case errors.Is(err, ErrInvalidArguments):
 			os.Exit(usageExit)
+		case errors.Is(err, os.ErrPermission):
+			die(fmt.Errorf("permission denied: %w", err))
+		default:
+			die(err)
 		}
 	}
 
