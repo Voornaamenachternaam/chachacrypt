@@ -1397,7 +1397,7 @@ func secureOpenReadOnly(path string) (*os.File, error) {
   	windows.CloseHandle(handle)
   	return nil, fmt.Errorf("could not get file information to check for reparse point: %w", err)
   }
-  if fi.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    if fi.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || fi.ReparseTag != 0 || fi.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
   	windows.CloseHandle(handle)
   	return nil, errors.New("refuse to open input: path is a reparse point (symlink or junction)")
   }
@@ -1926,10 +1926,30 @@ func parseFlags() (runConfig, error) {
 	keyVersionFlag := flag.Uint("key-version", 1, "key version (for key rotation)")
 	verbose := flag.Bool("v", false, "verbose output")
 	flag.Parse()
+
 	if (*enc && *dec) || (*dec && *rot) || (*enc && *rot) || (!*enc && !*dec && !*rot) || flag.NArg() != 2 {
 		printUsage()
 		return cfg, ErrInvalidArguments
 	}
+
+	inPath := flag.Arg(0)
+	outPath := flag.Arg(1)
+
+	// Path validation: absolute paths not allowed unless --allow-absolute is set
+	if !*allowAbs && (filepath.IsAbs(inPath) || filepath.IsAbs(outPath)) {
+		return cfg, errors.New("absolute paths not allowed unless --allow-absolute is set")
+	}
+
+	// Normalize paths to prevent directory traversal
+	cfg.in = filepath.Clean(inPath)
+	cfg.out = filepath.Clean(outPath)
+
+	// Validate output directory is writable
+	outDir := filepath.Dir(cfg.out)
+	if err := os.MkdirAll(outDir, 0700); err != nil {
+		return cfg, fmt.Errorf("cannot access output directory: %w", err)
+	}
+
 	cfg.enc = *enc
 	cfg.dec = *dec
 	cfg.rot = *rot
@@ -1937,8 +1957,7 @@ func parseFlags() (runConfig, error) {
 	cfg.allowAbsolute = *allowAbs
 	cfg.chunkSize = uint32(*chunkSizeFlag)
 	cfg.verbose = *verbose
-	cfg.in = flag.Arg(0)
-	cfg.out = flag.Arg(1)
+
 	argTime, argMem, argThreads, err := parsePreset(*preset)
 	if err != nil {
 		return cfg, err
@@ -1966,11 +1985,9 @@ func main() {
 	if err != nil {
 		if !errors.Is(err, ErrInvalidArguments) {
 			die(err)
+		} else {
+			os.Exit(usageExit)
 		}
-		os.Exit(usageExit)
-	}
-		}
-		os.Exit(usageExit)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
