@@ -1,4 +1,4 @@
-name: PR Review
+name: Diffguard
 on:
   pull_request:
     types: [opened, synchronize, labeled, unlabeled]
@@ -26,9 +26,9 @@ jobs:
 
           # Optional custom prompt
           custom_prompt: |
-            You are a highly rigorous security-focused expert. Analyze this PR with emphasis on:
+            You are a highly rigorous and experienced security-focused expert. Analyze this PR with emphasis on:
             1. Security vulnerabilities
-            2. Compatibility with Golang v1.25.5 and the versions of the dependencies
+            2. 100% compatibility with the specific version of Golang, as well as the specific versions of the dependencies, in go.mod
             3. Data validation
             4. Input sanitization
             5. Best-practices
