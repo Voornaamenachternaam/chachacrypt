@@ -1,5 +1,11 @@
 package main
 
+//go:build windows
+
+import (
+	"golang.org/x/sys/windows"
+)
+
 import (
 	"bytes"
 	"context"
@@ -28,7 +34,6 @@ import (
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
-	"golang.org/x/sys/windows"
 	"golang.org/x/term"
 )
 
