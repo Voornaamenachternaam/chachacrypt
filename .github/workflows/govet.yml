@@ -93,7 +93,7 @@ jobs:
       - name: Commit changes
         if: steps.changes.outputs.changed == 'true'
         run: |
-          git commit -m "chore(autofix): apply gofmt, fieldalignment, govet [skip ci]"
+          git commit -m "chore(autofix): apply gofmt, fieldalignment, govet [skip ci]" || true
 
       - name: Create Pull Request
         if: steps.changes.outputs.changed == 'true'
