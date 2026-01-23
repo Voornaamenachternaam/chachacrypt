@@ -1957,7 +1957,15 @@ func parseFlags() (runConfig, error) {
 		cfg.out == ".." || strings.HasPrefix(cfg.out, ".."+string(os.PathSeparator)) {
 		return cfg, errors.New("invalid path configuration")
 	}
-	if cfg.in == cfg.out {
+	absIn, err := filepath.Abs(cfg.in)
+	if err != nil {
+		return cfg, fmt.Errorf("cannot resolve input path: %w", err)
+	}
+	absOut, err := filepath.Abs(cfg.out)
+	if err != nil {
+		return cfg, fmt.Errorf("cannot resolve output path: %w", err)
+	}
+	if absIn == absOut {
 		return cfg, errors.New("input and output paths must differ")
 	}
 
