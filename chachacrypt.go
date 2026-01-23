@@ -675,10 +675,10 @@ func setSecurePermissions(path string) error {
 
 		ea := windows.EXPLICIT_ACCESS{
 			AccessPermissions: windows.FILE_GENERIC_READ | windows.FILE_GENERIC_WRITE |
-			                   windows.DELETE | windows.READ_CONTROL,
-			AccessMode:        windows.SET_ACCESS,
-			AccessMode:        windows.SET_ACCESS,
-			Inheritance:       windows.NO_INHERITANCE,
+				windows.DELETE | windows.READ_CONTROL,
+			AccessMode:  windows.SET_ACCESS,
+			AccessMode:  windows.SET_ACCESS,
+			Inheritance: windows.NO_INHERITANCE,
 			Trustee: windows.TRUSTEE{
 				TrusteeForm:  windows.TRUSTEE_IS_SID,
 				TrusteeType:  windows.TRUSTEE_IS_USER,
@@ -1974,8 +1974,8 @@ func main() {
 		case errors.Is(err, os.ErrPermission):
 			die(fmt.Errorf("permission denied: %w", err))
 		case strings.Contains(err.Error(), "symlink") ||
-		     strings.Contains(err.Error(), "reparse point") ||
-		     strings.Contains(err.Error(), "directory traversal"):
+			strings.Contains(err.Error(), "reparse point") ||
+			strings.Contains(err.Error(), "directory traversal"):
 			die(fmt.Errorf("security violation: %w", err))
 		default:
 			die(err)
