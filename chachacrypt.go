@@ -720,7 +720,7 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 	var err error
 	const maxAttempts = 8
 	created := false
-	for i := 0; i < maxAttempts; i++ {
+	for range maxAttempts {
 		tmpFile, tmpPath, err = createSecureTempFile(dir)
 		if err == nil {
 			created = true
@@ -838,7 +838,7 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 			return fmt.Errorf("verification failed: could not stat dest file: %w", err)
 		}
 		if srcInfo.Size() != dstInfo.Size() {
-			return fmt.Errorf("verification failed: size mismatch after copy")
+			return errors.New("verification failed: size mismatch after copy")
 		}
 
 		// Verify checksum
