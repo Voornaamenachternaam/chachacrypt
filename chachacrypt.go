@@ -1965,8 +1965,19 @@ func parseFlags() (runConfig, error) {
 	if err != nil {
 		return cfg, fmt.Errorf("cannot resolve output path: %w", err)
 	}
-	if absIn == absOut {
+
+	samePath := absIn == absOut
+	if runtime.GOOS == "windows" {
+		samePath = strings.EqualFold(absIn, absOut)
+	}
+	if samePath {
 		return cfg, errors.New("input and output paths must differ")
+	}
+
+	if inFi, err := os.Stat(absIn); err == nil {
+		if outFi, err := os.Stat(absOut); err == nil && os.SameFile(inFi, outFi) {
+			return cfg, errors.New("input and output paths must differ")
+		}
 	}
 
 	// Validate output directory is writable
