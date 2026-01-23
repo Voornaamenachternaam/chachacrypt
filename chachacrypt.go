@@ -1841,11 +1841,13 @@ func parseFlags() (runConfig, error) {
 	}
 
 	// Validate output directory exists and is usable (avoid creating paths during flag parsing).
-	outDir := filepath.Dir(cfg.out)
-	if st, err := os.Stat(outDir); err != nil {
+	outDir := filepath.Dir(absOut)
+	if st, err := os.Lstat(outDir); err != nil {
 		return cfg, fmt.Errorf("cannot access output directory: %w", err)
 	} else if !st.IsDir() {
 		return cfg, errors.New("invalid output directory: not a directory")
+	} else if st.Mode()&os.ModeSymlink != 0 {
+		return cfg, errors.New("invalid output directory: symlink not allowed")
 	}
 
 	cfg.enc = *enc
