@@ -1710,7 +1710,6 @@ func rotateFile(
 
 func printUsage() {
 	fmt.Fprintf(os.Stderr, `chachacrypt - Secure File Encryption Tool
-Version 1.0.0 (Go 1.25.6)
 
 Usage:
   chachacrypt -e infile outfile   # encrypt
