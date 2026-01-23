@@ -1397,7 +1397,7 @@ func secureOpenReadOnly(path string) (*os.File, error) {
   	windows.CloseHandle(handle)
   	return nil, fmt.Errorf("could not get file information to check for reparse point: %w", err)
   }
-    if fi.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || fi.ReparseTag != 0 || fi.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+  if fi.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || fi.ReparseTag != 0 || fi.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
   	windows.CloseHandle(handle)
   	return nil, errors.New("refuse to open input: path is a reparse point (symlink or junction)")
   }
