@@ -23,7 +23,6 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
-	"unsafe"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
