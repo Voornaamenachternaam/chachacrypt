@@ -1,0 +1,112 @@
+name: govet-autofix
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: write
+  statuses: write
+
+jobs:
+  lint-and-autofix:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up Go 1.25.6
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+      - run: go version
+
+      - name: Print Go environment
+        continue-on-error: true
+        run: |
+          go version
+          go env
+
+      - name: Install fieldalignment
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          go install golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment@v0.41.0
+
+      - name: Run gofmt
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          gofmt -s -w $(find . -name '*.go')
+
+      - name: Run fieldalignment (fix)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          fieldalignment -fix ./... > "${RUNNER_TEMP}/fieldalignment.log" 2>&1
+
+      - name: Run go vet
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          go vet ./... > "${RUNNER_TEMP}/govet.log" 2>&1
+
+      - name: Run go mod tidy
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          go mod tidy
+
+      - name: Upload diagnostic logs
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: go-diagnostics
+          path: |
+            ${{ runner.temp }}/govet.log
+            ${{ runner.temp }}/fieldalignment.log
+          if-no-files-found: ignore
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Detect changes
+        id: changes
+        run: |
+          set -euo pipefail
+          git add -A
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit changes
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git commit -m "chore(autofix): apply gofmt, fieldalignment, govet [skip ci]" || true
+
+      - name: Create Pull Request
+        if: steps.changes.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: auto-fixes/${{ github.run_id }}
+          update-existing: true
+          commit-message: "chore(autofix): apply gofmt, fieldalignment, govet [skip ci]"
+          title: "[autofix] Apply Go formatting and vet fixes"
+          body: |
+            Automated fixes applied:
+            - gofmt
+            - fieldalignment
+            - go vet
+            Diagnostic logs are attached as workflow artifacts. 
