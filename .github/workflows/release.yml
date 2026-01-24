@@ -91,7 +91,6 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: false
-      - run: go version
 
       - name: Install system deps (UPX + tar + zip)
         run: |
