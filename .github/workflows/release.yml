@@ -86,11 +86,12 @@ jobs:
             echo "SOURCE_DATE_EPOCH set to ${ts:-}"
           fi
 
-      - name: Setup Go 1.25.4 (release job; no cache)
+      - name: Setup Go (release job; no cache)
         uses: actions/setup-go@v6.2.0
         with:
-          go-version: 'stable'
+          go-version-file: 'go.mod'
           cache: false
+      - run: go version
 
       - name: Install system deps (UPX + tar + zip)
         run: |
