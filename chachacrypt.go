@@ -68,7 +68,7 @@ const (
 	secureFilePerms = 0o600 // Owner read/write only on Unix and Windows
 	secureDirPerms  = 0o700 // Owner rwx only on Unix
 
-	// Linter/Magic Number constants
+	// Linter/Magic Number constants.
 	maxASCIIValue       = 127
 	maxConsecutiveChars = 4
 	minComplexityGroups = 3
