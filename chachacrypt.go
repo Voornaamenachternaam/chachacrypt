@@ -14,7 +14,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -69,15 +68,12 @@ const (
 	secureFilePerms = 0o600 // Owner read/write only on Unix and Windows
 	secureDirPerms  = 0o700 // Owner rwx only on Unix
 
-	// Linter/Magic Number constants.
+	// Linter/Magic Number constants
 	maxASCIIValue       = 127
 	maxConsecutiveChars = 4
 	minComplexityGroups = 3
 	maxArgonTimeLimit   = 1024
 	maxThreadLimit      = 64
-	entropyCheckSize    = 64
-	byteFreqSize        = 256
-	entropyTestSize     = 64
 	maxPathLength       = 4096
 	maxPathComponentLen = 255
 	hexShift            = 4
@@ -86,8 +82,8 @@ const (
 	targetOS            = "windows"
 
 	// System call constants for cross-platform single-file compatibility.
-	// O_NOFOLLOW on Linux/Darwin. Used in conditional compile check only.
-	sysO_NOFOLLOW = 0x20000
+	// O_NOFOLLOW on Linux/Darwin (0x10000).
+	sysO_NOFOLLOW = 0x10000
 )
 
 const headerTotalSize = magicLen + 2 + 4 + 8 + 4 + 4 + 1 + saltSize + 4 + 2 + reservedLen + headerMACSize
@@ -238,7 +234,7 @@ func secureCompare(a, b []byte) bool {
 	return subtle.ConstantTimeCompare(a, b) == 1
 }
 
-// checkComplexity checks character types present in the password.
+// checkComplexity checks character types present in password.
 func checkComplexity(pw []byte) (hasUpper, hasLower, hasDigit, hasSpecial bool, err error) {
 	consecutiveCount := 0
 	var lastRune rune
@@ -283,7 +279,7 @@ func checkComplexity(pw []byte) (hasUpper, hasLower, hasDigit, hasSpecial bool, 
 	return hasUpper, hasLower, hasDigit, hasSpecial, nil
 }
 
-// validatePasswordStrength checks password strength without making string copies of the password.
+// validatePasswordStrength checks password strength without making string copies of password.
 func validatePasswordStrength(pw []byte) error {
 	if len(pw) < minPasswordLength {
 		return fmt.Errorf("password too short (minimum %d characters)", minPasswordLength)
@@ -496,66 +492,6 @@ func validateArgon2Params(t, mem uint32, threads uint8) error {
 		return fmt.Errorf("Argon2 threads out of bounds (min %d max %d)", minArgonThreads, maxThreads)
 	}
 	return nil
-}
-
-/*** Entropy check (best-effort) ***/
-
-// checkMinEntropy performs a conservative entropy check.
-// For small buffers (<64 bytes) it only checks for obvious constant data.
-// For larger buffers it computes a Shannon-entropy heuristic.
-func checkMinEntropy(data []byte) error {
-	if len(data) == 0 {
-		return errors.New("data too short for entropy check")
-	}
-
-	if len(data) < entropyCheckSize {
-		// Lightweight sanity: ensure data is not all the same byte
-		first := data[0]
-		allSame := true
-		for _, b := range data {
-			if b != first {
-				allSame = false
-				break
-			}
-		}
-		if allSame {
-			return errors.New("insufficient entropy: data appears constant")
-		}
-		// accept otherwise
-		return nil
-	}
-
-	freq := make([]int, byteFreqSize)
-	for _, b := range data {
-		freq[int(b)]++
-	}
-
-	var entropy float64
-	length := float64(len(data))
-
-	for _, c := range freq {
-		if c == 0 {
-			continue
-		}
-		p := float64(c) / length
-		entropy -= p * math.Log2(p)
-	}
-
-	const minEntropy = 7.5
-	if entropy < minEntropy {
-		return fmt.Errorf("insufficient entropy: %.2f bits/byte (min %.2f)", entropy, minEntropy)
-	}
-	return nil
-}
-
-// validateRandomness ensures crypto/rand is working properly.
-func validateRandomness() error {
-	test := make([]byte, entropyTestSize)
-	if _, err := io.ReadFull(rand.Reader, test); err != nil {
-		return fmt.Errorf("random number generator failure: %w", err)
-	}
-	defer zero(test)
-	return checkMinEntropy(test)
 }
 
 /*** Path safety and atomic write ***/
@@ -1002,8 +938,6 @@ func processOneEncrypt(
 	}
 	defer zero(nonce)
 
-	// No strict entropy check for nonces; rely on crypto/rand and validateRandomness on startup.
-
 	aad, err := buildAAD(hdr, idx)
 	if err != nil {
 		return true, err
@@ -1166,8 +1100,6 @@ func processOneRotate(
 		return true, fmt.Errorf("new nonce gen: %w", err)
 	}
 	defer zero(newNonce)
-
-	// No strict entropy check for nonces.
 
 	aadNew, err := buildAAD(newHdr, idx)
 	if err != nil {
@@ -1336,9 +1268,6 @@ func buildHeaderAndKeysForEncrypt(
 	if _, err := io.ReadFull(rand.Reader, hdr.Salt[:]); err != nil {
 		return nil, nil, nil, fmt.Errorf("salt generation failed: %w", err)
 	}
-	if entErr := checkMinEntropy(hdr.Salt[:]); entErr != nil {
-		return nil, nil, nil, fmt.Errorf("salt entropy check failed: %w", entErr)
-	}
 
 	master := deriveMasterKeyArgon(password, hdr.Salt[:], hdr.ArgonTime, hdr.ArgonMemory, hdr.ArgonThreads)
 	defer secureZero(master)
@@ -1383,7 +1312,6 @@ func secureOpenReadOnly(path string) (*os.File, error) {
 	// 2. Open file atomically based on OS capabilities.
 	if runtime.GOOS != targetOS {
 		// Unix: Use syscall.Open with O_NOFOLLOW for atomic protection.
-		// We use a manually defined constant to avoid cross-compile issues with Windows syscall package.
 		flags := syscall.O_RDONLY | syscall.O_CLOEXEC | sysO_NOFOLLOW
 		fd, err := syscall.Open(path, flags, 0)
 		if err == nil {
@@ -1566,9 +1494,6 @@ func prepareRotationKeys(
 
 	if _, err := io.ReadFull(rand.Reader, hdr.Salt[:]); err != nil {
 		return nil, nil, nil, fmt.Errorf("new salt generation: %w", err)
-	}
-	if entErr := checkMinEntropy(hdr.Salt[:]); entErr != nil {
-		return nil, nil, nil, fmt.Errorf("new salt entropy failed: %w", entErr)
 	}
 
 	master := deriveMasterKeyArgon(pwNew, hdr.Salt[:], hdr.ArgonTime, hdr.ArgonMemory, hdr.ArgonThreads)
@@ -1884,11 +1809,6 @@ func parseFlags() (runConfig, error) {
 }
 
 func runOperation(ctx context.Context, cfg runConfig) error {
-	// Validate random number generator
-	if err := validateRandomness(); err != nil {
-		return fmt.Errorf("system entropy check failed: %w", err)
-	}
-
 	absIn, err := filepath.Abs(cfg.in)
 	if err != nil {
 		return fmt.Errorf("resolve input path: %w", err)
