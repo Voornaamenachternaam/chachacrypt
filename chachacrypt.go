@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -68,7 +69,7 @@ const (
 	secureFilePerms = 0o600 // Owner read/write only on Unix and Windows
 	secureDirPerms  = 0o700 // Owner rwx only on Unix
 
-	// Linter/Magic Number constants
+	// Linter/Magic Number constants.
 	maxASCIIValue       = 127
 	maxConsecutiveChars = 4
 	minComplexityGroups = 3
@@ -269,7 +270,9 @@ func checkComplexity(pw []byte) (hasUpper, hasLower, hasDigit, hasSpecial bool, 
 		if r == lastRune {
 			consecutiveCount++
 			if consecutiveCount >= maxConsecutiveChars {
-				return false, false, false, false, errors.New("password contains too many consecutive identical characters")
+				return false, false, false, false, errors.New(
+					"password contains too many consecutive identical characters",
+				)
 			}
 		} else {
 			consecutiveCount = 1
@@ -761,7 +764,7 @@ func copyWithVerification(src, dst string) error {
 		return fmt.Errorf("verification failed: could not stat dest file: %w", statErr2)
 	}
 	if srcInfo.Size() != dstInfo.Size() {
-		return fmt.Errorf("verification failed: size mismatch after copy")
+		return errors.New("verification failed: size mismatch after copy")
 	}
 
 	// Verify checksum
@@ -818,7 +821,7 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 	var err error
 	const maxAttempts = 8
 	created := false
-	for i := 0; i < maxAttempts; i++ {
+	for range maxAttempts {
 		tmpFile, tmpPath, err = createSecureTempFile(dir)
 		if err == nil {
 			created = true
@@ -1842,7 +1845,7 @@ func parseFlags() (runConfig, error) {
 		return cfg, ErrInvalidArguments
 	}
 
-	absIn, absOut, err := resolveAndValidatePaths(flag.Arg(0), flag.Arg(1), fmt.Sprint(*allowAbs))
+	absIn, absOut, err := resolveAndValidatePaths(flag.Arg(0), flag.Arg(1), strconv.FormatBool(*allowAbs))
 	if err != nil {
 		return cfg, err
 	}
