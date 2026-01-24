@@ -66,11 +66,32 @@ const (
 	// Platform-specific secure permissions.
 	secureFilePerms = 0o600 // Owner read/write only on Unix and Windows
 	secureDirPerms  = 0o700 // Owner rwx only on Unix
+
+	// Linter/Magic Number constants
+	maxASCIIValue       = 127
+	maxConsecutiveChars = 4
+	minComplexityGroups = 3
+	maxArgonTimeLimit   = 1024
+	maxThreadLimit      = 64
+	entropyCheckSize    = 64
+	byteFreqSize        = 256
+	entropyTestSize     = 64
+	maxPathLength       = 4096
+	maxPathComponentLen = 255
+	hexShift            = 4
+	hexBase             = 10
+	randomSuffixLen     = 8
+	targetOS            = "windows"
+
+	// System call constants for cross-platform single-file compatibility.
+	sysO_NOFOLLOW = 0x20000 // O_NOFOLLOW value on Linux/Darwin
 )
 
 const headerTotalSize = magicLen + 2 + 4 + 8 + 4 + 4 + 1 + saltSize + 4 + 2 + reservedLen + headerMACSize
 
 func init() {
+	// We check header size here to fail fast, but to satisfy linter 'gochecknoinits',
+	// this logic is duplicated/verified in main. Init is kept for safety.
 	if hb, _ := serializeHeaderCanonical(&fileHeader{}); len(hb) != headerTotalSize {
 		panic(fmt.Sprintf("headerTotalSize mismatch: got %d, want %d", len(hb), headerTotalSize))
 	}
@@ -125,7 +146,7 @@ type cipherAEAD interface {
 // to prevent recovery via memory analysis. Uses runtime.KeepAlive to prevent
 // compiler optimization.
 func secureZero(b []byte) {
-	if b == nil || len(b) == 0 {
+	if len(b) == 0 {
 		return
 	}
 	// First pass: all zeros
@@ -149,7 +170,7 @@ func secureZero(b []byte) {
 
 // zero is a simpler version for non-critical cleanup.
 func zero(b []byte) {
-	if b == nil || len(b) == 0 {
+	if len(b) == 0 {
 		return
 	}
 	for i := range b {
@@ -158,9 +179,10 @@ func zero(b []byte) {
 	runtime.KeepAlive(b)
 }
 
-// clear is a lightweight zero for small fixed buffers (no multiple passes).
-func clear(b []byte) {
-	if b == nil || len(b) == 0 {
+// clearBuf is a lightweight zero for small fixed buffers (no multiple passes).
+// Renamed from 'clear' to avoid shadowing Go 1.21+ builtin.
+func clearBuf(b []byte) {
+	if len(b) == 0 {
 		return
 	}
 	for i := range b {
@@ -174,13 +196,15 @@ func die(err error) {
 		return
 	}
 	// Minimalistic user-facing errors to avoid leaking internal details.
+	var errMsg string
 	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
-		fmt.Fprintln(os.Stderr, "Error: file access issue — check paths/permissions.")
+		errMsg = "Error: file access issue — check paths/permissions."
 	} else if errors.Is(err, context.Canceled) {
-		fmt.Fprintln(os.Stderr, "Error: operation cancelled.")
+		errMsg = "Error: operation cancelled."
 	} else {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		errMsg = fmt.Sprintf("Error: %v", err)
 	}
+	fmt.Fprintln(os.Stderr, errMsg)
 	os.Exit(1)
 }
 
@@ -212,32 +236,19 @@ func secureCompare(a, b []byte) bool {
 	return subtle.ConstantTimeCompare(a, b) == 1
 }
 
-// validatePasswordStrength checks password strength without making string copies of the password.
-func validatePasswordStrength(pw []byte) error {
-	if len(pw) < minPasswordLength {
-		return fmt.Errorf("password too short (minimum %d characters)", minPasswordLength)
-	}
-	if len(pw) > maxPasswordLength {
-		return fmt.Errorf("password too long (maximum %d characters)", maxPasswordLength)
-	}
-
-	hasUpper := false
-	hasLower := false
-	hasDigit := false
-	hasSpecial := false
+// checkComplexity checks the character types present in the password.
+func checkComplexity(pw []byte) (hasUpper, hasLower, hasDigit, hasSpecial bool, err error) {
 	consecutiveCount := 0
 	var lastRune rune
 
-	// Iterate over runes without converting to string
 	for i := 0; i < len(pw); {
 		r, size := utf8.DecodeRune(pw[i:])
 		if r == utf8.RuneError && size == 1 {
-			// treat as byte
 			r = rune(pw[i])
 			size = 1
 		}
 		if r == 0 {
-			return errors.New("password contains null byte")
+			return false, false, false, false, errors.New("password contains null byte")
 		}
 		switch {
 		case 'A' <= r && r <= 'Z':
@@ -250,20 +261,36 @@ func validatePasswordStrength(pw []byte) error {
 			hasSpecial = true
 		default:
 			// other unicode categories count as "special"
-			if r > 127 {
+			if r > maxASCIIValue {
 				hasSpecial = true
 			}
 		}
 		if r == lastRune {
 			consecutiveCount++
-			if consecutiveCount >= 4 {
-				return errors.New("password contains too many consecutive identical characters")
+			if consecutiveCount >= maxConsecutiveChars {
+				return false, false, false, false, errors.New("password contains too many consecutive identical characters")
 			}
 		} else {
 			consecutiveCount = 1
 			lastRune = r
 		}
 		i += size
+	}
+	return hasUpper, hasLower, hasDigit, hasSpecial, nil
+}
+
+// validatePasswordStrength checks password strength without making string copies of the password.
+func validatePasswordStrength(pw []byte) error {
+	if len(pw) < minPasswordLength {
+		return fmt.Errorf("password too short (minimum %d characters)", minPasswordLength)
+	}
+	if len(pw) > maxPasswordLength {
+		return fmt.Errorf("password too long (maximum %d characters)", maxPasswordLength)
+	}
+
+	hasUpper, hasLower, hasDigit, hasSpecial, err := checkComplexity(pw)
+	if err != nil {
+		return err
 	}
 
 	// Require at least 3 out of 4 character types
@@ -281,7 +308,7 @@ func validatePasswordStrength(pw []byte) error {
 		charTypeCount++
 	}
 
-	if charTypeCount < 3 {
+	if charTypeCount < minComplexityGroups {
 		return errors.New(
 			"password must contain at least three types: uppercase, lowercase, digits, or special characters",
 		)
@@ -377,7 +404,7 @@ func serializeHeaderCanonical(hdr *fileHeader) ([]byte, error) {
 // serializeHeaderForMAC returns the canonical header bytes with HeaderMAC zeroed.
 func serializeHeaderForMAC(hdr *fileHeader) ([]byte, error) {
 	tmp := *hdr
-	clear(tmp.HeaderMAC[:])
+	clearBuf(tmp.HeaderMAC[:])
 	return serializeHeaderCanonical(&tmp)
 }
 
@@ -388,8 +415,8 @@ func buildAAD(hdr *fileHeader, chunkIndex uint64) ([]byte, error) {
 	}
 	var b bytes.Buffer
 	b.Write(hb)
-	if err := binary.Write(&b, binary.BigEndian, chunkIndex); err != nil {
-		return nil, err
+	if writeErr := binary.Write(&b, binary.BigEndian, chunkIndex); writeErr != nil {
+		return nil, writeErr
 	}
 	return b.Bytes(), nil
 }
@@ -432,8 +459,8 @@ func computeHeaderHMAC(hdr *fileHeader, macKey []byte) ([]byte, error) {
 		return nil, err
 	}
 	m := hmac.New(sha256.New, macKey)
-	if _, err := m.Write(b); err != nil {
-		return nil, err
+	if writeErr := m.Write(b); writeErr != nil {
+		return nil, writeErr
 	}
 	return m.Sum(nil), nil
 }
@@ -444,8 +471,8 @@ func validateArgon2Params(t, mem uint32, threads uint8) error {
 	if t < minArgonTime {
 		return fmt.Errorf("Argon2 time too low (min %d)", minArgonTime)
 	}
-	if t > 1024 {
-		return fmt.Errorf("Argon2 time too high (max %d)", 1024)
+	if t > maxArgonTimeLimit {
+		return fmt.Errorf("Argon2 time too high (max %d)", maxArgonTimeLimit)
 	}
 	if mem < minArgonMemory {
 		return fmt.Errorf("Argon2 memory too low (min %d KiB)", minArgonMemory)
@@ -454,8 +481,8 @@ func validateArgon2Params(t, mem uint32, threads uint8) error {
 		return fmt.Errorf("Argon2 memory too high (max %d KiB)", maxArgonMemory)
 	}
 	maxThreads := uint8(runtime.NumCPU())
-	if maxThreads > 64 {
-		maxThreads = 64 // Reasonable upper bound
+	if maxThreads > maxThreadLimit {
+		maxThreads = maxThreadLimit // Reasonable upper bound
 	}
 	if threads < minArgonThreads || threads > maxThreads {
 		return fmt.Errorf("Argon2 threads out of bounds (min %d max %d)", minArgonThreads, maxThreads)
@@ -473,7 +500,7 @@ func checkMinEntropy(data []byte) error {
 		return errors.New("data too short for entropy check")
 	}
 
-	if len(data) < 64 {
+	if len(data) < entropyCheckSize {
 		// Lightweight sanity: ensure data is not all the same byte
 		first := data[0]
 		allSame := true
@@ -490,7 +517,7 @@ func checkMinEntropy(data []byte) error {
 		return nil
 	}
 
-	freq := make([]int, 256)
+	freq := make([]int, byteFreqSize)
 	for _, b := range data {
 		freq[int(b)]++
 	}
@@ -515,7 +542,7 @@ func checkMinEntropy(data []byte) error {
 
 // validateRandomness ensures crypto/rand is working properly.
 func validateRandomness() error {
-	test := make([]byte, 64)
+	test := make([]byte, entropyTestSize)
 	if _, err := io.ReadFull(rand.Reader, test); err != nil {
 		return fmt.Errorf("random number generator failure: %w", err)
 	}
@@ -525,13 +552,34 @@ func validateRandomness() error {
 
 /*** Path safety and atomic write ***/
 
+func validatePathComponents(clean string) error {
+	parts := strings.Split(clean, string(os.PathSeparator))
+	for _, p := range parts {
+		if p == ".." {
+			return errors.New("path contains parent directory reference")
+		}
+		if p == "." || len(p) == 0 {
+			continue
+		}
+		if len(p) > maxPathComponentLen {
+			return errors.New("path component too long")
+		}
+		for _, rc := range p {
+			if rc < 32 || rc == 127 {
+				return errors.New("path contains control characters")
+			}
+		}
+	}
+	return nil
+}
+
 // safeOutputPath resolves symlinks, cleans, and ensures output is secure.
 func safeOutputPath(out string, allowAbsolute bool) (string, error) {
 	// Basic validation
 	if out == "" {
 		return "", errors.New("empty output path")
 	}
-	if len(out) > 4096 {
+	if len(out) > maxPathLength {
 		return "", errors.New("path too long")
 	}
 	if strings.IndexByte(out, 0) != -1 {
@@ -539,17 +587,16 @@ func safeOutputPath(out string, allowAbsolute bool) (string, error) {
 	}
 
 	// Reject percent-encoded traversal patterns
-	if decoded, err := urlPathUnescape(out); err == nil {
-		if decoded != out {
-			// if unescaping reveals traversal or backslashes, reject
-			if strings.Contains(decoded, "..") || strings.ContainsAny(decoded, `\`) {
-				return "", errors.New("path contains suspicious encoded content")
-			}
-			out = decoded
-		}
-	} else {
-		// malformed encoding
+	decoded, err := urlPathUnescape(out)
+	if err != nil {
 		return "", fmt.Errorf("malformed path encoding: %w", err)
+	}
+	if decoded != out {
+		// if unescaping reveals traversal or backslashes, reject
+		if strings.Contains(decoded, "..") || strings.ContainsAny(decoded, `\`) {
+			return "", errors.New("path contains suspicious encoded content")
+		}
+		out = decoded
 	}
 
 	// Normalize path separators
@@ -567,13 +614,13 @@ func safeOutputPath(out string, allowAbsolute bool) (string, error) {
 	// If not allowed, refuse absolute paths outside cwd
 	if !allowAbsolute {
 		if filepath.IsAbs(clean) {
-			cwd, err := os.Getwd()
-			if err != nil {
-				return "", fmt.Errorf("failed to get working directory: %w", err)
+			cwd, cwdErr := os.Getwd()
+			if cwdErr != nil {
+				return "", fmt.Errorf("failed to get working directory: %w", cwdErr)
 			}
-			rel, err := filepath.Rel(cwd, clean)
-			if err != nil {
-				return "", fmt.Errorf("failed to compute relative path: %w", err)
+			rel, relErr := filepath.Rel(cwd, clean)
+			if relErr != nil {
+				return "", fmt.Errorf("failed to compute relative path: %w", relErr)
 			}
 			if strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == ".." {
 				return "", errors.New("output path is outside working directory")
@@ -591,23 +638,9 @@ func safeOutputPath(out string, allowAbsolute bool) (string, error) {
 		return "", errors.New("parent directory is a symlink (refuse to write into symlinked dir)")
 	}
 
-	// Validate components for control chars and lengths
-	parts := strings.Split(clean, string(os.PathSeparator))
-	for _, p := range parts {
-		if p == ".." {
-			return "", errors.New("path contains parent directory reference")
-		}
-		if p == "." || len(p) == 0 {
-			continue
-		}
-		if len(p) > 255 {
-			return "", errors.New("path component too long")
-		}
-		for _, rc := range p {
-			if rc < 32 || rc == 127 {
-				return "", errors.New("path contains control characters")
-			}
-		}
+	// Validate components
+	if compErr := validatePathComponents(clean); compErr != nil {
+		return "", compErr
 	}
 
 	return clean, nil
@@ -615,9 +648,6 @@ func safeOutputPath(out string, allowAbsolute bool) (string, error) {
 
 // Helper to safely unescape URL-like percent encoding for paths.
 func urlPathUnescape(s string) (string, error) {
-	// Replace '+' with percent-encoding not desired for paths, use QueryUnescape is not appropriate.
-	// Use a conservative approach: run path unescape.
-	// Implement simple percent decoding for ASCII hex sequences.
 	out := make([]byte, 0, len(s))
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -630,7 +660,7 @@ func urlPathUnescape(s string) (string, error) {
 			if hi < 0 || lo < 0 {
 				return "", errors.New("invalid percent-encoding")
 			}
-			out = append(out, byte((hi<<4)|lo))
+			out = append(out, byte((hi<<hexShift)|lo))
 			i += 2
 		} else {
 			out = append(out, c)
@@ -644,9 +674,9 @@ func fromHexChar(c byte) int {
 	case '0' <= c && c <= '9':
 		return int(c - '0')
 	case 'a' <= c && c <= 'f':
-		return int(c - 'a' + 10)
+		return int(c - 'a' + hexBase)
 	case 'A' <= c && c <= 'F':
-		return int(c - 'A' + 10)
+		return int(c - 'A' + hexBase)
 	default:
 		return -1
 	}
@@ -661,8 +691,8 @@ func setSecurePermissions(path string) error {
 		return err
 	}
 	if info.Mode().Perm() != secureFilePerms {
-		if err := os.Chmod(path, secureFilePerms); err != nil {
-			return fmt.Errorf("failed to set secure permissions: %w", err)
+		if chmodErr := os.Chmod(path, secureFilePerms); chmodErr != nil {
+			return fmt.Errorf("failed to set secure permissions: %w", chmodErr)
 		}
 	}
 	return nil
@@ -670,10 +700,18 @@ func setSecurePermissions(path string) error {
 
 /*** Secure temp creation and atomic write ***/
 
+func closeQuietly(c io.Closer) {
+	_ = c.Close()
+}
+
+func removeQuietly(name string) {
+	_ = os.Remove(name)
+}
+
 // createSecureTempFile creates a temp file name and opens it atomically with O_CREATE|O_EXCL and secure mode.
 func createSecureTempFile(dir string) (*os.File, string, error) {
 	// random suffix
-	r := make([]byte, 8)
+	r := make([]byte, randomSuffixLen)
 	if _, err := io.ReadFull(rand.Reader, r); err != nil {
 		return nil, "", err
 	}
@@ -685,6 +723,61 @@ func createSecureTempFile(dir string) (*os.File, string, error) {
 		return nil, "", err
 	}
 	return f, path, nil
+}
+
+func copyWithVerification(src, dst string) error {
+	rSrc, rErr := os.Open(src)
+	if rErr != nil {
+		return fmt.Errorf("open temp for copy: %w", rErr)
+	}
+	defer closeQuietly(rSrc)
+
+	wDst, wErr := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(secureFilePerms))
+	if wErr != nil {
+		return fmt.Errorf("create dest for copy: %w", wErr)
+	}
+	defer closeQuietly(wDst)
+
+	hsrc := sha256.New()
+	mw := io.MultiWriter(wDst, hsrc)
+	if _, cerr := io.Copy(mw, rSrc); cerr != nil {
+		return fmt.Errorf("copy temp to dest: %w", cerr)
+	}
+	if serr := wDst.Sync(); serr != nil {
+		return fmt.Errorf("sync dest: %w", serr)
+	}
+	// Verify sizes match
+	srcInfo, statErr := os.Stat(src)
+	if statErr != nil {
+		return fmt.Errorf("verification failed: could not stat temp file: %w", statErr)
+	}
+	dstInfo, statErr2 := os.Stat(dst)
+	if statErr2 != nil {
+		return fmt.Errorf("verification failed: could not stat dest file: %w", statErr2)
+	}
+	if srcInfo.Size() != dstInfo.Size() {
+		return fmt.Errorf("verification failed: size mismatch after copy")
+	}
+
+	// Verify checksum
+	dstR, openErr := os.Open(dst)
+	if openErr != nil {
+		return fmt.Errorf("verification failed: could not open dest for checksum: %w", openErr)
+	}
+	defer closeQuietly(dstR)
+	hdst := sha256.New()
+	if _, copyErr := io.Copy(hdst, dstR); copyErr != nil {
+		return fmt.Errorf("verification failed: could not checksum dest: %w", copyErr)
+	}
+	if !bytesEqual(hsrc.Sum(nil), hdst.Sum(nil)) {
+		return errors.New("verification failed: checksum mismatch after copy")
+	}
+
+	// Remove temp after success
+	if rmErr := os.Remove(src); rmErr != nil {
+		return fmt.Errorf("remove temp after copy: %w", rmErr)
+	}
+	return nil
 }
 
 // atomicWriteReplace writes to a secure temporary file and renames into place.
@@ -710,7 +803,7 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 	if dirStatBefore.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("target directory is a symlink: %s", dir)
 	}
-	if runtime.GOOS != "windows" && dirStatBefore.Mode().Perm()&0o022 != 0 {
+	if runtime.GOOS != targetOS && dirStatBefore.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("target directory is group/other writable: %s", dir)
 	}
 
@@ -720,7 +813,7 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 	var err error
 	const maxAttempts = 8
 	created := false
-	for range maxAttempts {
+	for i := 0; i < maxAttempts; i++ {
 		tmpFile, tmpPath, err = createSecureTempFile(dir)
 		if err == nil {
 			created = true
@@ -734,28 +827,28 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 	// Verify directory identity didn't change
 	dirStatAfter, dserr := os.Lstat(dir)
 	if dserr != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
+		closeQuietly(tmpFile)
+		removeQuietly(tmpPath)
 		return fmt.Errorf("lstat temp dir after create failed: %w", dserr)
 	}
 	if !os.SameFile(dirStatBefore, dirStatAfter) {
-		tmpFile.Close()
-		os.Remove(tmpPath)
+		closeQuietly(tmpFile)
+		removeQuietly(tmpPath)
 		return errors.New("directory changed during temp file creation (possible race)")
 	}
 
 	// Ensure secure permissions on temp
-	if err := setSecurePermissions(tmpPath); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		return err
+	if permErr := setSecurePermissions(tmpPath); permErr != nil {
+		closeQuietly(tmpFile)
+		removeQuietly(tmpPath)
+		return permErr
 	}
 
 	var writeErr error
 	defer func() {
-		tmpFile.Close()
+		closeQuietly(tmpFile)
 		if writeErr != nil || !force {
-			os.Remove(tmpPath)
+			removeQuietly(tmpPath)
 		}
 	}()
 
@@ -772,15 +865,16 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 	}
 
 	// Sync parent directory on Unix systems to ensure rename is durable.
-	if runtime.GOOS != "windows" {
-		if dfd, err := os.Open(filepath.Dir(finalPath)); err == nil {
-			if fi, err := dfd.Stat(); err != nil || !fi.IsDir() {
-				dfd.Close()
-				return fmt.Errorf("invalid parent directory: %w", err)
+	if runtime.GOOS != targetOS {
+		dfd, openErr := os.Open(filepath.Dir(finalPath))
+		if openErr == nil {
+			if fi, fiErr := dfd.Stat(); fiErr != nil || !fi.IsDir() {
+				closeQuietly(dfd)
+				return fmt.Errorf("invalid parent directory: %w", fiErr)
 			}
 			// Best-effort sync, ignore error as not all filesystems support it.
 			_ = dfd.Sync()
-			_ = dfd.Close()
+			closeQuietly(dfd)
 		}
 	}
 
@@ -803,63 +897,7 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 	var linkErr *os.LinkError
 	if errors.As(err, &linkErr) {
 		fmt.Fprintf(os.Stderr, "Warning: cross-device move, using verified copy for %s\n", finalPath)
-		src, rerr := os.Open(tmpPath)
-		if rerr != nil {
-			return fmt.Errorf("open temp for copy: %w", rerr)
-		}
-		defer src.Close()
-
-		dst, werr := os.OpenFile(finalPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(secureFilePerms))
-		if werr != nil {
-			return fmt.Errorf("create dest for copy: %w", werr)
-		}
-
-		hsrc := sha256.New()
-		mw := io.MultiWriter(dst, hsrc)
-		if _, cerr := io.Copy(mw, src); cerr != nil {
-			dst.Close()
-			return fmt.Errorf("copy temp to dest: %w", cerr)
-		}
-		if serr := dst.Sync(); serr != nil {
-			dst.Close()
-			return fmt.Errorf("sync dest: %w", serr)
-		}
-		if err := dst.Close(); err != nil {
-			return fmt.Errorf("close dest after copy: %w", err)
-		}
-
-		// Verify sizes match
-		srcInfo, err := os.Stat(tmpPath)
-		if err != nil {
-			return fmt.Errorf("verification failed: could not stat temp file: %w", err)
-		}
-		dstInfo, err := os.Stat(finalPath)
-		if err != nil {
-			return fmt.Errorf("verification failed: could not stat dest file: %w", err)
-		}
-		if srcInfo.Size() != dstInfo.Size() {
-			return errors.New("verification failed: size mismatch after copy")
-		}
-
-		// Verify checksum
-		dstR, err := os.Open(finalPath)
-		if err != nil {
-			return fmt.Errorf("verification failed: could not open dest for checksum: %w", err)
-		}
-		defer dstR.Close()
-		hdst := sha256.New()
-		if _, rerr := io.Copy(hdst, dstR); rerr != nil {
-			return fmt.Errorf("verification failed: could not checksum dest: %w", rerr)
-		}
-		if !bytesEqual(hsrc.Sum(nil), hdst.Sum(nil)) {
-			return errors.New("verification failed: checksum mismatch after copy")
-		}
-
-		// Remove temp after success
-		if rerr := os.Remove(tmpPath); rerr != nil {
-			return fmt.Errorf("remove temp after copy: %w", rerr)
-		}
-		return nil
+		return copyWithVerification(tmpPath, finalPath)
 	}
 
 	return fmt.Errorf("rename temp: %w", err)
@@ -1179,8 +1217,8 @@ func parseHeaderFromBytes(data []byte, hdr *fileHeader) error {
 	}
 
 	buf := bytes.NewReader(data)
-	if _, err := io.ReadFull(buf, hdr.Magic[:]); err != nil {
-		return err
+	if _, readMagicErr := io.ReadFull(buf, hdr.Magic[:]); readMagicErr != nil {
+		return readMagicErr
 	}
 	if err := binary.Read(buf, binary.BigEndian, &hdr.Version); err != nil {
 		return err
@@ -1202,8 +1240,8 @@ func parseHeaderFromBytes(data []byte, hdr *fileHeader) error {
 		return err
 	}
 	hdr.ArgonThreads = b
-	if _, err := io.ReadFull(buf, hdr.Salt[:]); err != nil {
-		return err
+	if _, readSaltErr := io.ReadFull(buf, hdr.Salt[:]); readSaltErr != nil {
+		return readSaltErr
 	}
 	if err := binary.Read(buf, binary.BigEndian, &hdr.ChunkSize); err != nil {
 		return err
@@ -1211,11 +1249,11 @@ func parseHeaderFromBytes(data []byte, hdr *fileHeader) error {
 	if err := binary.Read(buf, binary.BigEndian, &hdr.NonceSize); err != nil {
 		return err
 	}
-	if _, err := io.ReadFull(buf, hdr.Reserved[:]); err != nil {
-		return err
+	if _, readReservedErr := io.ReadFull(buf, hdr.Reserved[:]); readReservedErr != nil {
+		return readReservedErr
 	}
-	if _, err := io.ReadFull(buf, hdr.HeaderMAC[:]); err != nil {
-		return err
+	if _, readHMACErr := io.ReadFull(buf, hdr.HeaderMAC[:]); readHMACErr != nil {
+		return readHMACErr
 	}
 	return nil
 }
@@ -1315,7 +1353,7 @@ func buildHeaderAndKeysForEncrypt(
 	return &hdr, encKey, macKey, nil
 }
 
-func deriveKeysFromPassword(password []byte, hdr *fileHeader) (encKey, macKey []byte, err error) {
+func deriveKeysFromPassword(password []byte, hdr *fileHeader) ([]byte, []byte, error) {
 	master := deriveMasterKeyArgon(password, hdr.Salt[:], hdr.ArgonTime, hdr.ArgonMemory, hdr.ArgonThreads)
 	defer secureZero(master)
 	return deriveEncAndMacKeys(master)
@@ -1335,11 +1373,10 @@ func secureOpenReadOnly(path string) (*os.File, error) {
 	}
 
 	// 2. Open the file atomically based on OS capabilities.
-	if runtime.GOOS != "windows" {
+	if runtime.GOOS != targetOS {
 		// Unix: Use syscall.Open with O_NOFOLLOW for atomic protection.
 		// If the symlink was swapped between Lstat and Open, O_NOFOLLOW prevents following it.
-		flags := syscall.O_RDONLY | syscall.O_CLOEXEC
-		flags |= syscall.O_NOFOLLOW
+		flags := syscall.O_RDONLY | syscall.O_CLOEXEC | sysO_NOFOLLOW
 		fd, err := syscall.Open(path, flags, 0)
 		if err == nil {
 			return os.NewFile(uintptr(fd), path), nil
@@ -1351,17 +1388,16 @@ func secureOpenReadOnly(path string) (*os.File, error) {
 			return nil, fmt.Errorf("open input: %w", err)
 		}
 		return f, nil
-	} else {
-		// Windows: The standard library does not expose a direct equivalent of O_NOFOLLOW/FILE_FLAG_OPEN_REPARSE_POINT
-		// that works easily in a single cross-platform file without the "windows" package.
-		// We rely on the os.Lstat check above. This is TOCTOU-vulnerable but acceptable
-		// given the single-file constraint without build tags.
-		f, err := os.Open(path)
-		if err != nil {
-			return nil, fmt.Errorf("open input: %w", err)
-		}
-		return f, nil
 	}
+	// Windows: The standard library does not expose a direct equivalent of O_NOFOLLOW/FILE_FLAG_OPEN_REPARSE_POINT
+	// that works easily in a single cross-platform file without the "windows" package.
+	// We rely on the os.Lstat check above. This is TOCTOU-vulnerable but acceptable
+	// given the single-file constraint without build tags.
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open input: %w", err)
+	}
+	return f, nil
 }
 
 /*** Encrypt / Decrypt / Rotate high-level operations ***/
@@ -1380,7 +1416,7 @@ func encryptFile(
 	if err != nil {
 		return fmt.Errorf("open input: %w", err)
 	}
-	defer in.Close()
+	defer closeQuietly(in)
 
 	info, err := in.Stat()
 	if err != nil {
@@ -1388,7 +1424,7 @@ func encryptFile(
 	}
 
 	// Security checks on input file
-	if runtime.GOOS != "windows" {
+	if runtime.GOOS != targetOS {
 		if info.Mode().Perm()&0o022 != 0 {
 			return errors.New("input file is writable by group or other (security risk)")
 		}
@@ -1436,9 +1472,9 @@ func encryptFile(
 	}
 
 	writer := func(f *os.File) error {
-		hb, err := serializeHeaderCanonical(hdr)
-		if err != nil {
-			return fmt.Errorf("serialize header: %w", err)
+		hb, serErr := serializeHeaderCanonical(hdr)
+		if serErr != nil {
+			return fmt.Errorf("serialize header: %w", serErr)
 		}
 		if _, err := f.Write(hb); err != nil {
 			return fmt.Errorf("write header: %w", err)
@@ -1455,11 +1491,11 @@ func decryptFile(ctx context.Context, inPath, outPath string, force bool, verbos
 	if err != nil {
 		return fmt.Errorf("open input: %w", err)
 	}
-	defer in.Close()
+	defer closeQuietly(in)
 
 	hdrBytes := make([]byte, headerTotalSize)
-	if _, err := io.ReadFull(in, hdrBytes); err != nil {
-		return fmt.Errorf("read header: %w", err)
+	if _, readHeaderErr := io.ReadFull(in, hdrBytes); readHeaderErr != nil {
+		return fmt.Errorf("read header: %w", readHeaderErr)
 	}
 
 	var hdr fileHeader
@@ -1562,11 +1598,11 @@ func rotateFile(
 	if err != nil {
 		return fmt.Errorf("open input: %w", err)
 	}
-	defer in.Close()
+	defer closeQuietly(in)
 
 	hdrBytes := make([]byte, headerTotalSize)
-	if _, err := io.ReadFull(in, hdrBytes); err != nil {
-		return fmt.Errorf("read header: %w", err)
+	if _, readHeaderErr := io.ReadFull(in, hdrBytes); readHeaderErr != nil {
+		return fmt.Errorf("read header: %w", readHeaderErr)
 	}
 
 	var origHdr fileHeader
@@ -1638,9 +1674,9 @@ func rotateFile(
 	}
 
 	writer := func(f *os.File) error {
-		hb, err := serializeHeaderCanonical(newHdr)
-		if err != nil {
-			return fmt.Errorf("serialize new header: %w", err)
+		hb, serErr := serializeHeaderCanonical(newHdr)
+		if serErr != nil {
+			return fmt.Errorf("serialize new header: %w", serErr)
 		}
 		if _, err := f.Write(hb); err != nil {
 			return fmt.Errorf("write new header: %w", err)
@@ -1683,6 +1719,80 @@ func parsePreset(preset string) (uint32, uint32, uint8, error) {
 	default:
 		return 0, 0, 0, fmt.Errorf("unknown preset: %s (valid: default, high, low)", preset)
 	}
+}
+
+func resolveAndValidatePaths(inPath, outPath, allowAbs string) (string, string, error) {
+	if strings.ContainsRune(inPath, '\x00') || strings.ContainsRune(outPath, '\x00') {
+		return "", "", errors.New("invalid path configuration")
+	}
+	if inPath == "" || outPath == "" {
+		return "", "", errors.New("input and output paths cannot be empty")
+	}
+
+	allowAbsolute := allowAbs == "true"
+
+	// Path validation: absolute paths not allowed unless --allow-absolute is set.
+	// Also disallow volume/UNC-qualified Windows paths unless explicitly allowed.
+	if !allowAbsolute {
+		if filepath.IsAbs(inPath) || filepath.IsAbs(outPath) {
+			return "", "", errors.New("invalid path configuration")
+		}
+		if runtime.GOOS == targetOS && (filepath.VolumeName(inPath) != "" || filepath.VolumeName(outPath) != "") {
+			return "", "", errors.New("invalid path configuration")
+		}
+	}
+
+	// Normalize and reject traversal attempts
+	cfgIn := filepath.Clean(inPath)
+	cfgOut := filepath.Clean(outPath)
+	if cfgIn == ".." || strings.HasPrefix(cfgIn, ".."+string(os.PathSeparator)) ||
+		cfgOut == ".." || strings.HasPrefix(cfgOut, ".."+string(os.PathSeparator)) {
+		return "", "", errors.New("invalid path configuration")
+	}
+
+	absIn, err := filepath.Abs(cfgIn)
+	if err != nil {
+		return "", "", fmt.Errorf("cannot resolve input path: %w", err)
+	}
+	absOut, err := filepath.Abs(cfgOut)
+	if err != nil {
+		return "", "", fmt.Errorf("cannot resolve output path: %w", err)
+	}
+
+	samePath := absIn == absOut
+	if runtime.GOOS == targetOS {
+		samePath = strings.EqualFold(absIn, absOut)
+	}
+	if samePath {
+		return "", "", errors.New("input and output paths must differ")
+	}
+
+	if inFi, err := os.Stat(absIn); err == nil {
+		if outFi, err := os.Stat(absOut); err == nil && os.SameFile(inFi, outFi) {
+			return "", "", errors.New("input and output paths must differ")
+		}
+	}
+
+	// Validate output directory exists and is usable
+	outDir := filepath.Dir(absOut)
+	if st, err := os.Lstat(outDir); err != nil {
+		return "", "", fmt.Errorf("cannot access output directory: %w", err)
+	} else if !st.IsDir() {
+		return "", "", errors.New("invalid output directory: not a directory")
+	} else if st.Mode()&os.ModeSymlink != 0 {
+		return "", "", errors.New("invalid output directory: symlink not allowed")
+	}
+
+	if inFi, err := os.Stat(absIn); err == nil {
+		if inFi.Size() > 1<<31 { // 2GB limit
+			return "", "", errors.New("input file too large")
+		}
+		if inFi.Size() == 0 {
+			return "", "", errors.New("input file cannot be empty")
+		}
+	}
+
+	return absIn, absOut, nil
 }
 
 type runConfig struct {
@@ -1728,77 +1838,13 @@ func parseFlags() (runConfig, error) {
 		return cfg, ErrInvalidArguments
 	}
 
-	inPath := flag.Arg(0)
-	outPath := flag.Arg(1)
-
-	if strings.ContainsRune(inPath, '\x00') || strings.ContainsRune(outPath, '\x00') {
-		return cfg, errors.New("invalid path configuration")
-	}
-
-	if inPath == "" || outPath == "" {
-		return cfg, errors.New("input and output paths cannot be empty")
-	}
-
-	// Path validation: absolute paths not allowed unless --allow-absolute is set.
-	// Also disallow volume/UNC-qualified Windows paths unless explicitly allowed.
-	if !*allowAbs {
-		if filepath.IsAbs(inPath) || filepath.IsAbs(outPath) {
-			return cfg, errors.New("invalid path configuration")
-		}
-		if runtime.GOOS == "windows" && (filepath.VolumeName(inPath) != "" || filepath.VolumeName(outPath) != "") {
-			return cfg, errors.New("invalid path configuration")
-		}
-	}
-
-	// Normalize and reject traversal attempts (e.g., leading "../" after cleaning).
-	cfg.in = filepath.Clean(inPath)
-	cfg.out = filepath.Clean(outPath)
-	if cfg.in == ".." || strings.HasPrefix(cfg.in, ".."+string(os.PathSeparator)) ||
-		cfg.out == ".." || strings.HasPrefix(cfg.out, ".."+string(os.PathSeparator)) {
-		return cfg, errors.New("invalid path configuration")
-	}
-	absIn, err := filepath.Abs(cfg.in)
+	absIn, absOut, err := resolveAndValidatePaths(flag.Arg(0), flag.Arg(1), fmt.Sprint(*allowAbs))
 	if err != nil {
-		return cfg, fmt.Errorf("cannot resolve input path: %w", err)
-	}
-	absOut, err := filepath.Abs(cfg.out)
-	if err != nil {
-		return cfg, fmt.Errorf("cannot resolve output path: %w", err)
+		return cfg, err
 	}
 
-	samePath := absIn == absOut
-	if runtime.GOOS == "windows" {
-		samePath = strings.EqualFold(absIn, absOut)
-	}
-	if samePath {
-		return cfg, errors.New("input and output paths must differ")
-	}
-
-	if inFi, err := os.Stat(absIn); err == nil {
-		if outFi, err := os.Stat(absOut); err == nil && os.SameFile(inFi, outFi) {
-			return cfg, errors.New("input and output paths must differ")
-		}
-	}
-
-	// Validate output directory exists and is usable (avoid creating paths during flag parsing).
-	outDir := filepath.Dir(absOut)
-	if st, err := os.Lstat(outDir); err != nil {
-		return cfg, fmt.Errorf("cannot access output directory: %w", err)
-	} else if !st.IsDir() {
-		return cfg, errors.New("invalid output directory: not a directory")
-	} else if st.Mode()&os.ModeSymlink != 0 {
-		return cfg, errors.New("invalid output directory: symlink not allowed")
-	}
-
-	if inFi, err := os.Stat(absIn); err == nil {
-		if inFi.Size() > 1<<31 { // 2GB limit as conservative measure
-			return cfg, errors.New("input file too large")
-		}
-		if inFi.Size() == 0 {
-			return cfg, errors.New("input file cannot be empty")
-		}
-	}
-
+	cfg.in = absIn
+	cfg.out = absOut
 	cfg.enc = *enc
 	cfg.dec = *dec
 	cfg.rot = *rot
@@ -1918,6 +1964,11 @@ func main() {
 		default:
 			die(err)
 		}
+	}
+
+	// Verify header size explicitly here as per strict linter rules avoiding init.
+	if hb, _ := serializeHeaderCanonical(&fileHeader{}); len(hb) != headerTotalSize {
+		panic(fmt.Sprintf("headerTotalSize mismatch: got %d, want %d", len(hb), headerTotalSize))
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
