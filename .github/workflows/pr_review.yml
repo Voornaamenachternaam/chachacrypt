@@ -1,0 +1,47 @@
+name: Diffguard
+on:
+  pull_request:
+    types: [opened, synchronize, labeled, unlabeled]
+
+permissions:
+  actions: write
+  checks: write
+  contents: write
+  deployments: write
+  id-token: write
+  issues: write
+  discussions: write
+  packages: write
+  pages: write
+  pull-requests: write
+  repository-projects: write
+  security-events: write
+  statuses: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - name: AI PR Review
+        uses: jonit-dev/openrouter-github-action@main
+        with:
+          # Required inputs
+          github_token: ${{ secrets.GITHUB_TOKEN }} # Automatically provided
+          open_router_key: ${{ secrets.OPEN_ROUTER_KEY }} # Must be set in repository secrets
+
+          # Optional inputs with defaults
+          model_id: 'mistralai/devstral-2512:free'
+          max_tokens: '2048' # Default max tokens
+
+          # Optional custom prompt
+          custom_prompt: |
+            You are a highly rigorous and experienced security-focused expert. Analyze this PR with emphasis on:
+            1. Security vulnerabilities
+            2. 100% compatibility with the specific version of Golang, as well as the specific versions of the dependencies, in go.mod
+            3. Data validation
+            4. Input sanitization
+            5. Best-practices
+
+            Provide a 1-5 star rating for the overall quality, and offer code improvement to comply with points 1-5. Prefer to give your code improvement in the form of a (number of) commit suggestions as this particular chat is part of a github action, running as part of a PR. This github action has all required permissions.
