@@ -1,4 +1,6 @@
 # ChaChacrypt
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2FVoornaamenachternaam%2Fchachacrypt.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2FVoornaamenachternaam%2Fchachacrypt?ref=badge_shield)
+
 File encryption-cli using XChaha20-Poly1305 with Argon2id in Go.
 
 
@@ -63,3 +65,7 @@ You can also generate random passwords (give length using `-s`):
 *   **Strong Passwords:** Always use strong, unique passwords. The security of your encrypted files directly depends on the strength of your password.
 *   **Output Files:** The tool will prompt you before overwriting an existing output file, preventing accidental data loss.
 *   **File Format:** The encrypted files now include a robust header that stores the Argon2id parameters and other necessary cryptographic details, ensuring that files can be decrypted correctly even if default parameters change in future versions.
+
+
+## License
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2FVoornaamenachternaam%2Fchachacrypt.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2FVoornaamenachternaam%2Fchachacrypt?ref=badge_large)
