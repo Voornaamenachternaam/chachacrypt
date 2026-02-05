@@ -122,14 +122,14 @@ jobs:
         run: ls -al dist || true
 
       - name: Generate SBOM (SPDX JSON)
-        uses: anchore/sbom-action@v0.22.1
+        uses: anchore/sbom-action@v0.22.2
         with:
           path: dist
           format: spdx-json
           artifact-name: sbom-dist.spdx.json
 
       - name: Generate SBOM (CycloneDX JSON)
-        uses: anchore/sbom-action@v0.22.1
+        uses: anchore/sbom-action@v0.22.2
         with:
           path: dist
           format: cyclonedx-json
