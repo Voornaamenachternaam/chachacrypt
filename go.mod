@@ -1,6 +1,7 @@
 module github.com/Voornaamenachternaam/chachacrypt
 
-go 1.25.7
+go 1.26.0
+time 2026-02-10T01:22:00Z
 
 require (
 	golang.org/x/crypto v0.48.0
