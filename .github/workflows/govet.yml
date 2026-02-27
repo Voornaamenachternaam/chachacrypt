@@ -66,7 +66,7 @@ jobs:
           go mod tidy
 
       - name: Upload diagnostic logs
-        uses: actions/upload-artifact@v6.0.0
+        uses: actions/upload-artifact@v7.0.0
         with:
           name: go-diagnostics
           path: |
