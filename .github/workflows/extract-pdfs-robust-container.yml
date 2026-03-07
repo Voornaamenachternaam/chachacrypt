@@ -31,6 +31,16 @@ jobs:
           tesseract --version
           ocrmypdf --version || true
           pdftotext -v || true
+
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y poppler-utils wget
+          
+      - name: Bootstrap pip and install requirements
+        run: |
+          # Download and run the official pip installation script securely
+          wget -qO- https://bootstrap.pypa.io/get-pip.py | python3
           
       - name: Install Python dependencies
         run: |
