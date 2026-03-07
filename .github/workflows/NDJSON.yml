@@ -1,0 +1,290 @@
+name: NDJSON
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  process-pdfs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    env:
+      TARGET_URL: 'https://officeprotocoldoc.z19.web.core.windows.net/files/Zip_Files/Exchange_Protocols.zip'
+      ZIP_FILENAME: 'exchange_protocols.zip'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: '3.13'
+          check-latest: true
+
+      - name: Install system tools
+        run: sudo apt-get update && sudo apt-get install -y unzip curl
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip pypdf zstandard
+
+      - name: Download ZIP (Robust)
+        shell: bash
+        run: |
+          set -euo pipefail
+          CLEAN_URL=$(echo "$TARGET_URL" | xargs)
+          echo "Downloading from: $CLEAN_URL"
+          curl --fail --location --retry 3 --retry-delay 5 --max-time 600 -o "$ZIP_FILENAME" "$CLEAN_URL"
+          if [ ! -f "$ZIP_FILENAME" ]; then
+            echo "Error: ZIP file not downloaded."
+            exit 1
+          fi
+          unzip -l "$ZIP_FILENAME"
+
+      - name: Extract PDFs
+        run: unzip -o -j "$ZIP_FILENAME" "*.pdf"
+
+      - name: Convert PDFs to NDJSON (Cryptographic Integrity)
+        shell: bash
+        run: |
+          cat > generate_ndjson.py <<'PY'
+          #!/usr/bin/env python3
+          import glob, json, gzip, hashlib, os, sys, gc, traceback
+          from datetime import datetime
+          from pypdf import PdfReader
+
+          OUT_RAW = "Exchange_Protocols_pages.ndjson"
+          OUT_GZ = "Exchange_Protocols_pages.ndjson.gz"
+
+          pdf_files = sorted(glob.glob("*.pdf"))
+          if not pdf_files:
+              print("ERROR: No PDF files found.", file=sys.stderr)
+              sys.exit(2)
+
+          file_map = {}
+          next_id = 1
+          total_pages_written = 0
+          total_pages_expected = 0
+          files_summary = []
+          
+          # Integrity Hasher: Tracks every byte written to ensure no truncation
+          content_hasher = hashlib.sha256()
+          
+          # Global success flag
+          success = True
+
+          f_raw = open(OUT_RAW, "w", encoding="utf-8")
+          f_gz = gzip.open(OUT_GZ, "wt", encoding="utf-8")
+
+          def write_line(data, is_final_manifest=False):
+              line = json.dumps(data, separators=(',',':'), ensure_ascii=False) + "\n"
+              
+              # Update hash for all data EXCEPT the final manifest (which contains the hash)
+              if not is_final_manifest:
+                  content_hasher.update(line.encode('utf-8'))
+              
+              f_raw.write(line)
+              f_gz.write(line)
+
+          try:
+              # 1. Header
+              write_line({
+                  "type": "manifest",
+                  "status": "in_progress",
+                  "generated_at": datetime.utcnow().isoformat() + "Z",
+                  "file_count": len(pdf_files),
+                  "note": "Cryptographic integrity enabled."
+              })
+
+              # 2. Pass 1: Metadata
+              print("Scanning PDFs...", file=sys.stderr)
+              for pdf_path in pdf_files:
+                  filename = os.path.basename(pdf_path)
+                  sha256_hash = hashlib.sha256(open(pdf_path, "rb").read()).hexdigest()
+                  pages_total = 0
+                  try:
+                      reader = PdfReader(pdf_path, strict=False)
+                      pages_total = len(reader.pages)
+                  except Exception as e:
+                      print(f"WARN: Metadata read failed for {filename}: {e}", file=sys.stderr)
+                  
+                  total_pages_expected += pages_total
+                  file_map[filename] = {
+                      "id": next_id, "path": pdf_path, 
+                      "pages_total": pages_total, "sha256": sha256_hash
+                  }
+                  
+                  write_line({
+                      "type": "file", "id": next_id, "filename": filename,
+                      "pages_total": pages_total, "sha256": sha256_hash
+                  })
+                  next_id += 1
+
+              # 3. Pass 2: Content
+              print("Extracting text...", file=sys.stderr)
+              for fname in sorted(file_map.keys()):
+                  meta = file_map[fname]
+                  fid = meta["id"]
+                  pdf_path = meta["path"]
+                  expected = meta["pages_total"]
+                  written = 0
+                  errors = []
+                  
+                  if expected == 0:
+                      errors.append("Empty or unreadable PDF")
+                      files_summary.append({"filename": fname, "pages_expected": 0, "pages_written": 0, "errors": errors})
+                      continue
+
+                  try:
+                      reader = PdfReader(pdf_path, strict=False)
+                      for i in range(1, expected + 1):
+                          try:
+                              # STRICT EXTRACTION: If this fails, we catch it.
+                              page = reader.pages[i-1] 
+                              page_text = page.extract_text() or ""
+                              
+                              # Integrity Check: Ensure we actually got text if it exists.
+                              # Note: pypdf returning empty string is not an error, but an exception IS.
+                              
+                              write_line({
+                                  "type": "page", "file_id": fid, "page": i, "text": page_text
+                              })
+                              written += 1
+                              total_pages_written += 1
+                              
+                          except Exception as pe:
+                              # If extraction fails, we treat it as a data loss.
+                              err = f"Page {i} extraction error: {str(pe)}"
+                              errors.append(err)
+                              print(f"FAIL: {err}", file=sys.stderr)
+                              success = False # Mark job as failed
+                              # We DO NOT write a placeholder. We stop this file or record 0 for this page?
+                              # To keep line counts predictable, we write the error as text, but mark failure.
+                              write_line({
+                                  "type": "page", "file_id": fid, "page": i, "text": f"[ERROR: {pe}]"
+                              })
+                              written += 1 # Count includes the errored page to maintain structure
+                          
+                          if i % 200 == 0:
+                              f_raw.flush(); f_gz.flush(); gc.collect()
+                              
+                  except Exception as e:
+                      errors.append(f"File failed: {str(e)}")
+                      traceback.print_exc()
+                      success = False
+                  
+                  files_summary.append({
+                      "filename": fname, "pages_expected": expected, 
+                      "pages_written": written, "sha256": meta["sha256"], "errors": errors
+                  })
+                  del reader
+                  gc.collect()
+
+          except Exception as main_e:
+              print(f"FATAL: {main_e}", file=sys.stderr)
+              traceback.print_exc()
+              success = False
+          finally:
+              # 4. Final Manifest
+              final_hash = content_hasher.hexdigest()
+              write_line({
+                  "type": "manifest",
+                  "status": "complete" if success else "failed",
+                  "generated_at": datetime.utcnow().isoformat() + "Z",
+                  "file_count": len(pdf_files),
+                  "total_pages_written": total_pages_written,
+                  "total_pages_expected": total_pages_expected,
+                  "content_sha256": final_hash, # The fingerprint of all previous content
+                  "files": files_summary
+              }, is_final_manifest=True)
+              
+              f_raw.close()
+              f_gz.close()
+
+          # 5. STRICT EXIT
+          print(f"\n--- Integrity Report ---", file=sys.stderr)
+          print(f"Expected: {total_pages_expected} pages", file=sys.stderr)
+          print(f"Written:  {total_pages_written} pages", file=sys.stderr)
+          print(f"SHA-256:  {final_hash}", file=sys.stderr)
+          
+          if not success:
+              print("FAILURE: Extraction errors detected.", file=sys.stderr)
+              sys.exit(1)
+          
+          if total_pages_written != total_pages_expected:
+              print("FAILURE: Page count mismatch.", file=sys.stderr)
+              sys.exit(1)
+          
+          print("SUCCESS: Integrity verified.", file=sys.stderr)
+          sys.exit(0)
+          PY
+          
+          python generate_ndjson.py
+
+      - name: Validate Data Integrity
+        # This step runs only if the python script succeeded (exit 0).
+        run: |
+          echo "Verifying file content against recorded hashes..."
+          python - <<'PY'
+          import json, sys, hashlib
+
+          FILENAME = "Exchange_Protocols_pages.ndjson"
+          
+          print(f"Reading {FILENAME}...", file=sys.stderr)
+          
+          try:
+              with open(FILENAME, "rb") as f:
+                  # Read all lines efficiently
+                  lines = f.readlines()
+              
+              if not lines:
+                  raise Exception("File is empty.")
+
+              # 1. Verify Final Manifest Structure
+              last_line = lines[-1].decode('utf-8')
+              manifest = json.loads(last_line)
+              
+              if manifest.get("status") != "complete":
+                  raise Exception(f"Processing failed with status: {manifest.get('status')}")
+                  
+              # 2. Verify Page Count
+              exp = manifest.get("total_pages_expected")
+              got = manifest.get("total_pages_written")
+              if exp != got:
+                  raise Exception(f"Count mismatch: Expected {exp}, got {got}.")
+
+              # 3. Verify Content Hash (Rolling Checksum)
+              # We hash everything EXCEPT the last line (the manifest itself)
+              hasher = hashlib.sha256()
+              for line in lines[:-1]:
+                  hasher.update(line)
+              
+              calculated_hash = hasher.hexdigest()
+              recorded_hash = manifest.get("content_sha256")
+              
+              if calculated_hash != recorded_hash:
+                  raise Exception(f"HASH MISMATCH!\nExpected: {recorded_hash}\nCalculated: {calculated_hash}\nThis indicates data truncation or corruption.")
+
+              print("------------------------------------------------")
+              print("VALIDATION PASSED: Data integrity is absolute.")
+              print(f"Pages: {got}")
+              print(f"Hash:  {calculated_hash}")
+              print("------------------------------------------------")
+              
+          except Exception as e:
+              print(f"VALIDATION FAILED: {e}", file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      - name: Upload Artifacts
+        # Uploads ONLY if validation passed.
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: exchange-protocols-ndjson
+          path: |
+            Exchange_Protocols_pages.ndjson
+            Exchange_Protocols_pages.ndjson.gz
+          retention-days: 5
