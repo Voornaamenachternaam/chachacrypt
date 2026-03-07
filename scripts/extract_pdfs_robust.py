@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-Robust multi-engine PDF extractor (separate file).
+Robust multi-engine PDF extractor.
+Streams output directly to the final file and flushes after every page
+to ensure no data is lost if the process crashes or is killed.
 MuPDF -> pdfplumber -> OCR (Tesseract) -> pdfminer fallback.
-Writes per-file text to tmp dir then appends to combined output.txt.
-Exits non-zero if any page of any PDF is left without extracted content.
-Run with:
-  python3 scripts/extract_pdfs_robust.py --input-dir data/extracted --output-file output.txt --tmp-dir tmp_extraction --ocr-dpi 300 --tesseract-lang "eng"
 """
 
 from pathlib import Path
@@ -15,7 +13,7 @@ import io
 import traceback
 import json
 
-# third-party imports (installed via requirements.txt / pip)
+# third-party imports
 import fitz  # pymupdf
 import pdfplumber
 import pdfminer.high_level
@@ -57,12 +55,10 @@ def ocr_image_to_text(img, lang):
         return ""
 
 
-def process_pdf(path: Path, out_txt_path: Path, ocr_dpi: int, tesseract_lang: str):
+def process_pdf(path: Path, out_stream, ocr_dpi: int, tesseract_lang: str):
     """
-    Process a single PDF file:
-    - write per-file extracted content to out_txt_path
-    - returns (success: bool, details: dict)
-    details contains page count and any failed pages (1-based).
+    Process a single PDF file and write directly to the output stream.
+    Flushes the stream after every page to prevent data loss on crash.
     """
     details = {"path": str(path), "pages": 0, "failed_pages": []}
     try:
@@ -70,79 +66,68 @@ def process_pdf(path: Path, out_txt_path: Path, ocr_dpi: int, tesseract_lang: st
         page_count = doc.page_count
         details["pages"] = page_count
 
-        with out_txt_path.open("w", encoding="utf-8") as out_f:
-            out_f.write(f"===== FILE: {path.name} (pages={page_count}) =====\n\n")
+        # Write header directly to output stream
+        out_stream.write(f"===== FILE: {path.name} (pages={page_count}) =====\n\n")
 
-            for pno in range(page_count):
-                page = doc.load_page(pno)
-                out_f.write(f"\n--- PAGE {pno+1}/{page_count} ---\n")
-                page_had_text = False
+        for pno in range(page_count):
+            page = doc.load_page(pno)
+            out_stream.write(f"\n--- PAGE {pno+1}/{page_count} ---\n")
+            page_had_text = False
 
-                # 1) MuPDF extraction (fast, first choice)
-                try:
-                    mupdf_text = extract_with_mupdf_page(page)
-                except Exception:
-                    mupdf_text = ""
-                if mupdf_text and len(mupdf_text.strip()) >= PAGE_CONTENT_THRESHOLD:
-                    out_f.write("\n[MuPDF TEXT]\n")
-                    out_f.write(mupdf_text)
-                    page_had_text = True
-                else:
-                    # 2) pdfplumber page-level text (sometimes better for weird PDFs)
-                    try:
-                        with pdfplumber.open(path) as docp:
-                            pdfpl_text = docp.pages[pno].extract_text() or ""
-                    except Exception:
-                        pdfpl_text = ""
-                    if pdfpl_text and len(pdfpl_text.strip()) >= PAGE_CONTENT_THRESHOLD:
-                        out_f.write("\n[PDFPlumber TEXT]\n")
-                        out_f.write(pdfpl_text)
-                        page_had_text = True
-                    else:
-                        # 3) OCR fallback (render page -> OCR)
-                        try:
-                            img = render_page_to_image(page, dpi=ocr_dpi)
-                            ocr_text = ocr_image_to_text(img, lang=tesseract_lang) or ""
-                        except Exception:
-                            ocr_text = ""
-                        if ocr_text and len(ocr_text.strip()) >= PAGE_CONTENT_THRESHOLD:
-                            out_f.write("\n[OCR TEXT]\n")
-                            out_f.write(ocr_text)
-                            page_had_text = True
-
-                # Always attempt to extract tables (TSV rows) via pdfplumber and append
+            # 1) MuPDF extraction (fast, first choice)
+            try:
+                mupdf_text = extract_with_mupdf_page(page)
+            except Exception:
+                mupdf_text = ""
+            if mupdf_text and len(mupdf_text.strip()) >= PAGE_CONTENT_THRESHOLD:
+                out_stream.write("\n[MuPDF TEXT]\n")
+                out_stream.write(mupdf_text)
+                page_had_text = True
+            else:
+                # 2) pdfplumber page-level text
                 try:
                     with pdfplumber.open(path) as docp:
-                        page_obj = docp.pages[pno]
-                        tables = page_obj.extract_tables()
-                        if tables:
-                            out_f.write("\n[TABLES - TSV rows]\n")
-                            for t in tables:
-                                for row in t:
-                                    out_f.write("\t".join([("" if c is None else str(c)) for c in row]) + "\n")
-                            # If tables were present and text wasn't, still count it as content
-                            if not page_had_text:
-                                page_had_text = True
+                        pdfpl_text = docp.pages[pno].extract_text() or ""
                 except Exception:
-                    # ignore table-extraction failure for this page
-                    pass
+                    pdfpl_text = ""
+                if pdfpl_text and len(pdfpl_text.strip()) >= PAGE_CONTENT_THRESHOLD:
+                    out_stream.write("\n[PDFPlumber TEXT]\n")
+                    out_stream.write(pdfpl_text)
+                    page_had_text = True
+                else:
+                    # 3) OCR fallback (render page -> OCR)
+                    try:
+                        img = render_page_to_image(page, dpi=ocr_dpi)
+                        ocr_text = ocr_image_to_text(img, lang=tesseract_lang) or ""
+                    except Exception:
+                        ocr_text = ""
+                    if ocr_text and len(ocr_text.strip()) >= PAGE_CONTENT_THRESHOLD:
+                        out_stream.write("\n[OCR TEXT]\n")
+                        out_stream.write(ocr_text)
+                        page_had_text = True
 
-                if not page_had_text:
-                    # Mark failed page (1-based)
-                    details["failed_pages"].append(pno + 1)
-                    out_f.write("\n[NO TEXT EXTRACTED FOR THIS PAGE AFTER ALL ENGINES]\n")
+            # Always attempt to extract tables (TSV rows) via pdfplumber and append
+            try:
+                with pdfplumber.open(path) as docp:
+                    page_obj = docp.pages[pno]
+                    tables = page_obj.extract_tables()
+                    if tables:
+                        out_stream.write("\n[TABLES - TSV rows]\n")
+                        for t in tables:
+                            for row in t:
+                                out_stream.write("\t".join([("" if c is None else str(c)) for c in row]) + "\n")
+                        if not page_had_text:
+                            page_had_text = True
+            except Exception:
+                pass
 
-            out_f.flush()
+            if not page_had_text:
+                details["failed_pages"].append(pno + 1)
+                out_stream.write("\n[NO TEXT EXTRACTED FOR THIS PAGE AFTER ALL ENGINES]\n")
 
-        # If every page failed, try whole-document pdfminer fallback (can sometimes recover)
-        if len(details["failed_pages"]) == details["pages"]:
-            whole_text = extract_with_pdfminer_path(path)
-            if whole_text and len(whole_text.strip()) >= PAGE_CONTENT_THRESHOLD:
-                with out_txt_path.open("a", encoding="utf-8") as out_f:
-                    out_f.write("\n[PDFMiner whole-document fallback]\n")
-                    out_f.write(whole_text)
-                # cleared failed pages if fallback found content
-                details["failed_pages"] = []
+            # FLUSH THE STREAM AFTER EVERY PAGE
+            # This ensures that if the process is killed, the data up to this point is saved.
+            out_stream.flush()
 
         success = len(details["failed_pages"]) == 0
         return success, details
@@ -150,6 +135,9 @@ def process_pdf(path: Path, out_txt_path: Path, ocr_dpi: int, tesseract_lang: st
     except Exception as e:
         details["error"] = str(e)
         details["traceback"] = traceback.format_exc()
+        # Write error to output stream so the user sees it in the file
+        out_stream.write(f"\n[FATAL ERROR PROCESSING FILE: {e}]\n")
+        out_stream.flush()
         return False, details
 
 
@@ -157,24 +145,14 @@ def main():
     parser = argparse.ArgumentParser(description="Robust PDF extractor (multi-engine).")
     parser.add_argument("--input-dir", required=True, help="Directory containing extracted files (PDFs).")
     parser.add_argument("--output-file", required=True, help="Path to combined output text file.")
-    parser.add_argument("--tmp-dir", required=True, help="Temporary directory to write per-file text.")
     parser.add_argument("--ocr-dpi", type=int, default=300, help="DPI for OCR rendering (default: 300).")
     parser.add_argument("--tesseract-lang", type=str, default="eng", help="Tesseract language codes (e.g., 'eng' or 'eng+deu').")
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
     output_file = Path(args.output_file)
-    tmp_dir = Path(args.tmp_dir)
     ocr_dpi = args.ocr_dpi
     tesseract_lang = args.tesseract_lang
-
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    # remove stale combined output if present
-    if output_file.exists():
-        try:
-            output_file.unlink()
-        except Exception:
-            print("Warning: couldn't remove existing output file; continuing and will append.", file=sys.stderr)
 
     pdf_paths = sorted([p for p in input_dir.rglob("*.pdf")])
     if not pdf_paths:
@@ -185,45 +163,45 @@ def main():
     processed_count = 0
     manifest = {"total_pdfs": len(pdf_paths), "processed": [], "failed": []}
 
-    for pdf_path in pdf_paths:
-        print(f"\n--- Processing: {pdf_path} ---")
-        per_txt = tmp_dir / (pdf_path.stem + ".txt")
-        success, details = process_pdf(pdf_path, per_txt, ocr_dpi=ocr_dpi, tesseract_lang=tesseract_lang)
+    # Open the output file ONCE in write mode.
+    # We will stream all content directly into this file.
+    try:
+        # Using buffering=1 for line buffering, or 0 for unbuffered binary, 
+        # but standard text buffering is fine as we flush explicitly.
+        with output_file.open("w", encoding="utf-8") as out_f:
+            
+            for pdf_path in pdf_paths:
+                print(f"\n--- Processing: {pdf_path} ---")
+                success, details = process_pdf(pdf_path, out_f, ocr_dpi=ocr_dpi, tesseract_lang=tesseract_lang)
 
-        manifest_entry = {"file": str(pdf_path), "pages": details.get("pages", 0), "success": success}
-        if not success:
-            print(f"FAILED to fully extract {pdf_path}; details: {details}", file=sys.stderr)
-            overall_failed.append((str(pdf_path), details))
-            manifest_entry["details"] = details
-            manifest["failed"].append(manifest_entry)
-        else:
-            size = per_txt.stat().st_size if per_txt.exists() else 0
-            if size < 10:
-                print(f"Per-file output too small for {pdf_path}: {size} bytes", file=sys.stderr)
-                overall_failed.append((str(pdf_path), {"reason": "per-file output too small", "size": size}))
-                manifest_entry["details"] = {"reason": "per-file output too small", "size": size}
-                manifest["failed"].append(manifest_entry)
-            else:
-                # append to combined output (streaming)
-                with per_txt.open("r", encoding="utf-8") as pf, output_file.open("a", encoding="utf-8") as of:
-                    of.write(pf.read())
-                    of.write("\n\n")
-                processed_count += 1
-                manifest["processed"].append(manifest_entry)
+                manifest_entry = {"file": str(pdf_path), "pages": details.get("pages", 0), "success": success}
+                if not success:
+                    print(f"FAILED to fully extract {pdf_path}; details: {details}", file=sys.stderr)
+                    overall_failed.append((str(pdf_path), details))
+                    manifest["failed"].append(manifest_entry)
+                else:
+                    processed_count += 1
+                    manifest["processed"].append(manifest_entry)
+                
+                # Add spacing between files
+                out_f.write("\n\n")
 
-    # write manifest to file next to output (useful to upload alongside output.txt)
+    except Exception as e:
+        print(f"CRITICAL ERROR opening or writing to output file: {e}", file=sys.stderr)
+        sys.exit(5)
+
+    # write manifest
     try:
         with open("extraction-manifest.json", "w", encoding="utf-8") as mf:
             json.dump(manifest, mf, indent=2)
     except Exception as e:
         print(f"Warning: failed to write extraction manifest: {e}", file=sys.stderr)
 
-    # final validation and exit codes per strict requirement
+    # final validation
     if overall_failed:
         print("\n\nExtraction finished with ERRORS. Summary of failures:", file=sys.stderr)
         for p, d in overall_failed:
             print(f"- {p} -> {d}", file=sys.stderr)
-        # non-zero exit to make CI job fail
         sys.exit(3)
 
     if not output_file.exists() or output_file.stat().st_size < 10:
@@ -235,4 +213,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main() 
