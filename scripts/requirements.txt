@@ -1,0 +1,6 @@
+pymupdf
+pdfminer.six
+pdfplumber
+pytesseract
+Pillow
+tqdm
