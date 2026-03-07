@@ -1,290 +1,289 @@
-name: NDJSON
+name: Robust PDF Extraction (container job, tesseract+poppler preinstalled)
 
 on:
-  schedule:
-    - cron: '0 6 * * *'
   workflow_dispatch:
+    inputs:
+      zip_url:
+        description: "Direct URL to the zip file containing PDFs"
+        required: true
+        type: string
 
 jobs:
-  process-pdfs:
+  extract:
+    # GitHub-hosted runner; Free-tier users can run this but note hosted-runner limits.
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
 
-    env:
-      TARGET_URL: 'https://officeprotocoldoc.z19.web.core.windows.net/files/Zip_Files/Exchange_Protocols.zip'
-      ZIP_FILENAME: 'exchange_protocols.zip'
+    # Use a Docker image that already includes Tesseract & Poppler + Python.
+    # If you prefer a different image, replace the image string below.
+    container:
+      image: docker://fundanie/docker-python3-tesseract-opencv-poppler:latest
+
+    timeout-minutes: 360
+    permissions: read-all
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.1
+        uses: actions/checkout@v5
 
-      - name: Set up Python
-        uses: actions/setup-python@v6.2.0
+      - name: Show environment info (debug)
+        run: |
+          echo "Container image: ${{ job.container.image }}"
+          python3 --version || true
+          tesseract --version || true
+          pdftotext -v || true
+          ls -lah /usr/bin | sed -n '1,120p' || true
+
+      - name: Create extractor script + requirements (single-file)
+        run: |
+          mkdir -p scripts
+
+          cat > scripts/requirements.txt <<'REQ'
+pymupdf
+pdfminer.six
+pdfplumber
+pytesseract
+Pillow
+tqdm
+REQ
+
+          cat > scripts/extract_pdfs_robust.py <<'PY'
+#!/usr/bin/env python3
+"""
+Robust multi-engine PDF extractor (page-by-page streaming).
+MuPDF -> pdfplumber -> OCR (Tesseract) -> pdfminer fallback.
+Writes per-file text to tmp dir then appends to combined output.txt.
+Exits non-zero if any page of any PDF is left without extracted content.
+"""
+import argparse
+import os
+import sys
+import io
+from pathlib import Path
+import fitz  # pymupdf
+import pdfplumber
+import pdfminer.high_level
+from PIL import Image
+import pytesseract
+import traceback
+
+PAGE_CONTENT_THRESHOLD = 3  # min chars per page to count as non-empty
+
+def extract_with_mupdf_page(page):
+    try:
+        txt = page.get_text("text") or ""
+        return txt
+    except Exception:
+        return ""
+
+def extract_with_pdfminer_path(path):
+    try:
+        txt = pdfminer.high_level.extract_text(str(path)) or ""
+        return txt
+    except Exception:
+        return ""
+
+def render_page_to_image(page, dpi):
+    mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    png_bytes = pix.tobytes("png")
+    return Image.open(io.BytesIO(png_bytes))
+
+def ocr_image_to_text(img, lang):
+    try:
+        return pytesseract.image_to_string(img, lang=lang) or ""
+    except Exception:
+        return ""
+
+def process_pdf(path: Path, out_txt_path: Path, ocr_dpi: int, tesseract_lang: str):
+    details = {"path": str(path), "pages": 0, "failed_pages": []}
+    try:
+        doc = fitz.open(path)
+        page_count = doc.page_count
+        details["pages"] = page_count
+
+        with out_txt_path.open("w", encoding="utf-8") as out_f:
+            out_f.write(f"===== FILE: {path.name} (pages={page_count}) =====\n\n")
+
+            for pno in range(page_count):
+                page = doc.load_page(pno)
+                page_header = f"\n--- PAGE {pno+1}/{page_count} ---\n"
+                out_f.write(page_header)
+                page_accum = []
+
+                # 1) MuPDF
+                try:
+                    mupdf_text = extract_with_mupdf_page(page)
+                except Exception:
+                    mupdf_text = ""
+                if mupdf_text and len(mupdf_text.strip()) >= PAGE_CONTENT_THRESHOLD:
+                    out_f.write("\n[MuPDF TEXT]\n")
+                    out_f.write(mupdf_text)
+                    page_accum.append(("mupdf", len(mupdf_text)))
+                else:
+                    # 2) pdfplumber page text
+                    try:
+                        with pdfplumber.open(path) as docp:
+                            pdfpl_text = docp.pages[pno].extract_text() or ""
+                    except Exception:
+                        pdfpl_text = ""
+                    if pdfpl_text and len(pdfpl_text.strip()) >= PAGE_CONTENT_THRESHOLD:
+                        out_f.write("\n[PDFPlumber TEXT]\n")
+                        out_f.write(pdfpl_text)
+                        page_accum.append(("pdfplumber", len(pdfpl_text)))
+                    else:
+                        # 3) OCR
+                        try:
+                            img = render_page_to_image(page, dpi=ocr_dpi)
+                            ocr_text = ocr_image_to_text(img, lang=tesseract_lang) or ""
+                        except Exception:
+                            ocr_text = ""
+                        if ocr_text and len(ocr_text.strip()) >= PAGE_CONTENT_THRESHOLD:
+                            out_f.write("\n[OCR TEXT]\n")
+                            out_f.write(ocr_text)
+                            page_accum.append(("ocr", len(ocr_text)))
+                        else:
+                            details["failed_pages"].append(pno + 1)
+                            out_f.write("\n[NO TEXT EXTRACTED FOR THIS PAGE AFTER ALL ENGINES]\n")
+
+                # tables (pdfplumber)
+                try:
+                    with pdfplumber.open(path) as docp:
+                        page_obj = docp.pages[pno]
+                        tables = page_obj.extract_tables()
+                        if tables:
+                            out_f.write("\n[TABLES - TSV rows]\n")
+                            for t in tables:
+                                for row in t:
+                                    out_f.write("\t".join([("" if c is None else str(c)) for c in row]) + "\n")
+                except Exception:
+                    pass
+
+            out_f.flush()
+
+        # whole-document pdfminer fallback if every page failed
+        if len(details["failed_pages"]) == details["pages"]:
+            whole_text = extract_with_pdfminer_path(path)
+            if whole_text and len(whole_text.strip()) >= PAGE_CONTENT_THRESHOLD:
+                with out_txt_path.open("a", encoding="utf-8") as out_f:
+                    out_f.write("\n[PDFMiner whole-document fallback]\n")
+                    out_f.write(whole_text)
+                details["failed_pages"] = []
+
+        success = len(details["failed_pages"]) == 0
+        return success, details
+
+    except Exception as e:
+        details["error"] = str(e)
+        details["traceback"] = traceback.format_exc()
+        return False, details
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input-dir", required=True)
+    parser.add_argument("--output-file", required=True)
+    parser.add_argument("--tmp-dir", required=True)
+    parser.add_argument("--ocr-dpi", type=int, default=300)
+    parser.add_argument("--tesseract-lang", type=str, default="eng")
+    args = parser.parse_args()
+
+    input_dir = Path(args.input_dir)
+    output_file = Path(args.output_file)
+    tmp_dir = Path(args.tmp_dir)
+    ocr_dpi = args.ocr_dpi
+    tesseract_lang = args.tesseract_lang
+
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    if output_file.exists():
+        output_file.unlink()
+
+    pdf_paths = sorted([p for p in input_dir.rglob("*.pdf")])
+    if not pdf_paths:
+        print("ERROR: No PDF files found in input directory.")
+        sys.exit(2)
+
+    overall_failed = []
+    processed_count = 0
+
+    for pdf_path in pdf_paths:
+        print(f"\n--- Processing: {pdf_path} ---")
+        per_txt = tmp_dir / (pdf_path.stem + ".txt")
+        success, details = process_pdf(pdf_path, per_txt, ocr_dpi=ocr_dpi, tesseract_lang=tesseract_lang)
+        if not success:
+            print(f"FAILED to fully extract {pdf_path}; details: {details}")
+            overall_failed.append((str(pdf_path), details))
+        else:
+            size = per_txt.stat().st_size if per_txt.exists() else 0
+            if size < 10:
+                overall_failed.append((str(pdf_path), {"reason":"per-file output too small", "size":size}))
+            else:
+                with per_txt.open("r", encoding="utf-8") as pf, output_file.open("a", encoding="utf-8") as of:
+                    of.write(pf.read())
+                    of.write("\n\n")
+                processed_count += 1
+
+    if overall_failed:
+        print("\n\nExtraction finished with ERRORS. Summary of failures:")
+        for p, d in overall_failed:
+            print(f"- {p} -> {d}")
+        sys.exit(3)
+
+    if not output_file.exists() or output_file.stat().st_size < 10:
+        print("ERROR: Combined output file missing or too small.")
+        sys.exit(4)
+
+    print(f"\nALL PDFs processed successfully. Combined output: {output_file} (bytes={output_file.stat().st_size})")
+    sys.exit(0)
+
+if __name__ == "__main__":
+    main()
+PY
+
+          chmod +x scripts/extract_pdfs_robust.py
+
+      - name: Install Python dependencies (pip)
+        run: |
+          # ensure pip is available in the container
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --no-cache-dir -r scripts/requirements.txt
+
+      - name: Download ZIP
+        run: |
+          mkdir -p data
+          echo "Downloading ${{ github.event.inputs.zip_url }}"
+          curl -L --fail "${{ github.event.inputs.zip_url }}" -o data/archive.zip
+          ls -lah data
+
+      - name: Extract ZIP
+        run: |
+          rm -rf data/extracted
+          mkdir -p data/extracted
+          unzip -q data/archive.zip -d data/extracted || (echo "unzip failed" && exit 2)
+          find data/extracted -maxdepth 3 -type f | sed -n '1,200p'
+
+      - name: Run robust PDF extractor
+        env:
+          TESSERACT_LANG: "eng"
+          OCR_DPI: "300"
+        run: |
+          python3 scripts/extract_pdfs_robust.py \
+            --input-dir data/extracted \
+            --output-file output.txt \
+            --tmp-dir tmp_extraction \
+            --ocr-dpi ${OCR_DPI} \
+            --tesseract-lang "${TESSERACT_LANG}"
+
+      - name: Upload artifact (modern: unzipped single-file support)
+        uses: actions/upload-artifact@v7
         with:
-          python-version: '3.13'
-          check-latest: true
+          path: output.txt
+          archive: false
+          retention-days: 90
 
-      - name: Install system tools
-        run: sudo apt-get update && sudo apt-get install -y unzip curl
-
-      - name: Install Python dependencies
-        run: python -m pip install --upgrade pip pypdf zstandard
-
-      - name: Download ZIP (Robust)
-        shell: bash
-        run: |
-          set -euo pipefail
-          CLEAN_URL=$(echo "$TARGET_URL" | xargs)
-          echo "Downloading from: $CLEAN_URL"
-          curl --fail --location --retry 3 --retry-delay 5 --max-time 600 -o "$ZIP_FILENAME" "$CLEAN_URL"
-          if [ ! -f "$ZIP_FILENAME" ]; then
-            echo "Error: ZIP file not downloaded."
-            exit 1
-          fi
-          unzip -l "$ZIP_FILENAME"
-
-      - name: Extract PDFs
-        run: unzip -o -j "$ZIP_FILENAME" "*.pdf"
-
-      - name: Convert PDFs to NDJSON (Cryptographic Integrity)
-        shell: bash
-        run: |
-          cat > generate_ndjson.py <<'PY'
-          #!/usr/bin/env python3
-          import glob, json, gzip, hashlib, os, sys, gc, traceback
-          from datetime import datetime
-          from pypdf import PdfReader
-
-          OUT_RAW = "Exchange_Protocols_pages.ndjson"
-          OUT_GZ = "Exchange_Protocols_pages.ndjson.gz"
-
-          pdf_files = sorted(glob.glob("*.pdf"))
-          if not pdf_files:
-              print("ERROR: No PDF files found.", file=sys.stderr)
-              sys.exit(2)
-
-          file_map = {}
-          next_id = 1
-          total_pages_written = 0
-          total_pages_expected = 0
-          files_summary = []
-          
-          # Integrity Hasher: Tracks every byte written to ensure no truncation
-          content_hasher = hashlib.sha256()
-          
-          # Global success flag
-          success = True
-
-          f_raw = open(OUT_RAW, "w", encoding="utf-8")
-          f_gz = gzip.open(OUT_GZ, "wt", encoding="utf-8")
-
-          def write_line(data, is_final_manifest=False):
-              line = json.dumps(data, separators=(',',':'), ensure_ascii=False) + "\n"
-              
-              # Update hash for all data EXCEPT the final manifest (which contains the hash)
-              if not is_final_manifest:
-                  content_hasher.update(line.encode('utf-8'))
-              
-              f_raw.write(line)
-              f_gz.write(line)
-
-          try:
-              # 1. Header
-              write_line({
-                  "type": "manifest",
-                  "status": "in_progress",
-                  "generated_at": datetime.utcnow().isoformat() + "Z",
-                  "file_count": len(pdf_files),
-                  "note": "Cryptographic integrity enabled."
-              })
-
-              # 2. Pass 1: Metadata
-              print("Scanning PDFs...", file=sys.stderr)
-              for pdf_path in pdf_files:
-                  filename = os.path.basename(pdf_path)
-                  sha256_hash = hashlib.sha256(open(pdf_path, "rb").read()).hexdigest()
-                  pages_total = 0
-                  try:
-                      reader = PdfReader(pdf_path, strict=False)
-                      pages_total = len(reader.pages)
-                  except Exception as e:
-                      print(f"WARN: Metadata read failed for {filename}: {e}", file=sys.stderr)
-                  
-                  total_pages_expected += pages_total
-                  file_map[filename] = {
-                      "id": next_id, "path": pdf_path, 
-                      "pages_total": pages_total, "sha256": sha256_hash
-                  }
-                  
-                  write_line({
-                      "type": "file", "id": next_id, "filename": filename,
-                      "pages_total": pages_total, "sha256": sha256_hash
-                  })
-                  next_id += 1
-
-              # 3. Pass 2: Content
-              print("Extracting text...", file=sys.stderr)
-              for fname in sorted(file_map.keys()):
-                  meta = file_map[fname]
-                  fid = meta["id"]
-                  pdf_path = meta["path"]
-                  expected = meta["pages_total"]
-                  written = 0
-                  errors = []
-                  
-                  if expected == 0:
-                      errors.append("Empty or unreadable PDF")
-                      files_summary.append({"filename": fname, "pages_expected": 0, "pages_written": 0, "errors": errors})
-                      continue
-
-                  try:
-                      reader = PdfReader(pdf_path, strict=False)
-                      for i in range(1, expected + 1):
-                          try:
-                              # STRICT EXTRACTION: If this fails, we catch it.
-                              page = reader.pages[i-1] 
-                              page_text = page.extract_text() or ""
-                              
-                              # Integrity Check: Ensure we actually got text if it exists.
-                              # Note: pypdf returning empty string is not an error, but an exception IS.
-                              
-                              write_line({
-                                  "type": "page", "file_id": fid, "page": i, "text": page_text
-                              })
-                              written += 1
-                              total_pages_written += 1
-                              
-                          except Exception as pe:
-                              # If extraction fails, we treat it as a data loss.
-                              err = f"Page {i} extraction error: {str(pe)}"
-                              errors.append(err)
-                              print(f"FAIL: {err}", file=sys.stderr)
-                              success = False # Mark job as failed
-                              # We DO NOT write a placeholder. We stop this file or record 0 for this page?
-                              # To keep line counts predictable, we write the error as text, but mark failure.
-                              write_line({
-                                  "type": "page", "file_id": fid, "page": i, "text": f"[ERROR: {pe}]"
-                              })
-                              written += 1 # Count includes the errored page to maintain structure
-                          
-                          if i % 200 == 0:
-                              f_raw.flush(); f_gz.flush(); gc.collect()
-                              
-                  except Exception as e:
-                      errors.append(f"File failed: {str(e)}")
-                      traceback.print_exc()
-                      success = False
-                  
-                  files_summary.append({
-                      "filename": fname, "pages_expected": expected, 
-                      "pages_written": written, "sha256": meta["sha256"], "errors": errors
-                  })
-                  del reader
-                  gc.collect()
-
-          except Exception as main_e:
-              print(f"FATAL: {main_e}", file=sys.stderr)
-              traceback.print_exc()
-              success = False
-          finally:
-              # 4. Final Manifest
-              final_hash = content_hasher.hexdigest()
-              write_line({
-                  "type": "manifest",
-                  "status": "complete" if success else "failed",
-                  "generated_at": datetime.utcnow().isoformat() + "Z",
-                  "file_count": len(pdf_files),
-                  "total_pages_written": total_pages_written,
-                  "total_pages_expected": total_pages_expected,
-                  "content_sha256": final_hash, # The fingerprint of all previous content
-                  "files": files_summary
-              }, is_final_manifest=True)
-              
-              f_raw.close()
-              f_gz.close()
-
-          # 5. STRICT EXIT
-          print(f"\n--- Integrity Report ---", file=sys.stderr)
-          print(f"Expected: {total_pages_expected} pages", file=sys.stderr)
-          print(f"Written:  {total_pages_written} pages", file=sys.stderr)
-          print(f"SHA-256:  {final_hash}", file=sys.stderr)
-          
-          if not success:
-              print("FAILURE: Extraction errors detected.", file=sys.stderr)
-              sys.exit(1)
-          
-          if total_pages_written != total_pages_expected:
-              print("FAILURE: Page count mismatch.", file=sys.stderr)
-              sys.exit(1)
-          
-          print("SUCCESS: Integrity verified.", file=sys.stderr)
-          sys.exit(0)
-          PY
-          
-          python generate_ndjson.py
-
-      - name: Validate Data Integrity
-        # This step runs only if the python script succeeded (exit 0).
-        run: |
-          echo "Verifying file content against recorded hashes..."
-          python - <<'PY'
-          import json, sys, hashlib
-
-          FILENAME = "Exchange_Protocols_pages.ndjson"
-          
-          print(f"Reading {FILENAME}...", file=sys.stderr)
-          
-          try:
-              with open(FILENAME, "rb") as f:
-                  # Read all lines efficiently
-                  lines = f.readlines()
-              
-              if not lines:
-                  raise Exception("File is empty.")
-
-              # 1. Verify Final Manifest Structure
-              last_line = lines[-1].decode('utf-8')
-              manifest = json.loads(last_line)
-              
-              if manifest.get("status") != "complete":
-                  raise Exception(f"Processing failed with status: {manifest.get('status')}")
-                  
-              # 2. Verify Page Count
-              exp = manifest.get("total_pages_expected")
-              got = manifest.get("total_pages_written")
-              if exp != got:
-                  raise Exception(f"Count mismatch: Expected {exp}, got {got}.")
-
-              # 3. Verify Content Hash (Rolling Checksum)
-              # We hash everything EXCEPT the last line (the manifest itself)
-              hasher = hashlib.sha256()
-              for line in lines[:-1]:
-                  hasher.update(line)
-              
-              calculated_hash = hasher.hexdigest()
-              recorded_hash = manifest.get("content_sha256")
-              
-              if calculated_hash != recorded_hash:
-                  raise Exception(f"HASH MISMATCH!\nExpected: {recorded_hash}\nCalculated: {calculated_hash}\nThis indicates data truncation or corruption.")
-
-              print("------------------------------------------------")
-              print("VALIDATION PASSED: Data integrity is absolute.")
-              print(f"Pages: {got}")
-              print(f"Hash:  {calculated_hash}")
-              print("------------------------------------------------")
-              
-          except Exception as e:
-              print(f"VALIDATION FAILED: {e}", file=sys.stderr)
-              sys.exit(1)
-          PY
-
-      - name: Upload Artifacts
-        # Uploads ONLY if validation passed.
-        uses: actions/upload-artifact@v7.0.0
-        with:
-          name: exchange-protocols-ndjson
-          path: |
-            Exchange_Protocols_pages.ndjson
-            Exchange_Protocols_pages.ndjson.gz
-          retention-days: 5
+      # Fallback upload (use this instead if your org/runner cannot use upload-artifact@v7)
+      #- name: Upload artifact (fallback: v4, no compression)
+      #  uses: actions/upload-artifact@v4
+      #  with:
+      #    name: extracted-pdf-content
+      #    path: output.txt
+      #    compression-level: 0
+      #    retention-days: 90 
