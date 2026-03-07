@@ -1,93 +1,93 @@
 name: Robust PDF Extraction (OCR container)
 
 on:
-workflow_dispatch:
-inputs:
-zip_url:
-description: "Direct URL to the zip file containing PDFs"
-required: true
-type: string
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: "Direct URL to the zip file containing PDFs"
+        required: true
+        type: string
 
 jobs:
-extract:
-runs-on: ubuntu-latest
-
-container:
-  image: docker://jbarlow83/ocrmypdf:latest
-
-timeout-minutes: 360
-
-permissions:
-  contents: read
-
-steps:
-  - name: Checkout repository
-    uses: actions/checkout@v5
-
-  - name: Environment verification
-    run: |
-      echo "Container: ${{ job.container.image }}"
-      python3 --version
-      tesseract --version
-      ocrmypdf --version || true
-      pdftotext -v || true
-
-  - name: Install Python dependencies
-    run: |
-      python3 -m pip install --upgrade pip
-      python3 -m pip install --no-cache-dir -r scripts/requirements.txt
-
-  - name: Prepare workspace
-    run: |
-      mkdir -p data
-      mkdir -p data/extracted
-      mkdir -p tmp_extraction
-
-  - name: Download ZIP
-    run: |
-      echo "Downloading archive..."
-      curl -L --fail "${{ github.event.inputs.zip_url }}" -o data/archive.zip
-      ls -lh data/archive.zip
-
-  - name: Extract ZIP contents
-    run: |
-      unzip -q data/archive.zip -d data/extracted
-      echo "Files discovered:"
-      find data/extracted -type f | head -200
-
-  - name: Run robust PDF extraction
-    env:
-      TESSERACT_LANG: "eng"
-      OCR_DPI: "300"
-    run: |
-      python3 -u scripts/extract_pdfs_robust.py \
-        --input-dir data/extracted \
-        --output-file output.txt \
-        --tmp-dir tmp_extraction \
-        --ocr-dpi ${OCR_DPI} \
-        --tesseract-lang "${TESSERACT_LANG}"
-
-  - name: Verify outputs
-    run: |
-      test -f output.txt
-      test -f extraction-manifest.json
-      echo "Output file size:"
-      ls -lh output.txt
-      echo "Manifest preview:"
-      head -50 extraction-manifest.json
-
-  - name: Upload extracted text artifact
-    uses: actions/upload-artifact@v7
-    with:
-      name: extracted-pdf-content
-      path: output.txt
-      compression-level: 0
-      retention-days: 90
-
-  - name: Upload extraction manifest
-    uses: actions/upload-artifact@v7
-    with:
-      name: extraction-manifest
-      path: extraction-manifest.json
-      compression-level: 0
-      retention-days: 90
+  extract:
+    runs-on: ubuntu-latest
+    
+    container:
+      image: docker://jbarlow83/ocrmypdf:latest
+      
+    timeout-minutes: 360
+    
+    permissions:
+      contents: read
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        
+      - name: Environment verification
+        run: |
+          echo "Container: ${{ job.container.image }}"
+          python3 --version
+          tesseract --version
+          ocrmypdf --version || true
+          pdftotext -v || true
+          
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --no-cache-dir -r scripts/requirements.txt
+          
+      - name: Prepare workspace
+        run: |
+          mkdir -p data
+          mkdir -p data/extracted
+          mkdir -p tmp_extraction
+          
+      - name: Download ZIP
+        run: |
+          echo "Downloading archive..."
+          curl -L --fail "${{ github.event.inputs.zip_url }}" -o data/archive.zip
+          ls -lh data/archive.zip
+          
+      - name: Extract ZIP contents
+        run: |
+          unzip -q data/archive.zip -d data/extracted
+          echo "Files discovered:"
+          find data/extracted -type f | head -200
+          
+      - name: Run robust PDF extraction
+        env:
+          TESSERACT_LANG: "eng"
+          OCR_DPI: "300"
+        run: |
+          python3 -u scripts/extract_pdfs_robust.py \
+            --input-dir data/extracted \
+            --output-file output.txt \
+            --tmp-dir tmp_extraction \
+            --ocr-dpi ${OCR_DPI} \
+            --tesseract-lang "${TESSERACT_LANG}"
+            
+      - name: Verify outputs
+        run: |
+          test -f output.txt
+          test -f extraction-manifest.json
+          echo "Output file size:"
+          ls -lh output.txt
+          echo "Manifest preview:"
+          head -50 extraction-manifest.json
+          
+      - name: Upload extracted text artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: extracted-pdf-content
+          path: output.txt
+          compression-level: 0
+          retention-days: 90
+          
+      - name: Upload extraction manifest
+        uses: actions/upload-artifact@v7
+        with:
+          name: extraction-manifest
+          path: extraction-manifest.json
+          compression-level: 0
+          retention-days: 90
