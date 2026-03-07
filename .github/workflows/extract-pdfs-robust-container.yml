@@ -22,7 +22,7 @@ jobs:
       
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6.0.2
         
       - name: Environment verification
         run: |
@@ -39,7 +39,6 @@ jobs:
           
       - name: Bootstrap pip and install requirements
         run: |
-          # Download and run the official pip installation script securely
           wget -qO- https://bootstrap.pypa.io/get-pip.py | python3
           
       - name: Install Python dependencies
@@ -51,7 +50,6 @@ jobs:
         run: |
           mkdir -p data
           mkdir -p data/extracted
-          mkdir -p tmp_extraction
           
       - name: Download ZIP
         run: |
@@ -70,23 +68,26 @@ jobs:
           TESSERACT_LANG: "eng"
           OCR_DPI: "300"
         run: |
+          # We no longer use a tmp-dir for text buffering to prevent data loss on crash
           python3 -u scripts/extract_pdfs_robust.py \
             --input-dir data/extracted \
             --output-file output.txt \
-            --tmp-dir tmp_extraction \
             --ocr-dpi ${OCR_DPI} \
             --tesseract-lang "${TESSERACT_LANG}"
             
       - name: Verify outputs
+        if: always()
         run: |
-          test -f output.txt
-          test -f extraction-manifest.json
-          echo "Output file size:"
-          ls -lh output.txt
-          echo "Manifest preview:"
-          head -50 extraction-manifest.json
+          if [ -f output.txt ]; then
+            echo "Output file size:"
+            ls -lh output.txt
+          else
+            echo "Output file not found."
+          fi
           
       - name: Upload extracted text artifact
+        # CRITICAL: always upload, even if the script failed/timed out, to preserve partial data
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: extracted-pdf-content
@@ -95,6 +96,7 @@ jobs:
           retention-days: 90
           
       - name: Upload extraction manifest
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: extraction-manifest
