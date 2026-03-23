@@ -39,7 +39,7 @@ jobs:
         run: mkdir -p reports
 
       - name: Run golangci-lint (via reviewdog action)
-        uses: reviewdog/action-golangci-lint@v2.8.0
+        uses: reviewdog/action-golangci-lint@v2.10.0
         with:
           golangci_lint_flags: '--fix --output.sarif.path=reports/golangci.sarif --output.text.path=stdout'
           reporter: github-pr-check
