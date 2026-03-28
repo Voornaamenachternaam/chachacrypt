@@ -65,6 +65,7 @@ const (
 
 	// Platform-specific secure permissions.
 	secureFilePerms = 0o600 // Owner read/write only on Unix and Windows
+
 	// Linter/Magic Number constants.
 	maxASCIIValue       = 127
 	maxConsecutiveChars = 4
