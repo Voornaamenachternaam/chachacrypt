@@ -62,12 +62,9 @@ const (
 	// Security constants.
 	minPasswordLength = 12
 	maxPasswordLength = 1024
-	zeroPassCount     = 3 // Number of times to overwrite sensitive memory
 
 	// Platform-specific secure permissions.
 	secureFilePerms = 0o600 // Owner read/write only on Unix and Windows
-	secureDirPerms  = 0o700 // Owner rwx only on Unix
-
 	// Linter/Magic Number constants.
 	maxASCIIValue       = 127
 	maxConsecutiveChars = 4
