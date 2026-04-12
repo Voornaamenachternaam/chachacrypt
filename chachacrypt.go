@@ -1506,14 +1506,6 @@ func prepareRotationKeys(
 		return nil, nil, nil, fmt.Errorf("derive keys: %w", err)
 	}
 
-	mac, err := computeHeaderHMAC(&hdr, macKey)
-	if err != nil {
-		secureZero(encKey)
-		secureZero(macKey)
-		return nil, nil, nil, fmt.Errorf("compute header mac: %w", err)
-	}
-	copy(hdr.HeaderMAC[:], mac)
-
 	return &hdr, encKey, macKey, nil
 }
 
@@ -1589,12 +1581,19 @@ func rotateFile(
 	if err != nil {
 		return err
 	}
+	defer secureZero(newEncKey)
+	defer secureZero(newMacKey)
+
 	newHdr.KeyVersion = newKeyVersion
 	newHdr.ChunkSize = origHdr.ChunkSize
 	newHdr.NonceSize = origHdr.NonceSize
 
-	defer secureZero(newEncKey)
-	defer secureZero(newMacKey)
+	// Finalize header MAC only after all mutable header fields are set.
+	newMAC, macErr := computeHeaderHMAC(newHdr, newMacKey)
+	if macErr != nil {
+		return fmt.Errorf("compute new header mac: %w", macErr)
+	}
+	copy(newHdr.HeaderMAC[:], newMAC)
 
 	oldAEAD, err := chacha20poly1305.NewX(oldEncKey)
 	if err != nil {
