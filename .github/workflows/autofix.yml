@@ -76,7 +76,7 @@ jobs:
           base: "main"
 
       - name: Run autofix.ci
-        uses: autofix-ci/action@v1.3.3
+        uses: autofix-ci/action@v1.3.4
         with:
           fail-fast: true
         env:
