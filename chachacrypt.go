@@ -234,7 +234,9 @@ func checkComplexity(pw []byte) (hasUpper, hasLower, hasDigit, hasSpecial bool, 
 		if r == lastRune {
 			consecutiveCount++
 			if consecutiveCount >= maxConsecutiveChars {
-				return false, false, false, false, errors.New("password contains too many consecutive identical characters")
+				return false, false, false, false, errors.New(
+					"password contains too many consecutive identical characters",
+				)
 			}
 		} else {
 			consecutiveCount = 1
@@ -272,7 +274,9 @@ func validatePasswordStrength(pw []byte) error {
 		charTypeCount++
 	}
 	if charTypeCount < minComplexityGroups {
-		return errors.New("password must contain at least three types: uppercase, lowercase, digits, or special characters")
+		return errors.New(
+			"password must contain at least three types: uppercase, lowercase, digits, or special characters",
+		)
 	}
 
 	weakPatterns := [][]byte{
@@ -630,7 +634,7 @@ func atomicWriteReplace(tempDir, finalPath string, writer func(*os.File) error, 
 	var tmpPath string
 	var createErr error
 	const maxAttempts = 8
-	for i := 0; i < maxAttempts; i++ {
+	for range maxAttempts {
 		tmpFile, tmpPath, createErr = createSecureTempFile(dir)
 		if createErr == nil {
 			break
@@ -1100,7 +1104,12 @@ func buildHeaderAndKeysForEncrypt(
 	keyVersion uint32,
 ) (*fileHeader, []byte, []byte, error) {
 	if chunkSize < minChunkSize || chunkSize > maxChunkSize {
-		return nil, nil, nil, fmt.Errorf("invalid chunk size: %d (must be %d-%d)", chunkSize, minChunkSize, maxChunkSize)
+		return nil, nil, nil, fmt.Errorf(
+			"invalid chunk size: %d (must be %d-%d)",
+			chunkSize,
+			minChunkSize,
+			maxChunkSize,
+		)
 	}
 	if err := validateArgon2Params(argonTime, argonMem, argonThreads); err != nil {
 		return nil, nil, nil, fmt.Errorf("invalid Argon2 parameters: %w", err)
@@ -1157,7 +1166,12 @@ func prepareRotationKeys(
 	keyVersion uint32,
 ) (*fileHeader, []byte, []byte, error) {
 	if chunkSize < minChunkSize || chunkSize > maxChunkSize {
-		return nil, nil, nil, fmt.Errorf("invalid chunk size: %d (must be %d-%d)", chunkSize, minChunkSize, maxChunkSize)
+		return nil, nil, nil, fmt.Errorf(
+			"invalid chunk size: %d (must be %d-%d)",
+			chunkSize,
+			minChunkSize,
+			maxChunkSize,
+		)
 	}
 	if err := validateArgon2Params(newArgonTime, newArgonMem, newArgonThreads); err != nil {
 		return nil, nil, nil, fmt.Errorf("invalid Argon2 params: %w", err)
@@ -1274,7 +1288,14 @@ func encryptFile(
 		return fmt.Errorf("password validation failed: %w", err)
 	}
 
-	hdr, encKey, macKey, err := buildHeaderAndKeysForEncrypt(pw1, chunkSize, argonTime, argonMem, argonThreads, keyVersion)
+	hdr, encKey, macKey, err := buildHeaderAndKeysForEncrypt(
+		pw1,
+		chunkSize,
+		argonTime,
+		argonMem,
+		argonThreads,
+		keyVersion,
+	)
 	if err != nil {
 		return err
 	}
@@ -1515,7 +1536,8 @@ func resolveAndValidatePaths(inPath, outPath, allowAbs string) (string, string, 
 
 	cfgIn := filepath.Clean(inPath)
 	cfgOut := filepath.Clean(outPath)
-	if cfgIn == ".." || strings.HasPrefix(cfgIn, ".."+string(os.PathSeparator)) || cfgOut == ".." || strings.HasPrefix(cfgOut, ".."+string(os.PathSeparator)) {
+	if cfgIn == ".." || strings.HasPrefix(cfgIn, ".."+string(os.PathSeparator)) || cfgOut == ".." ||
+		strings.HasPrefix(cfgOut, ".."+string(os.PathSeparator)) {
 		return "", "", errors.New("invalid path configuration")
 	}
 
@@ -1588,7 +1610,11 @@ func parseFlags() (runConfig, error) {
 	rot := flag.Bool("r", false, "rotate mode (re-encrypt with new password/params)")
 	force := flag.Bool("force", false, "overwrite output if exists")
 	allowAbs := flag.Bool("allow-absolute", false, "allow writing output outside current directory")
-	chunkSizeFlag := flag.Uint("chunk-size", defaultChunkSize, fmt.Sprintf("chunk size in bytes (%d-%d)", minChunkSize, maxChunkSize))
+	chunkSizeFlag := flag.Uint(
+		"chunk-size",
+		defaultChunkSize,
+		fmt.Sprintf("chunk size in bytes (%d-%d)", minChunkSize, maxChunkSize),
+	)
 	preset := flag.String("preset", "default", "argon preset: default | high | low")
 	argonTimeFlag := flag.Uint("argon-time", 0, "override argon time iterations")
 	argonMemFlag := flag.Uint("argon-memory", 0, "override argon memory (KiB)")
@@ -1668,9 +1694,27 @@ func runOperation(ctx context.Context, cfg runConfig) error {
 	if cfg.enc {
 		if cfg.verbose {
 			fmt.Fprintf(os.Stderr, "Encrypting: %s -> %s\n", absIn, absOut)
-			fmt.Fprintf(os.Stderr, "Parameters: Argon2(t=%d,m=%d KiB,p=%d), chunk=%d\n", cfg.argTime, cfg.argMem, cfg.argThreads, cfg.chunkSize)
+			fmt.Fprintf(
+				os.Stderr,
+				"Parameters: Argon2(t=%d,m=%d KiB,p=%d), chunk=%d\n",
+				cfg.argTime,
+				cfg.argMem,
+				cfg.argThreads,
+				cfg.chunkSize,
+			)
 		}
-		return encryptFile(ctx, absIn, absOut, cfg.force, cfg.chunkSize, cfg.argTime, cfg.argMem, cfg.argThreads, cfg.keyVersion, cfg.verbose)
+		return encryptFile(
+			ctx,
+			absIn,
+			absOut,
+			cfg.force,
+			cfg.chunkSize,
+			cfg.argTime,
+			cfg.argMem,
+			cfg.argThreads,
+			cfg.keyVersion,
+			cfg.verbose,
+		)
 	}
 
 	if cfg.dec {
@@ -1683,9 +1727,25 @@ func runOperation(ctx context.Context, cfg runConfig) error {
 	if cfg.rot {
 		if cfg.verbose {
 			fmt.Fprintf(os.Stderr, "Rotating: %s -> %s\n", absIn, absOut)
-			fmt.Fprintf(os.Stderr, "New parameters: Argon2(t=%d,m=%d KiB,p=%d)\n", cfg.argTime, cfg.argMem, cfg.argThreads)
+			fmt.Fprintf(
+				os.Stderr,
+				"New parameters: Argon2(t=%d,m=%d KiB,p=%d)\n",
+				cfg.argTime,
+				cfg.argMem,
+				cfg.argThreads,
+			)
 		}
-		return rotateFile(ctx, absIn, absOut, cfg.force, cfg.argTime, cfg.argMem, cfg.argThreads, cfg.keyVersion, cfg.verbose)
+		return rotateFile(
+			ctx,
+			absIn,
+			absOut,
+			cfg.force,
+			cfg.argTime,
+			cfg.argMem,
+			cfg.argThreads,
+			cfg.keyVersion,
+			cfg.verbose,
+		)
 	}
 
 	return errors.New("no operation specified")
