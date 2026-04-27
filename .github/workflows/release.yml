@@ -101,7 +101,7 @@ jobs:
         uses: sigstore/cosign-installer@v4.1.1
 
       - name: Check GoReleaser config (v2 schema)
-        uses: goreleaser/goreleaser-action@v7.1.0
+        uses: goreleaser/goreleaser-action@v7.2.1
         with:
           args: check --config .goreleaser.yml
         env:
@@ -109,7 +109,7 @@ jobs:
           SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
 
       - name: Run GoReleaser (builds, UPX, archives, checksums, release)
-        uses: goreleaser/goreleaser-action@v7.1.0
+        uses: goreleaser/goreleaser-action@v7.2.1
         with:
           args: release --clean --config .goreleaser.yml
         env:
