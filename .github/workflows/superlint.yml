@@ -49,7 +49,7 @@ jobs:
           fi
 
       - name: Install / Run golangci-lint (official action) -- fix mode
-        uses: golangci/golangci-lint-action@v9.2.0
+        uses: golangci/golangci-lint-action@v9.2.1
         continue-on-error: true            # preserve previous behaviour (don't abort subsequent steps)
         with:
           # install golangci-lint binary (default install-mode=binary)
