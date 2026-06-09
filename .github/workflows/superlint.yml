@@ -19,7 +19,7 @@ permissions:
 jobs:
   lint-and-fix:
     name: Lint and Auto-fix (create PR if fixes)
-    runs-on: ubuntu-latest-arm64
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout (full history, allow pushes)
         continue-on-error: true 
