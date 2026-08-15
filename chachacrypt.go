@@ -1,4 +1,4 @@
-// chachacrypt - Secure File Encryption Tool
+// chachacrypt
 package main
 
 import (
