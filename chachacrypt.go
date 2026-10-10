@@ -1430,13 +1430,13 @@ func run() error {
 	rotateCmd := flag.NewFlagSet("rotate", flag.ExitOnError)
 
 	var (
-		force       = encryptCmd.Bool("f", false, "Overwrite output file if it exists")
-		verbose     = encryptCmd.Bool("v", false, "Enable verbose output")
-		allowAbs    = encryptCmd.Bool("allow-abs", false, "Allow absolute output paths")
-		argonT      = encryptCmd.Uint("argon-time", defaultArgonTime, "Argon2 time cost iterations")
-		argonM      = encryptCmd.Uint("argon-memory", defaultArgonMemory/1024, "Argon2 memory cost in MiB")
-		argonTh     = encryptCmd.Uint("argon-threads", defaultArgonThreads, "Argon2 parallelism threads")
-		chunkSz     = encryptCmd.Uint("chunk-size", defaultChunkSize, "Chunk size in bytes")
+		force    = encryptCmd.Bool("f", false, "Overwrite output file if it exists")
+		verbose  = encryptCmd.Bool("v", false, "Enable verbose output")
+		allowAbs = encryptCmd.Bool("allow-abs", false, "Allow absolute output paths")
+		argonT   = encryptCmd.Uint("argon-time", defaultArgonTime, "Argon2 time cost iterations")
+		argonM   = encryptCmd.Uint("argon-memory", defaultArgonMemory/1024, "Argon2 memory cost in MiB")
+		argonTh  = encryptCmd.Uint("argon-threads", defaultArgonThreads, "Argon2 parallelism threads")
+		chunkSz  = encryptCmd.Uint("chunk-size", defaultChunkSize, "Chunk size in bytes")
 
 		dForce    = decryptCmd.Bool("f", false, "Overwrite output file if it exists")
 		dVerbose  = decryptCmd.Bool("v", false, "Enable verbose output")
