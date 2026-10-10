@@ -20,7 +20,6 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
-	"testing"
 	"time"
 	"unicode/utf8"
 
@@ -78,6 +77,9 @@ const (
 	hexBase             = 10
 	randomSuffixLen     = 8
 	targetOS            = "windows"
+
+	kibPerMiB    = 1024
+	requiredArgs = 2
 )
 
 const headerTotalSize = magicLen + 2 + 4 + 8 + 4 + 4 + 1 + saltSize + 4 + 2 + reservedLen + headerMACSize
@@ -1080,6 +1082,41 @@ func rotateChunks(
 
 /*** File operations ***/
 
+// secureOpenReadOnly opens a file for reading while refusing to follow a
+// symlink at the final path component. The file is opened first and then
+// compared against the Lstat result with os.SameFile, so a symlink or different
+// inode swapped in between the check and the open is rejected. Doing the check
+// this way keeps behaviour identical on every platform of the single-file,
+// cross-platform build.
+func secureOpenReadOnly(path string) (*os.File, error) {
+	linfo, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("open input lstat: %w", err)
+	}
+	if linfo.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("refuse to open input: path is a symlink")
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open input: %w", err)
+	}
+	finfo, err := f.Stat()
+	if err != nil {
+		closeQuietly(f)
+		return nil, fmt.Errorf("stat input: %w", err)
+	}
+	// Reject when the opened file is not the one Lstat saw. This catches a
+	// symlink or different inode swapped in between the check and the open, and
+	// unlike a raw O_NOFOLLOW literal it behaves identically on every platform
+	// supported by the single-file build.
+	if !os.SameFile(linfo, finfo) {
+		closeQuietly(f)
+		return nil, errors.New("refuse to open input: file changed during open")
+	}
+	return f, nil
+}
+
 func readHeader(r io.Reader) (*fileHeader, []byte, error) {
 	buf := make([]byte, headerTotalSize)
 	if _, err := io.ReadFull(r, buf); err != nil {
@@ -1139,6 +1176,27 @@ func readHeader(r io.Reader) (*fileHeader, []byte, error) {
 	return hdr, buf, nil
 }
 
+// validateHeader checks the authenticated-but-untrusted fields of a header
+// before any key material is derived from them. It must run after the header
+// MAC has been verified and before rotation trusts header-supplied costs.
+func validateHeader(hdr *fileHeader) error {
+	if err := validateArgon2Params(hdr.ArgonTime, hdr.ArgonMemory, hdr.ArgonThreads); err != nil {
+		return fmt.Errorf("invalid argon2 params: %w", err)
+	}
+	if hdr.ChunkSize < minChunkSize || hdr.ChunkSize > maxChunkSize {
+		return fmt.Errorf("invalid chunk size: %d (must be %d-%d)", hdr.ChunkSize, minChunkSize, maxChunkSize)
+	}
+	if hdr.NonceSize != nonceSize {
+		return fmt.Errorf("invalid nonce size: %d (expected %d)", hdr.NonceSize, nonceSize)
+	}
+	for i, b := range hdr.Reserved {
+		if b != 0 {
+			return fmt.Errorf("reserved byte %d is non-zero", i)
+		}
+	}
+	return nil
+}
+
 func writeHeader(w io.Writer, hdr *fileHeader, macKey []byte) error {
 	mac, err := computeHeaderHMAC(hdr, macKey)
 	if err != nil {
@@ -1155,12 +1213,31 @@ func writeHeader(w io.Writer, hdr *fileHeader, macKey []byte) error {
 	return nil
 }
 
-func encryptFile(ctx context.Context, inPath, outPath string, password []byte, argonTime, argonMemory uint32, argonThreads uint8, chunkSize uint32, force, verbose bool) error {
-	in, err := os.Open(inPath)
+func encryptFile(
+	ctx context.Context,
+	inPath, outPath string,
+	password []byte,
+	argonTime, argonMemory uint32,
+	argonThreads uint8,
+	chunkSize uint32,
+	force, verbose bool,
+) error {
+	in, err := secureOpenReadOnly(inPath)
 	if err != nil {
 		return fmt.Errorf("open input file: %w", err)
 	}
 	defer closeQuietly(in)
+
+	info, err := in.Stat()
+	if err != nil {
+		return fmt.Errorf("stat input file: %w", err)
+	}
+	if runtime.GOOS != targetOS && info.Mode().Perm()&0o022 != 0 {
+		return errors.New("input file is writable by group or other (security risk)")
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("input is not a regular file")
+	}
 
 	if chunkSize == 0 {
 		chunkSize = defaultChunkSize
@@ -1205,7 +1282,7 @@ func encryptFile(ctx context.Context, inPath, outPath string, password []byte, a
 		ArgonTime:    argonTime,
 		ArgonMemory:  argonMemory,
 		ArgonThreads: argonThreads,
-		Salt:         salt,
+		Salt:         [saltSize]byte(salt),
 		ChunkSize:    chunkSize,
 		NonceSize:    nonceSize,
 	}
@@ -1225,7 +1302,7 @@ func encryptFile(ctx context.Context, inPath, outPath string, password []byte, a
 }
 
 func decryptFile(ctx context.Context, inPath, outPath string, password []byte, force, verbose bool) error {
-	in, err := os.Open(inPath)
+	in, err := secureOpenReadOnly(inPath)
 	if err != nil {
 		return fmt.Errorf("open input file: %w", err)
 	}
@@ -1257,6 +1334,9 @@ func decryptFile(ctx context.Context, inPath, outPath string, password []byte, f
 	if !secureCompare(expectedMAC, hdr.HeaderMAC[:]) {
 		return errors.New("header authentication failed: wrong password or tampered header")
 	}
+	if err := validateHeader(hdr); err != nil {
+		return fmt.Errorf("invalid file header: %w", err)
+	}
 
 	aead, err := chacha20poly1305.NewX(encKey)
 	if err != nil {
@@ -1268,8 +1348,15 @@ func decryptFile(ctx context.Context, inPath, outPath string, password []byte, f
 	}, force)
 }
 
-func rotateFile(ctx context.Context, inPath, outPath string, oldPassword, newPassword []byte, newArgonTime, newArgonMemory uint32, newArgonThreads uint8, force, verbose bool) error {
-	in, err := os.Open(inPath)
+func rotateFile(
+	ctx context.Context,
+	inPath, outPath string,
+	oldPassword, newPassword []byte,
+	newArgonTime, newArgonMemory uint32,
+	newArgonThreads uint8,
+	force, verbose bool,
+) error {
+	in, err := secureOpenReadOnly(inPath)
 	if err != nil {
 		return fmt.Errorf("open input file: %w", err)
 	}
@@ -1278,6 +1365,13 @@ func rotateFile(ctx context.Context, inPath, outPath string, oldPassword, newPas
 	hdr, _, err := readHeader(in)
 	if err != nil {
 		return err
+	}
+
+	// The header is unauthenticated until the MAC check below, so validate its
+	// Argon2 costs first; otherwise a crafted file could demand excessive
+	// memory or work during key derivation.
+	if err := validateArgon2Params(hdr.ArgonTime, hdr.ArgonMemory, hdr.ArgonThreads); err != nil {
+		return fmt.Errorf("invalid parameters in file header: %w", err)
 	}
 
 	oldMasterKey := deriveMasterKeyArgon(oldPassword, hdr.Salt[:], hdr.ArgonTime, hdr.ArgonMemory, hdr.ArgonThreads)
@@ -1296,6 +1390,9 @@ func rotateFile(ctx context.Context, inPath, outPath string, oldPassword, newPas
 	}
 	if !secureCompare(expectedMAC, hdr.HeaderMAC[:]) {
 		return errors.New("authentication failed: wrong old password or tampered header")
+	}
+	if err := validateHeader(hdr); err != nil {
+		return fmt.Errorf("invalid file header: %w", err)
 	}
 
 	oldAEAD, err := chacha20poly1305.NewX(oldEncKey)
@@ -1359,183 +1456,264 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	encryptCmd := flag.NewFlagSet("encrypt", flag.ExitOnError)
-	decryptCmd := flag.NewFlagSet("decrypt", flag.ExitOnError)
-	rotateCmd := flag.NewFlagSet("rotate", flag.ExitOnError)
-
-	var (
-		pass    = encryptCmd.String("p", "", "Password (if empty, prompted securely)")
-		force   = encryptCmd.Bool("f", false, "Overwrite output file if it exists")
-		verbose = encryptCmd.Bool("v", false, "Enable verbose output")
-		argonT  = encryptCmd.Uint("argon-time", defaultArgonTime, "Argon2 time cost iterations")
-		argonM  = encryptCmd.Uint("argon-memory", defaultArgonMemory/1024, "Argon2 memory cost in MiB")
-		argonTh = encryptCmd.Uint("argon-threads", defaultArgonThreads, "Argon2 parallelism threads")
-		chunkSz = encryptCmd.Uint("chunk-size", defaultChunkSize, "Chunk size in bytes")
-
-		dPass    = decryptCmd.String("p", "", "Password (if empty, prompted securely)")
-		dForce   = decryptCmd.Bool("f", false, "Overwrite output file if it exists")
-		dVerbose = decryptCmd.Bool("v", false, "Enable verbose output")
-
-		rOldPass = rotateCmd.String("old-pass", "", "Old password (if empty, prompted securely)")
-		rNewPass = rotateCmd.String("new-pass", "", "New password (if empty, prompted securely)")
-		rForce   = rotateCmd.Bool("f", false, "Overwrite output file if it exists")
-		rVerbose = rotateCmd.Bool("v", false, "Enable verbose output")
-		rArgonT  = rotateCmd.Uint("argon-time", 0, "New Argon2 time cost")
-		rArgonM  = rotateCmd.Uint("argon-memory", 0, "New Argon2 memory cost in MiB")
-		rArgonTh = rotateCmd.Uint("argon-threads", 0, "New Argon2 parallelism threads")
-	)
-
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(usageExit)
 	}
 
 	subcmd := os.Args[1]
+	// Map the former mode flags onto the new subcommands so existing
+	// invocations such as "chachacrypt -e in out" keep working.
+	switch subcmd {
+	case "-e":
+		subcmd = "encrypt"
+	case "-d":
+		subcmd = "decrypt"
+	case "-r":
+		subcmd = "rotate"
+	}
+
+	var (
+		fs  *flag.FlagSet
+		run func(context.Context, *flag.FlagSet, []string) error
+	)
 	switch subcmd {
 	case "encrypt":
-		_ = encryptCmd.Parse(os.Args[2:])
-		args := encryptCmd.Args()
-		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "Error: missing input and/or output file arguments")
-			encryptCmd.Usage()
-			os.Exit(usageExit)
-		}
-		inPath, outPath := args[0], args[1]
-
-		var password []byte
-		var err error
-		if *pass != "" {
-			password = []byte(*pass)
-		} else {
-			password, err = readPasswordPrompt("Enter encryption password: ")
-			if err != nil {
-				die(err)
-			}
-			confirm, err := readPasswordPrompt("Confirm encryption password: ")
-			if err != nil {
-				secureZero(password)
-				die(err)
-			}
-			if !secureCompare(password, confirm) {
-				secureZero(password)
-				secureZero(confirm)
-				die(errors.New("passwords do not match"))
-			}
-			secureZero(confirm)
-		}
-		defer secureZero(password)
-
-		if err := validatePasswordStrength(password); err != nil {
-			die(fmt.Errorf("password too weak: %w", err))
-		}
-
-		memoryKiB := uint32(*argonM) * 1024
-		err = encryptFile(ctx, inPath, outPath, password, uint32(*argonT), memoryKiB, uint8(*argonTh), uint32(*chunkSz), *force, *verbose)
-		if err != nil {
-			die(err)
-		}
-		if *verbose {
-			fmt.Println("Encryption completed successfully.")
-		}
-
+		fs, run = flag.NewFlagSet("encrypt", flag.ExitOnError), runEncrypt
 	case "decrypt":
-		_ = decryptCmd.Parse(os.Args[2:])
-		args := decryptCmd.Args()
-		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "Error: missing input and/or output file arguments")
-			decryptCmd.Usage()
-			os.Exit(usageExit)
-		}
-		inPath, outPath := args[0], args[1]
-
-		var password []byte
-		var err error
-		if *dPass != "" {
-			password = []byte(*dPass)
-		} else {
-			password, err = readPasswordPrompt("Enter decryption password: ")
-			if err != nil {
-				die(err)
-			}
-		}
-		defer secureZero(password)
-
-		err = decryptFile(ctx, inPath, outPath, password, *dForce, *dVerbose)
-		if err != nil {
-			die(err)
-		}
-		if *dVerbose {
-			fmt.Println("Decryption completed successfully.")
-		}
-
+		fs, run = flag.NewFlagSet("decrypt", flag.ExitOnError), runDecrypt
 	case "rotate":
-		_ = rotateCmd.Parse(os.Args[2:])
-		args := rotateCmd.Args()
-		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "Error: missing input and/or output file arguments")
-			rotateCmd.Usage()
-			os.Exit(usageExit)
-		}
-		inPath, outPath := args[0], args[1]
-
-		var oldPass []byte
-		var err error
-		if *rOldPass != "" {
-			oldPass = []byte(*rOldPass)
-		} else {
-			oldPass, err = readPasswordPrompt("Enter current password: ")
-			if err != nil {
-				die(err)
-			}
-		}
-		defer secureZero(oldPass)
-
-		var newPass []byte
-		if *rNewPass != "" {
-			newPass = []byte(*rNewPass)
-		} else {
-			newPass, err = readPasswordPrompt("Enter new password: ")
-			if err != nil {
-				die(err)
-			}
-			confirm, err := readPasswordPrompt("Confirm new password: ")
-			if err != nil {
-				secureZero(newPass)
-				die(err)
-			}
-			if !secureCompare(newPass, confirm) {
-				secureZero(newPass)
-				secureZero(confirm)
-				die(errors.New("passwords do not match"))
-			}
-			secureZero(confirm)
-		}
-		defer secureZero(newPass)
-
-		if err := validatePasswordStrength(newPass); err != nil {
-			die(fmt.Errorf("new password too weak: %w", err))
-		}
-
-		var newMemKiB uint32
-		if *rArgonM > 0 {
-			newMemKiB = uint32(*rArgonM) * 1024
-		}
-
-		err = rotateFile(ctx, inPath, outPath, oldPass, newPass, uint32(*rArgonT), newMemKiB, uint8(*rArgonTh), *rForce, *rVerbose)
-		if err != nil {
-			die(err)
-		}
-		if *rVerbose {
-			fmt.Println("Key/password rotation completed successfully.")
-		}
-
+		fs, run = flag.NewFlagSet("rotate", flag.ExitOnError), runRotate
 	case "help", "-h", "--help":
 		printUsage()
+		return
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown subcommand: %s\n", subcmd)
 		printUsage()
 		os.Exit(usageExit)
 	}
+
+	// Running each subcommand in its own function lets deferred password
+	// wiping execute before die() calls os.Exit, which skips defers.
+	if err := run(ctx, fs, os.Args[2:]); err != nil {
+		die(err)
+	}
+}
+
+func runEncrypt(ctx context.Context, fs *flag.FlagSet, args []string) error {
+	allowAbs := fs.Bool("allow-absolute", false, "Allow writing output outside the current directory")
+	force := fs.Bool("f", false, "Overwrite output file if it exists")
+	verbose := fs.Bool("v", false, "Enable verbose output")
+	argonT := fs.Uint("argon-time", defaultArgonTime, "Argon2 time cost iterations")
+	argonM := fs.Uint("argon-memory", defaultArgonMemory/kibPerMiB, "Argon2 memory cost in MiB")
+	argonTh := fs.Uint("argon-threads", defaultArgonThreads, "Argon2 parallelism threads")
+	chunkSz := fs.Uint("chunk-size", defaultChunkSize, "Chunk size in bytes")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	pos := fs.Args()
+	if len(pos) != requiredArgs {
+		fs.Usage()
+		return errors.New("encrypt requires exactly <input> <output>")
+	}
+	inPath, outPath, err := validatePaths(pos[0], pos[1], *allowAbs)
+	if err != nil {
+		return err
+	}
+	at, am, ath, cs, err := parseArgonFlags(*argonT, *argonM, *argonTh, *chunkSz)
+	if err != nil {
+		return err
+	}
+
+	password, err := readPasswordConfirm("Enter encryption password: ", "Confirm encryption password: ")
+	if err != nil {
+		return err
+	}
+	defer secureZero(password)
+
+	if err := validatePasswordStrength(password); err != nil {
+		return fmt.Errorf("password too weak: %w", err)
+	}
+	if err := encryptFile(ctx, inPath, outPath, password, at, am, ath, cs, *force, *verbose); err != nil {
+		return err
+	}
+	if *verbose {
+		fmt.Println("Encryption completed successfully.")
+	}
+	return nil
+}
+
+func runDecrypt(ctx context.Context, fs *flag.FlagSet, args []string) error {
+	allowAbs := fs.Bool("allow-absolute", false, "Allow writing output outside the current directory")
+	force := fs.Bool("f", false, "Overwrite output file if it exists")
+	verbose := fs.Bool("v", false, "Enable verbose output")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	pos := fs.Args()
+	if len(pos) != requiredArgs {
+		fs.Usage()
+		return errors.New("decrypt requires exactly <input> <output>")
+	}
+	inPath, outPath, err := validatePaths(pos[0], pos[1], *allowAbs)
+	if err != nil {
+		return err
+	}
+
+	password, err := readPasswordPrompt("Enter decryption password: ")
+	if err != nil {
+		return err
+	}
+	defer secureZero(password)
+
+	if err := decryptFile(ctx, inPath, outPath, password, *force, *verbose); err != nil {
+		return err
+	}
+	if *verbose {
+		fmt.Println("Decryption completed successfully.")
+	}
+	return nil
+}
+
+func runRotate(ctx context.Context, fs *flag.FlagSet, args []string) error {
+	allowAbs := fs.Bool("allow-absolute", false, "Allow writing output outside the current directory")
+	force := fs.Bool("f", false, "Overwrite output file if it exists")
+	verbose := fs.Bool("v", false, "Enable verbose output")
+	argonT := fs.Uint("argon-time", 0, "New Argon2 time cost")
+	argonM := fs.Uint("argon-memory", 0, "New Argon2 memory cost in MiB")
+	argonTh := fs.Uint("argon-threads", 0, "New Argon2 parallelism threads")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	pos := fs.Args()
+	if len(pos) != requiredArgs {
+		fs.Usage()
+		return errors.New("rotate requires exactly <input> <output>")
+	}
+	inPath, outPath, err := validatePaths(pos[0], pos[1], *allowAbs)
+	if err != nil {
+		return err
+	}
+
+	oldPass, err := readPasswordPrompt("Enter current password: ")
+	if err != nil {
+		return err
+	}
+	defer secureZero(oldPass)
+
+	newPass, err := readPasswordConfirm("Enter new password: ", "Confirm new password: ")
+	if err != nil {
+		return err
+	}
+	defer secureZero(newPass)
+
+	if err := validatePasswordStrength(newPass); err != nil {
+		return fmt.Errorf("new password too weak: %w", err)
+	}
+
+	var newAt, newAm uint32
+	var newAth uint8
+	if *argonT > 0 {
+		if *argonT > maxArgonTimeLimit {
+			return fmt.Errorf("argon-time out of range (max %d)", maxArgonTimeLimit)
+		}
+		newAt = uint32(*argonT)
+	}
+	if *argonM > 0 {
+		if *argonM > maxArgonMemory/kibPerMiB {
+			return fmt.Errorf("argon-memory out of range (max %d MiB)", maxArgonMemory/kibPerMiB)
+		}
+		newAm = uint32(*argonM) * kibPerMiB
+	}
+	if *argonTh > 0 {
+		if *argonTh > maxThreadLimit {
+			return fmt.Errorf("argon-threads out of range (max %d)", maxThreadLimit)
+		}
+		newAth = uint8(*argonTh)
+	}
+
+	if err := rotateFile(ctx, inPath, outPath, oldPass, newPass, newAt, newAm, newAth, *force, *verbose); err != nil {
+		return err
+	}
+	if *verbose {
+		fmt.Println("Key/password rotation completed successfully.")
+	}
+	return nil
+}
+
+// parseArgonFlags range-checks the CLI integer flags before narrowing them to
+// their destination types, preventing silent wraparound and multiplication
+// overflow.
+func parseArgonFlags(argonT, argonM, argonTh, chunkSz uint) (uint32, uint32, uint8, uint32, error) {
+	if argonT > maxArgonTimeLimit {
+		return 0, 0, 0, 0, fmt.Errorf("argon-time out of range (max %d)", maxArgonTimeLimit)
+	}
+	if argonM > maxArgonMemory/kibPerMiB {
+		return 0, 0, 0, 0, fmt.Errorf("argon-memory out of range (max %d MiB)", maxArgonMemory/kibPerMiB)
+	}
+	if argonTh > maxThreadLimit {
+		return 0, 0, 0, 0, fmt.Errorf("argon-threads out of range (max %d)", maxThreadLimit)
+	}
+	if chunkSz > maxChunkSize {
+		return 0, 0, 0, 0, fmt.Errorf("chunk-size out of range (max %d bytes)", maxChunkSize)
+	}
+	return uint32(argonT), uint32(argonM) * kibPerMiB, uint8(argonTh), uint32(chunkSz), nil
+}
+
+func readPasswordConfirm(prompt, confirmPrompt string) ([]byte, error) {
+	pw, err := readPasswordPrompt(prompt)
+	if err != nil {
+		return nil, err
+	}
+	confirm, err := readPasswordPrompt(confirmPrompt)
+	if err != nil {
+		secureZero(pw)
+		return nil, err
+	}
+	if !secureCompare(pw, confirm) {
+		secureZero(pw)
+		secureZero(confirm)
+		return nil, errors.New("passwords do not match")
+	}
+	secureZero(confirm)
+	return pw, nil
+}
+
+// validatePaths validates the output path and rejects operations where the
+// input and output resolve to the same file, which would destroy the input.
+func validatePaths(inPath, outPath string, allowAbsolute bool) (string, string, error) {
+	if strings.IndexByte(inPath, 0) != -1 || strings.IndexByte(outPath, 0) != -1 {
+		return "", "", errors.New("invalid path: null byte")
+	}
+	if inPath == "" || outPath == "" {
+		return "", "", errors.New("input and output paths cannot be empty")
+	}
+
+	safeOut, err := safeOutputPath(outPath, allowAbsolute)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid output path: %w", err)
+	}
+	absIn, err := filepath.Abs(filepath.Clean(inPath))
+	if err != nil {
+		return "", "", fmt.Errorf("cannot resolve input path: %w", err)
+	}
+
+	samePath := absIn == safeOut
+	if runtime.GOOS == targetOS {
+		samePath = strings.EqualFold(absIn, safeOut)
+	}
+	if samePath {
+		return "", "", errors.New("input and output paths must differ")
+	}
+	if inFi, statErr := os.Stat(absIn); statErr == nil {
+		if outFi, statErr2 := os.Stat(safeOut); statErr2 == nil && os.SameFile(inFi, outFi) {
+			return "", "", errors.New("input and output paths must differ")
+		}
+	}
+	return absIn, safeOut, nil
 }
 
 func printUsage() {
@@ -1544,137 +1722,4 @@ func printUsage() {
 	fmt.Println("  chachacrypt decrypt [options] <input> <output>")
 	fmt.Println("  chachacrypt rotate  [options] <input> <output>")
 	fmt.Println("Use subcommands with -h for detailed options.")
-}
-
-/*** Unit Tests ***/
-
-func TestPasswordValidation(t *testing.T) {
-	if err := validatePasswordStrength([]byte("Short1!")); err == nil {
-		t.Error("expected error for short password")
-	}
-	if err := validatePasswordStrength([]byte("alllowercasepassword123!")); err == nil {
-		t.Error("expected error for lacking complexity")
-	}
-	if err := validatePasswordStrength([]byte("Password12345!")); err == nil {
-		t.Error("expected error for common weak pattern")
-	}
-	if err := validatePasswordStrength([]byte("Correct-Horse-Battery-Staple-99!")); err != nil {
-		t.Errorf("unexpected error for strong password: %v", err)
-	}
-}
-
-func TestEncryptDecryptRoundtrip(t *testing.T) {
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-
-	inPath := filepath.Join(tmpDir, "plaintext.txt")
-	encPath := filepath.Join(tmpDir, "encrypted.enc")
-	decPath := filepath.Join(tmpDir, "decrypted.txt")
-
-	originalData := []byte("Hello, ChaChaCrypt secure world! This is a comprehensive test of chunked AEAD encryption.")
-	if err := os.WriteFile(inPath, originalData, 0600); err != nil {
-		t.Fatalf("failed to write test input: %v", err)
-	}
-
-	password := []byte("StrongP@ssw0rd2026!")
-
-	err := encryptFile(ctx, inPath, encPath, password, minArgonTime, minArgonMemory, minArgonThreads, defaultChunkSize, true, false)
-	if err != nil {
-		t.Fatalf("encryption failed: %v", err)
-	}
-
-	err = decryptFile(ctx, encPath, decPath, password, true, false)
-	if err != nil {
-		t.Fatalf("decryption failed: %v", err)
-	}
-
-	decryptedData, err := os.ReadFile(decPath)
-	if err != nil {
-		t.Fatalf("failed to read decrypted file: %v", err)
-	}
-
-	if !bytes.Equal(originalData, decryptedData) {
-		t.Errorf("decrypted data does not match original: got %q, want %q", decryptedData, originalData)
-	}
-}
-
-func TestTamperedHeader(t *testing.T) {
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-
-	inPath := filepath.Join(tmpDir, "plaintext.txt")
-	encPath := filepath.Join(tmpDir, "encrypted.enc")
-	decPath := filepath.Join(tmpDir, "decrypted.txt")
-
-	if err := os.WriteFile(inPath, []byte("Secret data"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	password := []byte("StrongP@ssw0rd2026!")
-	if err := encryptFile(ctx, inPath, encPath, password, minArgonTime, minArgonMemory, minArgonThreads, defaultChunkSize, true, false); err != nil {
-		t.Fatal(err)
-	}
-
-	data, err := os.ReadFile(encPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data[20] ^= 0xFF
-
-	if err := os.WriteFile(encPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := decryptFile(ctx, encPath, decPath, password, true, false); err == nil {
-		t.Error("expected error when decrypting file with tampered header, got nil")
-	}
-}
-
-func TestKeyRotation(t *testing.T) {
-	ctx := context.Background()
-	tmpDir := t.TempDir()
-
-	inPath := filepath.Join(tmpDir, "plaintext.txt")
-	encPath1 := filepath.Join(tmpDir, "encrypted1.enc")
-	encPath2 := filepath.Join(tmpDir, "encrypted2.enc")
-	decPath := filepath.Join(tmpDir, "decrypted.txt")
-
-	originalData := []byte("Data for key rotation test.")
-	if err := os.WriteFile(inPath, originalData, 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	oldPass := []byte("OldStrongP@ss1!")
-	newPass := []byte("NewStrongP@ss2!")
-
-	if err := encryptFile(ctx, inPath, encPath1, oldPass, minArgonTime, minArgonMemory, minArgonThreads, defaultChunkSize, true, false); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := rotateFile(ctx, encPath1, encPath2, oldPass, newPass, minArgonTime, minArgonMemory, minArgonThreads, true, false); err != nil {
-		t.Fatalf("rotation failed: %v", err)
-	}
-
-	if err := decryptFile(ctx, encPath2, decPath, oldPass, true, false); err == nil {
-		t.Error("expected decryption to fail with old password after rotation")
-	}
-
-	if err := decryptFile(ctx, encPath2, decPath, newPass, true, false); err != nil {
-		t.Fatalf("decryption with new password failed: %v", err)
-	}
-
-	decryptedData, err := os.ReadFile(decPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(originalData, decryptedData) {
-		t.Errorf("rotated decrypted data mismatch: got %q, want %q", decryptedData, originalData)
-	}
-}
-
-func TestPathSafety(t *testing.T) {
-	_, err := safeOutputPath("../outside.txt", false)
-	if err == nil {
-		t.Error("expected error for path traversal reference")
-	}
 }
