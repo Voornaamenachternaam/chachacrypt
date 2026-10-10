@@ -67,17 +67,17 @@ const (
 	secureDirPerms  = 0o700 // Owner rwx only on Unix
 
 	// Linter/Magic Number constants.
-	maxASCIIValue         = 127
-	maxConsecutiveChars   = 4
-	minComplexityGroups   = 3
-	maxArgonTimeLimit     = 1024
-	maxThreadLimit        = 64
-	maxPathLength         = 4096
-	maxPathComponentLen   = 255
-	hexShift              = 4
-	hexBase               = 10
-	randomSuffixLen       = 8
-	targetOS              = "windows"
+	maxASCIIValue       = 127
+	maxConsecutiveChars = 4
+	minComplexityGroups = 3
+	maxArgonTimeLimit   = 1024
+	maxThreadLimit      = 64
+	maxPathLength       = 4096
+	maxPathComponentLen = 255
+	hexShift            = 4
+	hexBase             = 10
+	randomSuffixLen     = 8
+	targetOS            = "windows"
 )
 
 const headerTotalSize = magicLen + 2 + 4 + 8 + 4 + 4 + 1 + saltSize + 4 + 2 + reservedLen + headerMACSize
@@ -96,7 +96,7 @@ const (
 
 	// Validation bounds.
 	minArgonTime    = 2
-	minArgonMemory  = 64 * 1024  // 64 MiB minimum
+	minArgonMemory  = 64 * 1024   // 64 MiB minimum
 	maxArgonMemory  = 1024 * 1024 // 1 GiB maximum
 	minArgonThreads = 1
 )
@@ -1364,13 +1364,13 @@ func main() {
 	rotateCmd := flag.NewFlagSet("rotate", flag.ExitOnError)
 
 	var (
-		pass     = encryptCmd.String("p", "", "Password (if empty, prompted securely)")
-		force    = encryptCmd.Bool("f", false, "Overwrite output file if it exists")
-		verbose  = encryptCmd.Bool("v", false, "Enable verbose output")
-		argonT   = encryptCmd.Uint("argon-time", defaultArgonTime, "Argon2 time cost iterations")
-		argonM   = encryptCmd.Uint("argon-memory", defaultArgonMemory/1024, "Argon2 memory cost in MiB")
-		argonTh  = encryptCmd.Uint("argon-threads", defaultArgonThreads, "Argon2 parallelism threads")
-		chunkSz  = encryptCmd.Uint("chunk-size", defaultChunkSize, "Chunk size in bytes")
+		pass    = encryptCmd.String("p", "", "Password (if empty, prompted securely)")
+		force   = encryptCmd.Bool("f", false, "Overwrite output file if it exists")
+		verbose = encryptCmd.Bool("v", false, "Enable verbose output")
+		argonT  = encryptCmd.Uint("argon-time", defaultArgonTime, "Argon2 time cost iterations")
+		argonM  = encryptCmd.Uint("argon-memory", defaultArgonMemory/1024, "Argon2 memory cost in MiB")
+		argonTh = encryptCmd.Uint("argon-threads", defaultArgonThreads, "Argon2 parallelism threads")
+		chunkSz = encryptCmd.Uint("chunk-size", defaultChunkSize, "Chunk size in bytes")
 
 		dPass    = decryptCmd.String("p", "", "Password (if empty, prompted securely)")
 		dForce   = decryptCmd.Bool("f", false, "Overwrite output file if it exists")
